@@ -77,23 +77,31 @@ async def test_openai_provider_requires_key_and_uses_responses_api() -> None:
     class FakeResponsesAPI:
         async def create(self, **kwargs: Any) -> Any:
             captured.append({"method": "create", "kwargs": kwargs})
-            return SimpleNamespace(
-                id="resp_text_1",
-                output_text="hello world",
-                usage=SimpleNamespace(input_tokens=10, output_tokens=5, total_tokens=15),
-            )
-
-        async def parse(self, **kwargs: Any) -> Any:
-            captured.append({"method": "parse", "kwargs": kwargs})
-            if len(captured) == 2:
-                raise openai.APITimeoutError(
-                    request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+            if "text" in kwargs:
+                if len(captured) == 2:
+                    raise openai.APITimeoutError(
+                        request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+                    )
+                return SimpleNamespace(
+                    id="resp_parse_1",
+                    model="test-openai-model",
+                    status="completed",
+                    incomplete_details=None,
+                    output_text='{"answer":"parsed","score":9}',
+                    usage=SimpleNamespace(
+                        input_tokens=20,
+                        output_tokens=8,
+                        output_tokens_details=SimpleNamespace(reasoning_tokens=3),
+                        input_tokens_details=SimpleNamespace(cached_tokens=5),
+                        total_tokens=28,
+                    ),
                 )
             return SimpleNamespace(
-                id="resp_parse_1",
-                output_text='{"answer":"parsed","score":9}',
-                output_parsed=SampleAnswer(answer="parsed", score=9),
-                usage=SimpleNamespace(input_tokens=20, output_tokens=8, total_tokens=28),
+                id="resp_text_1",
+                model="test-openai-model",
+                status="completed",
+                output_text="hello world",
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5, total_tokens=15),
             )
 
     fake_client = SimpleNamespace(responses=FakeResponsesAPI())
@@ -112,16 +120,24 @@ async def test_openai_provider_requires_key_and_uses_responses_api() -> None:
     struct_res = await provider.generate_structured("return json", SampleAnswer)
     assert struct_res.parsed == SampleAnswer(answer="parsed", score=9)
     assert struct_res.usage.retries == 1
-    assert captured[1]["kwargs"]["text_format"] is SampleAnswer
+    assert struct_res.usage.reasoning_tokens == 3
+    assert struct_res.usage.cached_input_tokens == 5
+    # Reasoning tokens (3) are already included in output_tokens (8) -> total is 28, not 31
+    assert struct_res.usage.total_tokens == 28
+    fmt = captured[1]["kwargs"]["text"]["format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["strict"] is True
 
 
 async def test_openai_provider_invalid_structured_output() -> None:
     class BadResponsesAPI:
-        async def parse(self, **_kwargs: Any) -> Any:
+        async def create(self, **_kwargs: Any) -> Any:
             return SimpleNamespace(
                 id="resp_bad",
+                model="test-openai-model",
+                status="completed",
+                incomplete_details=None,
                 output_text='{"answer": "missing score"}',
-                output_parsed=None,
                 usage=SimpleNamespace(input_tokens=10, output_tokens=4, total_tokens=14),
             )
 
@@ -131,8 +147,97 @@ async def test_openai_provider_invalid_structured_output() -> None:
         max_retries=0,
         client=SimpleNamespace(responses=BadResponsesAPI()),  # type: ignore[arg-type]
     )
-    with pytest.raises(ProviderResponseError, match="validation failed"):
+    with pytest.raises(ProviderResponseError, match="validation failed") as exc_info:
         await provider.generate_structured("bad", SampleAnswer)
+    assert exc_info.value.usage is not None
+    assert exc_info.value.usage.input_tokens == 10
+    assert exc_info.value.usage.output_tokens == 4
+    assert exc_info.value.billing_outcome == "billed"
+
+
+async def test_openai_provider_incomplete_refusal_and_missing_usage() -> None:
+    """Verify responses.create preserves usage on incomplete, refusal, and missing-usage."""
+
+    class IncompleteAPI:
+        async def create(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                id="resp_inc",
+                model="gpt-6-luna",
+                status="incomplete",
+                incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                output_text='{"answer": "trunc',
+                usage=SimpleNamespace(
+                    input_tokens=100,
+                    output_tokens=2560,
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=1800),
+                    total_tokens=2660,
+                ),
+            )
+
+    p_inc = OpenAIProvider(
+        model="gpt-6-luna",
+        api_key="test-key",
+        max_retries=0,
+        client=SimpleNamespace(responses=IncompleteAPI()),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ProviderResponseError, match="max_output_tokens") as e_inc:
+        await p_inc.generate_structured("q", SampleAnswer, max_output_tokens=2560)
+    assert e_inc.value.code == "truncated_response"
+    assert e_inc.value.billing_outcome == "billed"
+    assert e_inc.value.usage is not None
+    assert e_inc.value.usage.output_tokens == 2560
+    assert e_inc.value.usage.reasoning_tokens == 1800
+    assert e_inc.value.usage.total_tokens == 2660
+
+    class RefusalAPI:
+        async def create(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                id="resp_ref",
+                model="gpt-6-luna",
+                status="completed",
+                incomplete_details=None,
+                output=[
+                    SimpleNamespace(
+                        content=[SimpleNamespace(type="refusal", refusal="Policy refusal.")]
+                    )
+                ],
+                output_text="",
+                usage=SimpleNamespace(input_tokens=50, output_tokens=12, total_tokens=62),
+            )
+
+    p_ref = OpenAIProvider(
+        model="gpt-6-luna",
+        api_key="test-key",
+        max_retries=0,
+        client=SimpleNamespace(responses=RefusalAPI()),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ProviderResponseError, match="refused") as e_ref:
+        await p_ref.generate_structured("q", SampleAnswer)
+    assert e_ref.value.code == "refusal"
+    assert e_ref.value.billing_outcome == "billed"
+    assert e_ref.value.usage is not None
+    assert e_ref.value.usage.output_tokens == 12
+
+    class NoUsageAPI:
+        async def create(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                id="resp_nousage",
+                model="gpt-6-luna",
+                status="completed",
+                incomplete_details=None,
+                output_text='{"answer": "bad"}',
+                usage=None,
+            )
+
+    p_no = OpenAIProvider(
+        model="gpt-6-luna",
+        api_key="test-key",
+        max_retries=0,
+        client=SimpleNamespace(responses=NoUsageAPI()),  # type: ignore[arg-type]
+    )
+    with pytest.raises(ProviderResponseError) as e_no:
+        await p_no.generate_structured("q", SampleAnswer)
+    assert e_no.value.billing_outcome == "unknown"
 
 
 async def test_ollama_provider_chat_structured_and_errors() -> None:

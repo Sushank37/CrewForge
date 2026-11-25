@@ -20,6 +20,11 @@ CrewForge is a model-agnostic, self-assembling multi-agent intelligence network 
 - **Small-Model Profile & Deterministic Arithmetic Parity:**
   - Compact profile for Apple Silicon M1 (concurrency 1, max 2 workers, max 3 tasks, ~4096 context).
   - Parity arithmetic tool resolving variables to exact prompt/evidence spans with AST literal verification.
+- **Reasoning-Aware Cloud Profile & Failed-Call Reconciliation (`providers/openai_provider.py`, `core/budget.py`):**
+  - Explicit `CrewForgeSettings.for_cloud_reasoning_profile()` (`8192` global/worker/revision, `6144` planner/review/synthesis) prevents reasoning-token starvation without clamping operation-specific limits or altering Ollama's local profile.
+  - `OpenAIProvider.generate_structured` uses `responses.create` with strict JSON Schema (`to_strict_json_schema`) to capture `provider_response_id`, `response_status`, `incomplete_reason`, `reasoning_tokens`, and `cached_input_tokens` before validation.
+  - Failed structured calls with known usage (e.g., `incomplete` at `max_output_tokens`, refusal, or `ValidationError`) reconcile exact cost (`status="reconciled"`, `outcome="failed"`) without incrementing `successful_operations`.
+  - Accurate `stages_executed` and `stage_telemetry` reflect persisted work rather than feature flags.
 - **MCP Server (`FastMCP`) & CLI:** Exposes `solve(prompt)`, `baseline(prompt)`, and `trace(run_id)` over `stdio` (`stderr`-only logging) and localhost `streamable-http`.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md) for full details.

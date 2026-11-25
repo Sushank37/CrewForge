@@ -741,21 +741,39 @@ class BudgetManager:
         reservation: BudgetReservation,
         *,
         billing_known_unbilled: bool,
+        usage: UsageMetrics | None = None,
         retries: int = 0,
         latency_ms: float = 0.0,
         operation: str = "generate",
         reason: str = "",
     ) -> None:
-        """Reconcile a failed or cancelled attempt conservatively.
+        """Reconcile a failed or cancelled attempt.
 
-        When billing outcome is unknown, full reserved cost is retained against
-        both run and cumulative caps. Released unbilled calls still count toward
-        dispatched model-call limits.
+        - If billing is known unbilled: releases reservation ($0.00).
+        - If actual provider usage is reported on the failed call: reconciles exact
+          token counts and monetary cost while keeping outcome='failed' (never
+          incrementing successful_operations).
+        - If usage is unavailable: conservatively retains reserved cost as unknown.
         """
+        in_tok = 0
+        out_tok = 0
+        tot_tok = 0
         if billing_known_unbilled:
             status = "released"
             actual_cost = 0.0
             outcome = "failed"
+        elif usage is not None and usage.usage_reported:
+            status = "reconciled"
+            actual_cost, _ = self.compute_actual_cost_usd(
+                model=reservation.model,
+                is_paid_provider=reservation.is_paid_provider,
+                usage=usage,
+                reserved_cost_usd=reservation.reserved_cost_usd,
+            )
+            outcome = "failed"
+            in_tok = usage.input_tokens
+            out_tok = usage.output_tokens
+            tot_tok = usage.total_tokens
         else:
             status = "unknown"
             actual_cost = reservation.reserved_cost_usd
@@ -770,9 +788,9 @@ class BudgetManager:
             operation=operation,
             status=status,
             actual_cost_usd=actual_cost,
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            total_tokens=tot_tok,
             estimated_cost_usd=reservation.reserved_cost_usd,
             retries=retries,
             latency_ms=latency_ms,

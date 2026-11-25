@@ -82,8 +82,7 @@ class ModelExecutor:
         run_deadline_monotonic: float | None = None,
     ) -> StructuredGenerationResult[T]:
         """Run a structured generation call with per-attempt reservation and bounded retries."""
-        requested_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
-        bounded_out = min(requested_out, self._settings.max_output_tokens)
+        bounded_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
         max_retries = self._settings.max_retries
 
         attempt_index = 0
@@ -113,6 +112,7 @@ class ModelExecutor:
                         "reserved_cost_usd": reservation.reserved_cost_usd,
                         "estimated_input_tokens": reservation.estimated_input_tokens,
                         "max_output_tokens": reservation.max_output_tokens,
+                        "effective_max_output_tokens": bounded_out,
                     },
                 )
             )
@@ -174,9 +174,14 @@ class ModelExecutor:
                             "returned_model": response.returned_model,
                             "input_tokens": reconciled_usage.input_tokens,
                             "output_tokens": reconciled_usage.output_tokens,
+                            "reasoning_tokens": reconciled_usage.reasoning_tokens,
+                            "cached_input_tokens": reconciled_usage.cached_input_tokens,
                             "total_tokens": reconciled_usage.total_tokens,
                             "actual_cost_usd": reconciled_usage.actual_cost_usd,
                             "usage_reported": reconciled_usage.usage_reported,
+                            "provider_response_id": reconciled_usage.provider_response_id,
+                            "response_status": reconciled_usage.response_status,
+                            "effective_max_output_tokens": bounded_out,
                             "latency_ms": reconciled_usage.latency_ms,
                         },
                     )
@@ -251,6 +256,7 @@ class ModelExecutor:
                 await self._budget.reconcile_failure(
                     reservation,
                     billing_known_unbilled=(err.billing_outcome == "unbilled"),
+                    usage=err.usage,
                     retries=attempt_index,
                     latency_ms=elapsed_ms,
                     operation=operation,
@@ -266,6 +272,7 @@ class ModelExecutor:
                             **err.to_dict(),
                             "operation": operation,
                             "attempt": attempt_index + 1,
+                            "effective_max_output_tokens": bounded_out,
                         },
                     )
                 )
@@ -321,8 +328,7 @@ class ModelExecutor:
         run_deadline_monotonic: float | None = None,
     ) -> TextGenerationResult:
         """Run an unstructured text generation call with per-attempt reservation."""
-        requested_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
-        bounded_out = min(requested_out, self._settings.max_output_tokens)
+        bounded_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
         max_retries = self._settings.max_retries
 
         attempt_index = 0
@@ -401,6 +407,7 @@ class ModelExecutor:
                 await self._budget.reconcile_failure(
                     reservation,
                     billing_known_unbilled=(err.billing_outcome == "unbilled"),
+                    usage=err.usage,
                     retries=attempt_index,
                     latency_ms=elapsed_ms,
                     operation=operation,

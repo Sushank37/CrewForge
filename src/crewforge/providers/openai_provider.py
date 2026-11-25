@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 
 import openai
 from openai import AsyncOpenAI
+from openai.lib._pydantic import to_strict_json_schema
 from pydantic import BaseModel, ValidationError
 
 from crewforge.config import CrewForgeSettings, ProviderType
@@ -204,17 +205,27 @@ class OpenAIProvider(ModelProvider):
         fallback_model: str | None = None,
     ) -> UsageMetrics:
         returned_model = getattr(response, "model", None) or fallback_model
+        resp_id = getattr(response, "id", None)
+        resp_status = getattr(response, "status", None)
+        inc_details = getattr(response, "incomplete_details", None)
+        inc_reason = getattr(inc_details, "reason", None) if inc_details is not None else None
+
         usage_obj = getattr(response, "usage", None)
         if usage_obj is None:
             return UsageMetrics(
                 input_tokens=0,
                 output_tokens=0,
+                reasoning_tokens=0,
+                cached_input_tokens=0,
                 total_tokens=0,
                 model_calls=1,
                 retries=retries,
                 latency_ms=latency_ms,
                 usage_reported=False,
                 returned_model=returned_model,
+                provider_response_id=resp_id,
+                response_status=resp_status,
+                incomplete_reason=inc_reason,
             )
 
         raw_in = getattr(usage_obj, "input_tokens", None)
@@ -223,16 +234,32 @@ class OpenAIProvider(ModelProvider):
         raw_out = getattr(usage_obj, "output_tokens", None)
         if raw_out is None:
             raw_out = getattr(usage_obj, "completion_tokens", None)
+
+        out_details = getattr(usage_obj, "output_tokens_details", None)
+        if out_details is None:
+            out_details = getattr(usage_obj, "completion_tokens_details", None)
+        reasoning_tokens = int(getattr(out_details, "reasoning_tokens", 0) or 0)
+
+        in_details = getattr(usage_obj, "input_tokens_details", None)
+        if in_details is None:
+            in_details = getattr(usage_obj, "prompt_tokens_details", None)
+        cached_tokens = int(getattr(in_details, "cached_tokens", 0) or 0)
+
         if raw_in is None or raw_out is None:
             return UsageMetrics(
                 input_tokens=int(raw_in or 0),
                 output_tokens=int(raw_out or 0),
+                reasoning_tokens=reasoning_tokens,
+                cached_input_tokens=cached_tokens,
                 total_tokens=int(getattr(usage_obj, "total_tokens", 0) or 0),
                 model_calls=1,
                 retries=retries,
                 latency_ms=latency_ms,
                 usage_reported=False,
                 returned_model=returned_model,
+                provider_response_id=resp_id,
+                response_status=resp_status,
+                incomplete_reason=inc_reason,
             )
 
         input_tokens = int(raw_in)
@@ -242,13 +269,42 @@ class OpenAIProvider(ModelProvider):
         return UsageMetrics(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
+            cached_input_tokens=cached_tokens,
             total_tokens=max(total_tokens, input_tokens + output_tokens),
             model_calls=1,
             retries=retries,
             latency_ms=latency_ms,
             usage_reported=True,
             returned_model=returned_model,
+            provider_response_id=resp_id,
+            response_status=resp_status,
+            incomplete_reason=inc_reason,
         )
+
+    @staticmethod
+    def _extract_refusal(response: Any) -> str | None:
+        for item in getattr(response, "output", None) or []:
+            for content in getattr(item, "content", None) or []:
+                c_type = getattr(content, "type", None)
+                refusal = getattr(content, "refusal", None)
+                if c_type == "refusal" or (isinstance(refusal, str) and refusal.strip()):
+                    return str(refusal or "Model refused request.").strip()
+        return None
+
+    @staticmethod
+    def _extract_output_text(response: Any) -> str:
+        direct = getattr(response, "output_text", None)
+        if isinstance(direct, str) and direct.strip():
+            return direct
+        parts: list[str] = []
+        for item in getattr(response, "output", None) or []:
+            for content in getattr(item, "content", None) or []:
+                if getattr(content, "type", None) == "output_text":
+                    txt = getattr(content, "text", None)
+                    if isinstance(txt, str) and txt:
+                        parts.append(txt)
+        return "".join(parts)
 
     def _build_common_kwargs(
         self,
@@ -417,6 +473,7 @@ class OpenAIProvider(ModelProvider):
             )
             choices = getattr(response, "choices", None) or []
             raw_text = getattr(choices[0].message, "content", "") if choices else ""
+            usage = self._extract_usage(response, retries, latency_ms, fallback_model=self._model)
             try:
                 parsed = response_model.model_validate_json(raw_text)
             except ValidationError as exc:
@@ -426,9 +483,10 @@ class OpenAIProvider(ModelProvider):
                     code="validation_error",
                     provider=self.provider_name,
                     model=self._model,
+                    billing_outcome="billed" if usage.usage_reported else "unknown",
                     retries_attempted=retries,
+                    usage=usage,
                 ) from exc
-            usage = self._extract_usage(response, retries, latency_ms, fallback_model=self._model)
             return StructuredGenerationResult[T](
                 provider=self.provider_name,
                 model=self._model,
@@ -439,17 +497,26 @@ class OpenAIProvider(ModelProvider):
                 raw_response_id=getattr(response, "id", None),
             )
 
+        effective_max_out = max_output_tokens or self._default_max_output_tokens
         kwargs = self._build_common_kwargs(
             prompt=prompt,
             system_prompt=system_prompt,
-            max_output_tokens=max_output_tokens,
+            max_output_tokens=effective_max_out,
             temperature=temperature,
         )
-        kwargs["text_format"] = response_model
+        strict_schema = to_strict_json_schema(response_model)
+        kwargs["text"] = {
+            "format": {
+                "type": "json_schema",
+                "name": response_model.__name__,
+                "schema": strict_schema,
+                "strict": True,
+            }
+        }
 
         async def _call() -> Any:
             try:
-                return await self._client.responses.parse(**kwargs)
+                return await self._client.responses.create(**kwargs)
             except Exception as exc:
                 raise self._translate_sdk_error(exc) from exc
 
@@ -461,40 +528,73 @@ class OpenAIProvider(ModelProvider):
             max_retries=retries_cap,
         )
 
-        raw_text = getattr(response, "output_text", "") or ""
-        parsed = getattr(response, "output_parsed", None)
-        if parsed is None:
-            if not raw_text.strip():
-                raise ProviderResponseError(
-                    "OpenAI Responses API returned neither output_parsed nor output_text.",
-                    code="invalid_response",
-                    provider=self.provider_name,
-                    model=self._model,
-                    retries_attempted=retries,
-                )
-            try:
-                parsed = response_model.model_validate_json(raw_text)
-            except ValidationError as exc:
-                raise ProviderResponseError(
-                    f"Structured output validation failed for {response_model.__name__}: {exc}",
-                    code="validation_error",
-                    provider=self.provider_name,
-                    model=self._model,
-                    retries_attempted=retries,
-                ) from exc
-        elif not isinstance(parsed, response_model):
-            try:
-                parsed = response_model.model_validate(parsed)
-            except ValidationError as exc:
-                raise ProviderResponseError(
-                    f"Parsed output type mismatch for {response_model.__name__}: {exc}",
-                    code="validation_error",
-                    provider=self.provider_name,
-                    model=self._model,
-                    retries_attempted=retries,
-                ) from exc
-
+        # Extract usage and response metadata BEFORE attempting schema parsing.
         usage = self._extract_usage(response, retries, latency_ms, fallback_model=self._model)
+        meta: dict[str, Any] = {
+            "provider_response_id": usage.provider_response_id,
+            "returned_model": usage.returned_model,
+            "response_status": usage.response_status,
+            "incomplete_reason": usage.incomplete_reason,
+            "configured_max_output_tokens": effective_max_out,
+        }
+        billing_state = "billed" if usage.usage_reported else "unknown"
+
+        refusal_msg = self._extract_refusal(response)
+        if refusal_msg or usage.incomplete_reason == "content_filter":
+            raise ProviderResponseError(
+                f"OpenAI refused or filtered structured output: {refusal_msg or 'content_filter'}",
+                code="refusal",
+                provider=self.provider_name,
+                model=self._model,
+                billing_outcome=billing_state,
+                retries_attempted=retries,
+                usage=usage,
+                response_metadata={**meta, "validation_outcome": "refusal"},
+            )
+
+        if usage.response_status == "incomplete":
+            reason = usage.incomplete_reason or "incomplete"
+            raise ProviderResponseError(
+                f"OpenAI structured response incomplete (reason={reason}, "
+                f"max_output_tokens={effective_max_out}).",
+                code="truncated_response"
+                if reason == "max_output_tokens"
+                else "incomplete_response",
+                provider=self.provider_name,
+                model=self._model,
+                billing_outcome=billing_state,
+                retries_attempted=retries,
+                usage=usage,
+                response_metadata={**meta, "validation_outcome": f"incomplete:{reason}"},
+            )
+
+        raw_text = self._extract_output_text(response)
+        if not raw_text.strip():
+            raise ProviderResponseError(
+                "OpenAI Responses API returned empty structured output_text.",
+                code="invalid_response",
+                provider=self.provider_name,
+                model=self._model,
+                billing_outcome=billing_state,
+                retries_attempted=retries,
+                usage=usage,
+                response_metadata={**meta, "validation_outcome": "empty_output"},
+            )
+
+        try:
+            parsed = response_model.model_validate_json(raw_text)
+        except ValidationError as exc:
+            raise ProviderResponseError(
+                f"Structured output validation failed for {response_model.__name__}: {exc}",
+                code="validation_error",
+                provider=self.provider_name,
+                model=self._model,
+                billing_outcome=billing_state,
+                retries_attempted=retries,
+                usage=usage,
+                response_metadata={**meta, "validation_outcome": "schema_validation_failed"},
+            ) from exc
+
         logger.debug(
             "OpenAI structured call succeeded (model=%s, returned=%s, retries=%d)",
             self._model,
@@ -508,5 +608,5 @@ class OpenAIProvider(ModelProvider):
             raw_text=raw_text or parsed.model_dump_json(),
             parsed=parsed,
             usage=usage,
-            raw_response_id=getattr(response, "id", None),
+            raw_response_id=usage.provider_response_id,
         )

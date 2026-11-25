@@ -160,6 +160,7 @@ class CrewForgeSettings(BaseSettings):
     phase5_same_model_budget_cap_usd: float = Field(default=0.75, ge=0.0)
     david_vs_goliath_budget_cap_usd: float = Field(default=1.10, ge=0.0)
     small_model_profile: bool = False
+    cloud_reasoning_profile: bool = False
 
     pricing_json: dict[str, ModelPricing] = Field(default_factory=dict)
 
@@ -269,7 +270,7 @@ class CrewForgeSettings(BaseSettings):
         return self.max_revision_rounds
 
     def output_limit_for_operation(self, operation: str) -> int:
-        """Return bounded output-token limit for a given operation."""
+        """Return output-token limit for a given operation without silent global clamping."""
         override: int | None = None
         if operation in {"planner", "plan_repair"}:
             override = self.planner_max_output_tokens
@@ -281,9 +282,33 @@ class CrewForgeSettings(BaseSettings):
             override = self.revision_max_output_tokens
         elif operation == "synthesis":
             override = self.synthesis_max_output_tokens
-        if override is None:
-            return self.max_output_tokens
-        return min(override, self.max_output_tokens)
+        if override is not None:
+            return override
+        return self.max_output_tokens
+
+    @classmethod
+    def for_cloud_reasoning_profile(cls, **overrides: Any) -> CrewForgeSettings:
+        """Construct explicit reasoning-aware cloud profile for gpt-6-luna."""
+        defaults: dict[str, Any] = {
+            "provider": ProviderType.OPENAI,
+            "model": "gpt-6-luna",
+            "openai_reasoning_effort": "low",
+            "cloud_reasoning_profile": True,
+            "max_output_tokens": 8192,
+            "planner_max_output_tokens": 6144,
+            "worker_max_output_tokens": 8192,
+            "review_max_output_tokens": 6144,
+            "revision_max_output_tokens": 8192,
+            "synthesis_max_output_tokens": 6144,
+            "max_concurrency": 3,
+            "max_retries": 0,
+            "max_model_calls_per_run": 16,
+            "max_cost_per_run_usd": 0.025,
+            "request_timeout_seconds": 180.0,
+            "run_deadline_seconds": 480.0,
+        }
+        defaults.update(overrides)
+        return cls(**defaults)
 
     def get_model_pricing(self, model: str) -> ModelPricing | None:
         """Return configured pricing for a model, or default pricing, or None if unknown."""

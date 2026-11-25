@@ -306,7 +306,6 @@ class NetworkRunner:
                 run_deadline_monotonic=run_deadline_monotonic,
             )
 
-            stages_executed: list[str] = ["planner", "dag_workers"]
             if self._settings.enable_peer_messaging:
                 (
                     followup_uncertainties,
@@ -319,7 +318,6 @@ class NetworkRunner:
                     tasks_by_id=sched_outcome.tasks_by_id,  # type: ignore[arg-type]
                     run_deadline_monotonic=run_deadline_monotonic,
                 )
-                stages_executed.append("peer_messaging")
             else:
                 followup_uncertainties = []
                 msg_deadline = False
@@ -349,6 +347,7 @@ class NetworkRunner:
                 self._graph.validate_graph(all_claims_pre_review, run_id=resolved_run_id)
 
             # Independent adversarial review & targeted dispute resolution.
+            review_outcome = None
             if self._settings.enable_independent_review:
                 review_outcome = await self._reviewer.review_claims(
                     run_id=resolved_run_id,
@@ -356,7 +355,6 @@ class NetworkRunner:
                     plan=plan,
                     run_deadline_monotonic=run_deadline_monotonic,
                 )
-                stages_executed.append("independent_review")
                 if review_outcome.blocking_claims:
                     if self._settings.enable_targeted_repair:
                         await self._repair.resolve_disputes(
@@ -367,7 +365,6 @@ class NetworkRunner:
                             verdicts=review_outcome.verdicts,
                             run_deadline_monotonic=run_deadline_monotonic,
                         )
-                        stages_executed.append("targeted_repair")
                     else:
                         await self._db.append_event(
                             ExecutionEvent(
@@ -389,22 +386,108 @@ class NetworkRunner:
                     )
                 )
 
+            trace_snapshot = await self._db.get_run_trace(resolved_run_id)
+            assert trace_snapshot is not None
+            final_tasks = list(sched_outcome.tasks_by_id.values())
+            completed_tasks = [t for t in final_tasks if t.status == TaskStatus.COMPLETED]
+            incomplete_tasks = [t for t in final_tasks if t.status != TaskStatus.COMPLETED]
+
+            # Build accurate stage telemetry from persisted execution artifacts.
+            delivered_msgs = sum(
+                1 for m in trace_snapshot.messages if m.delivery_status != "pending"
+            )
+            followup_calls = sum(
+                1
+                for ev in trace_snapshot.events
+                if ev.event_type == "budget_reserved"
+                and ev.payload.get("operation") == "worker_followup"
+            )
+            review_calls = sum(
+                1
+                for ev in trace_snapshot.events
+                if ev.event_type == "budget_reserved"
+                and str(ev.payload.get("operation", "")).startswith("review")
+            )
+            revision_calls = sum(
+                1
+                for ev in trace_snapshot.events
+                if ev.event_type == "budget_reserved" and ev.payload.get("operation") == "revision"
+            )
+            accepted_revisions = sum(1 for c in trace_snapshot.claims if c.version > 1)
+
+            stages_executed: list[str] = ["planner", "dag_workers"]
+            if delivered_msgs > 0 or followup_calls > 0:
+                stages_executed.append("peer_messaging")
+            if review_calls > 0 or len(trace_snapshot.review_verdicts) > 0:
+                stages_executed.append("independent_review")
+            if revision_calls > 0 or accepted_revisions > 0:
+                stages_executed.append("targeted_repair")
             stages_executed.append("honesty_gate_and_synthesis")
+
+            stage_telemetry = {
+                "planner": {"configured": True, "status": "completed"},
+                "dag_workers": {
+                    "configured": True,
+                    "completed_tasks": len(completed_tasks),
+                    "failed_or_blocked_tasks": len(incomplete_tasks),
+                    "status": "completed" if completed_tasks else "failed",
+                },
+                "peer_messaging": {
+                    "configured": self._settings.enable_peer_messaging,
+                    "delivered_messages": delivered_msgs,
+                    "followup_calls": followup_calls,
+                    "status": (
+                        "completed"
+                        if (delivered_msgs > 0 or followup_calls > 0)
+                        else (
+                            "disabled"
+                            if not self._settings.enable_peer_messaging
+                            else "skipped_no_messages"
+                        )
+                    ),
+                },
+                "independent_review": {
+                    "configured": self._settings.enable_independent_review,
+                    "reviewer_calls": review_calls,
+                    "verdict_count": len(trace_snapshot.review_verdicts),
+                    "status": (
+                        "completed"
+                        if (review_calls > 0 or trace_snapshot.review_verdicts)
+                        else (
+                            "disabled"
+                            if not self._settings.enable_independent_review
+                            else "skipped_no_claims"
+                        )
+                    ),
+                },
+                "targeted_repair": {
+                    "configured": self._settings.enable_targeted_repair,
+                    "revision_attempts": revision_calls,
+                    "accepted_revisions": accepted_revisions,
+                    "status": (
+                        "completed"
+                        if (revision_calls > 0 or accepted_revisions > 0)
+                        else (
+                            "disabled"
+                            if not self._settings.enable_targeted_repair
+                            else "skipped_no_blocking_claims"
+                        )
+                    ),
+                },
+            }
+
             await self._db.append_event(
                 ExecutionEvent(
                     run_id=resolved_run_id,
                     event_type="stages_executed_summary",
                     actor="orchestrator",
                     message=f"Stages executed: {', '.join(stages_executed)}",
-                    payload={"stages_executed": stages_executed},
+                    payload={
+                        "stages_executed": stages_executed,
+                        "stage_telemetry": stage_telemetry,
+                    },
                 )
             )
-
-            trace_snapshot = await self._db.get_run_trace(resolved_run_id)
-            assert trace_snapshot is not None
-            final_tasks = list(sched_outcome.tasks_by_id.values())
-            completed_tasks = [t for t in final_tasks if t.status == TaskStatus.COMPLETED]
-            incomplete_tasks = [t for t in final_tasks if t.status != TaskStatus.COMPLETED]
             all_assumptions = list(dict.fromkeys([*plan.assumptions, *sched_outcome.assumptions]))
             all_missing = list(
                 dict.fromkeys([*plan.missing_information, *sched_outcome.missing_information])

@@ -96,6 +96,8 @@ class UsageMetrics(BaseModel):
 
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
     estimated_cost_usd: float = Field(default=0.0, ge=0.0)
     actual_cost_usd: float | None = Field(default=None, ge=0.0)
@@ -105,6 +107,9 @@ class UsageMetrics(BaseModel):
     latency_ms: float = Field(default=0.0, ge=0.0)
     usage_reported: bool = True
     returned_model: str | None = None
+    provider_response_id: str | None = None
+    response_status: str | None = None
+    incomplete_reason: str | None = None
 
     @model_validator(mode="after")
     def _normalize_and_validate_tokens(self) -> UsageMetrics:

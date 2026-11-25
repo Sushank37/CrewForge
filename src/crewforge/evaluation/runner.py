@@ -213,6 +213,11 @@ def _build_side_fingerprint(
     baseline_mode: str,
     ablation_variant: str,
 ) -> ExperimentFingerprint:
+    endpoint = (
+        settings.ollama_base_url
+        if settings.provider == ProviderType.OLLAMA
+        else (settings.openai_base_url or "https://api.openai.com/v1")
+    )
     return ExperimentFingerprint(
         manifest_hash=manifest_hash,
         prompt_hash=item.prompt_hash,
@@ -225,16 +230,32 @@ def _build_side_fingerprint(
             "arithmetic_tool": "DeterministicArithmeticTool",
             "http_retrieval": settings.enable_http_retrieval,
             "deterministic_fast_path": settings.enable_deterministic_synthesis_fast_path,
+            "provider_endpoint": endpoint,
         },
         baseline_mode=baseline_mode,
         ablation_variant=ablation_variant,
         runtime_limits={
+            "cloud_reasoning_profile": settings.cloud_reasoning_profile,
+            "small_model_profile": settings.small_model_profile,
             "max_output_tokens": settings.max_output_tokens,
+            "planner_max_output_tokens": settings.planner_max_output_tokens,
+            "worker_max_output_tokens": settings.worker_max_output_tokens,
+            "review_max_output_tokens": settings.review_max_output_tokens,
+            "revision_max_output_tokens": settings.revision_max_output_tokens,
+            "synthesis_max_output_tokens": settings.synthesis_max_output_tokens,
+            "effective_max_workers": settings.effective_max_workers,
+            "effective_max_tasks": settings.effective_max_tasks,
+            "effective_max_concurrency": settings.effective_max_concurrency,
             "max_model_calls_per_run": settings.max_model_calls_per_run,
             "max_cost_per_run_usd": settings.max_cost_per_run_usd,
+            "request_timeout_seconds": settings.request_timeout_seconds,
             "run_deadline_seconds": settings.run_deadline_seconds,
+            "max_retries": settings.max_retries,
+            "max_communication_rounds": settings.max_communication_rounds,
+            "max_revision_rounds": settings.effective_max_revision_rounds,
             "baseline_max_calls": settings.baseline_max_calls,
             "baseline_max_output_tokens": settings.baseline_max_output_tokens,
+            "baseline_max_refinement_rounds": settings.baseline_max_refinement_rounds,
             "enable_independent_review": settings.enable_independent_review,
             "enable_targeted_repair": settings.enable_targeted_repair,
             "enable_peer_messaging": settings.enable_peer_messaging,

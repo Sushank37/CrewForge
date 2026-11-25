@@ -1259,3 +1259,233 @@ def test_production_budget_ledger_isolated_from_tests() -> None:
     prod_auth = Path(".crewforge/budget_authority.db").resolve()
     assert settings.budget_authority_path.resolve() != prod_auth
     assert settings.allow_paid_runs is False
+
+
+def test_failed_call_reconciliation_with_known_usage_and_no_clamping(tmp_path: Path) -> None:
+    """Verify failed calls with known usage reconcile cost and operation limits aren't clamped."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from crewforge.config import ModelPricing, ProviderType
+    from crewforge.core.budget import BudgetManager
+    from crewforge.core.executor import ModelExecutor
+    from crewforge.providers.openai_provider import OpenAIProvider
+    from crewforge.schemas import UsageMetrics
+
+    # 1. Verify cloud reasoning profile and no silent clamping of worker_max_output_tokens
+    cloud_prof = CrewForgeSettings.for_cloud_reasoning_profile()
+    assert cloud_prof.max_output_tokens == 8192
+    assert cloud_prof.planner_max_output_tokens == 6144
+    assert cloud_prof.worker_max_output_tokens == 8192
+    assert cloud_prof.review_max_output_tokens == 6144
+    assert cloud_prof.revision_max_output_tokens == 8192
+    assert cloud_prof.synthesis_max_output_tokens == 6144
+    assert cloud_prof.output_limit_for_operation("worker") == 8192
+
+    # Even if global max_output_tokens=2560, explicit worker_max_output_tokens=8192 is NOT clamped
+    unclamped = CrewForgeSettings(
+        _env_file=None,
+        max_output_tokens=2560,
+        worker_max_output_tokens=8192,
+    )
+    assert unclamped.output_limit_for_operation("worker") == 8192
+
+    # 2. Verify failed call with known usage reconciles exact cost & doesn't increment successes
+    class TruncatedResponsesAPI:
+        async def create(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                id="resp_trunc_1",
+                model="gpt-6-luna",
+                status="incomplete",
+                incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                output_text='{"findings": "partial...',
+                usage=SimpleNamespace(
+                    input_tokens=1000,
+                    output_tokens=2000,
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=1500),
+                    total_tokens=3000,
+                ),
+            )
+
+    db_path = tmp_path / "fail_rec.db"
+    auth_path = tmp_path / "auth_rec.db"
+    settings = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="gpt-6-luna",
+        allow_paid_runs=True,
+        db_path=db_path,
+        budget_authority_path=auth_path,
+        max_output_tokens=8192,
+        worker_max_output_tokens=8192,
+        max_retries=0,
+        pricing_json={"gpt-6-luna": ModelPricing(input_per_1m=0.10, output_per_1m=0.50)},
+    )
+
+    async def _run() -> None:
+        db = Database(db_path)
+        await db.initialize()
+        auth = UnifiedBudgetAuthority(authority_path=auth_path, settings=settings)
+        bm = BudgetManager(db, settings, authority=auth)
+        provider = OpenAIProvider(
+            model="gpt-6-luna",
+            api_key="test-key",
+            max_retries=0,
+            client=SimpleNamespace(responses=TruncatedResponsesAPI()),  # type: ignore[arg-type]
+        )
+        executor = ModelExecutor(
+            provider=provider, database=db, budget_manager=bm, settings=settings
+        )
+        await db.create_run("run_trunc_test", "network", "test", settings.to_run_config())
+
+        from crewforge.providers.base import ProviderResponseError
+        from crewforge.schemas import SpecialistOutput
+
+        with pytest.raises(ProviderResponseError):
+            await executor.execute_structured(
+                run_id="run_trunc_test",
+                actor="worker_1",
+                operation="worker",
+                prompt="Solve",
+                response_model=SpecialistOutput,
+            )
+
+        agg: UsageMetrics = await db.aggregate_run_usage("run_trunc_test")
+        # 1000 * $0.10/1M + 2000 * $0.50/1M = $0.0001 + $0.0010 = $0.0011
+        assert agg.model_calls == 1
+        assert agg.successful_operations == 0
+        assert agg.input_tokens == 1000
+        assert agg.output_tokens == 2000
+        assert agg.actual_cost_usd == pytest.approx(0.0011)
+
+        auth_sum = await auth.get_summary()
+        assert auth_sum["canonical_ledger_records"] == 1
+        assert auth_sum["cumulative_reconciled_cost_usd"] == pytest.approx(0.0011)
+        assert auth_sum["cumulative_unknown_cost_usd"] == 0.0
+        await db.close()
+
+    asyncio.run(_run())
+
+
+def test_accurate_stage_telemetry_and_large_worker_output(tmp_path: Path) -> None:
+    """Verify stages_executed omits skipped stages and large (>2560 tok) worker output succeeds."""
+    import asyncio
+
+    from crewforge.core.budget import BudgetManager
+    from crewforge.core.orchestrator import NetworkRunner
+    from crewforge.evaluation.ablation import AblationConfig
+    from crewforge.evaluation.contracts import BenchmarkItem
+    from crewforge.evaluation.runner import _build_side_fingerprint
+    from tests.fake_provider import FakeProvider
+
+    # Verify fingerprint separation between v1 (2560) and revised (8192) settings
+    item = BenchmarkItem(prompt_id="p_fp", domain=PromptDomain.FINANCIAL, prompt="Test")
+    s_v1 = CrewForgeSettings(_env_file=None, max_output_tokens=2560)
+    s_v2 = CrewForgeSettings.for_cloud_reasoning_profile()
+    fp1 = _build_side_fingerprint(
+        manifest_hash="m1",
+        item=item,
+        doc_hashes={},
+        git_sha="sha1",
+        settings=s_v1,
+        baseline_mode="none",
+        ablation_variant="full",
+    )
+    fp2 = _build_side_fingerprint(
+        manifest_hash="m1",
+        item=item,
+        doc_hashes={},
+        git_sha="sha1",
+        settings=s_v2,
+        baseline_mode="none",
+        ablation_variant="full",
+    )
+    assert fp1.fingerprint_id != fp2.fingerprint_id
+
+    # Large >12KB specialist output (~3000+ tokens) under worker_max_output_tokens=8192
+    large_text = "Verified detail. " * 750  # ~12,750 chars (> 3,000 tokens)
+
+    async def _run_no_rev() -> None:
+        db = Database(tmp_path / "telemetry.db")
+        await db.initialize()
+        base_cfg = CrewForgeSettings(
+            _env_file=None,
+            db_path=tmp_path / "telemetry.db",
+            max_output_tokens=8192,
+            worker_max_output_tokens=8192,
+        )
+        cfg = AblationConfig.from_variant("no_reviewer").apply_to_settings(base_cfg)
+
+        def handler(_prompt: str, rm: Any) -> dict[str, Any]:
+            name = getattr(rm, "__name__", "")
+            if "Planner" in name:
+                return {
+                    "goal": "Test",
+                    "user_requirements": ["R1"],
+                    "acceptance_criteria": ["A1"],
+                    "agents": [
+                        {
+                            "agent_ref": "a1",
+                            "role": "Analyst",
+                            "instructions": "Work.",
+                            "capabilities": ["analysis"],
+                        }
+                    ],
+                    "tasks": [
+                        {
+                            "task_ref": "t1",
+                            "title": "T1",
+                            "description": "D1",
+                            "assigned_agent_ref": "a1",
+                            "depends_on": [],
+                            "expected_deliverables": ["Out"],
+                        }
+                    ],
+                }
+            if "Specialist" in name:
+                return {
+                    "findings": large_text,
+                    "claims": [
+                        {
+                            "statement": "Finding completed cleanly.",
+                            "category": "given_fact",
+                            "evidence_indices": [0],
+                            "requirement_refs": ["req_1"],
+                        }
+                    ],
+                    "evidence_proposals": [
+                        {"source_type": "user_prompt", "source_ref": "up_1", "excerpt": "Test"}
+                    ],
+                    "task_completed": True,
+                }
+            return {
+                "user_requirements": ["R1"],
+                "accepted_segments": [],
+                "conditional_conclusions": [],
+                "recommendations": [],
+                "assumptions": [],
+                "unresolved_issues": [],
+                "missing_information": [],
+            }
+
+        runner = NetworkRunner(
+            provider=FakeProvider(handler=handler, max_retries=0),
+            database=db,
+            budget_manager=BudgetManager(db, cfg),
+            settings=cfg,
+        )
+        res = await runner.run("Test")
+        trace = await db.get_run_trace(res.run_id)
+        assert trace is not None
+        summary_evs = [e for e in trace.events if e.event_type == "stages_executed_summary"]
+        assert len(summary_evs) == 1
+        stages = summary_evs[0].payload["stages_executed"]
+        assert "independent_review" not in stages
+        assert "targeted_repair" not in stages
+        assert "peer_messaging" not in stages
+        assert (
+            summary_evs[0].payload["stage_telemetry"]["independent_review"]["status"] == "disabled"
+        )
+        await db.close()
+
+    asyncio.run(_run_no_rev())

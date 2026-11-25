@@ -32,6 +32,8 @@ class ProviderError(Exception):
         billing_outcome: BillingOutcome = "unknown",
         status_code: int | None = None,
         retries_attempted: int = 0,
+        usage: UsageMetrics | None = None,
+        response_metadata: dict[str, Any] | None = None,
     ) -> None:
         safe_message = sanitize_error_message(message)
         super().__init__(safe_message)
@@ -43,10 +45,12 @@ class ProviderError(Exception):
         self.billing_outcome = billing_outcome
         self.status_code = status_code
         self.retries_attempted = retries_attempted
+        self.usage = usage
+        self.response_metadata = dict(response_metadata) if response_metadata else {}
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize sanitized error details for logging or event payloads."""
-        return {
+        data: dict[str, Any] = {
             "code": self.code,
             "provider": self.provider,
             "model": self.model,
@@ -56,6 +60,22 @@ class ProviderError(Exception):
             "status_code": self.status_code,
             "retries_attempted": self.retries_attempted,
         }
+        if self.usage is not None:
+            data["usage"] = {
+                "input_tokens": self.usage.input_tokens,
+                "output_tokens": self.usage.output_tokens,
+                "reasoning_tokens": self.usage.reasoning_tokens,
+                "cached_input_tokens": self.usage.cached_input_tokens,
+                "total_tokens": self.usage.total_tokens,
+                "usage_reported": self.usage.usage_reported,
+                "returned_model": self.usage.returned_model,
+                "provider_response_id": self.usage.provider_response_id,
+                "response_status": self.usage.response_status,
+                "incomplete_reason": self.usage.incomplete_reason,
+            }
+        if self.response_metadata:
+            data["response_metadata"] = self.response_metadata
+        return data
 
 
 class ProviderConfigurationError(ProviderError):
@@ -153,6 +173,8 @@ class ProviderResponseError(ProviderError):
         model: str,
         billing_outcome: BillingOutcome = "billed",
         retries_attempted: int = 0,
+        usage: UsageMetrics | None = None,
+        response_metadata: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             message,
@@ -162,6 +184,8 @@ class ProviderResponseError(ProviderError):
             retryable=False,
             billing_outcome=billing_outcome,
             retries_attempted=retries_attempted,
+            usage=usage,
+            response_metadata=response_metadata,
         )
 
 

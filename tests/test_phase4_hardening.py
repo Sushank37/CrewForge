@@ -611,13 +611,14 @@ async def test_document_ingestion_ssrf_blocking_and_provider_portability(tmp_pat
     seen_kwargs: list[dict[str, Any]] = []
 
     class FakeReasoningClient:
-        async def parse(self, **kwargs: Any) -> Any:
+        async def create(self, **kwargs: Any) -> Any:
             seen_kwargs.append(kwargs)
             return SimpleNamespace(
                 id="resp_luna",
                 model="gpt-6-luna-2026-10-01",
+                status="completed",
+                incomplete_details=None,
                 output_text='{"verdicts":[],"missing_requirement_coverage":[]}',
-                output_parsed=ReviewerBatchOutput(),
                 usage=SimpleNamespace(input_tokens=15, output_tokens=8, total_tokens=23),
             )
 
