@@ -1,4 +1,4 @@
-"""Shared budget-aware ModelExecutor with per-attempt reservation and shared concurrency."""
+"""Shared budget-aware ModelExecutor with per-attempt reservation and bounded semaphore."""
 
 from __future__ import annotations
 
@@ -117,23 +117,35 @@ class ModelExecutor:
             )
 
             attempt_start = time.perf_counter()
+            acquired = False
             try:
-                async with self._semaphore:
-                    attempt_timeout = self._effective_timeout(
-                        timeout_seconds, run_deadline_monotonic
-                    )
-                    response = await asyncio.wait_for(
-                        self._provider.generate_structured(
-                            prompt,
-                            response_model,
-                            system_prompt=system_prompt,
-                            max_output_tokens=bounded_out,
-                            temperature=temperature,
-                            timeout_seconds=attempt_timeout,
-                            max_retries=0,
-                        ),
-                        timeout=attempt_timeout,
-                    )
+                wait_budget = self._effective_timeout(timeout_seconds, run_deadline_monotonic)
+                try:
+                    await asyncio.wait_for(self._semaphore.acquire(), timeout=wait_budget)
+                    acquired = True
+                except TimeoutError as exc:
+                    if (
+                        run_deadline_monotonic is not None
+                        and time.monotonic() >= run_deadline_monotonic
+                    ):
+                        raise RunDeadlineExceededError(
+                            "Run deadline expired while waiting for concurrency slot."
+                        ) from exc
+                    raise TimeoutError("Timed out waiting for concurrency slot.") from exc
+
+                attempt_timeout = self._effective_timeout(timeout_seconds, run_deadline_monotonic)
+                response = await asyncio.wait_for(
+                    self._provider.generate_structured(
+                        prompt,
+                        response_model,
+                        system_prompt=system_prompt,
+                        max_output_tokens=bounded_out,
+                        temperature=temperature,
+                        timeout_seconds=attempt_timeout,
+                        max_retries=0,
+                    ),
+                    timeout=attempt_timeout,
+                )
 
                 attempt_latency_ms = (time.perf_counter() - attempt_start) * 1000.0
                 usage_with_attempt = response.usage.model_copy(
@@ -173,11 +185,11 @@ class ModelExecutor:
                 elapsed_ms = (time.perf_counter() - attempt_start) * 1000.0
                 await self._budget.reconcile_failure(
                     reservation,
-                    billing_known_unbilled=False,
+                    billing_known_unbilled=not acquired,
                     retries=attempt_index,
                     latency_ms=elapsed_ms,
                     operation=operation,
-                    reason="Attempt cancelled while in flight.",
+                    reason="Attempt cancelled while waiting or in flight.",
                 )
                 raise
 
@@ -192,7 +204,7 @@ class ModelExecutor:
                 )
                 await self._budget.reconcile_failure(
                     reservation,
-                    billing_known_unbilled=False,
+                    billing_known_unbilled=not acquired,
                     retries=attempt_index,
                     latency_ms=elapsed_ms,
                     operation=operation,
@@ -227,7 +239,7 @@ class ModelExecutor:
                     retries=attempt_index,
                     latency_ms=elapsed_ms,
                     operation=operation,
-                    reason="Run deadline expired while waiting for concurrency slot.",
+                    reason="Run deadline expired before provider dispatch.",
                 )
                 raise
 
@@ -281,6 +293,9 @@ class ModelExecutor:
                     )
                 )
                 raise
+            finally:
+                if acquired:
+                    self._semaphore.release()
 
             attempt_index += 1
             delay = self._base_backoff_seconds * (2 ** (attempt_index - 1))
@@ -321,22 +336,23 @@ class ModelExecutor:
                 max_output_tokens=bounded_out,
             )
             attempt_start = time.perf_counter()
+            acquired = False
             try:
-                async with self._semaphore:
-                    attempt_timeout = self._effective_timeout(
-                        timeout_seconds, run_deadline_monotonic
-                    )
-                    response = await asyncio.wait_for(
-                        self._provider.generate_text(
-                            prompt,
-                            system_prompt=system_prompt,
-                            max_output_tokens=bounded_out,
-                            temperature=temperature,
-                            timeout_seconds=attempt_timeout,
-                            max_retries=0,
-                        ),
-                        timeout=attempt_timeout,
-                    )
+                wait_budget = self._effective_timeout(timeout_seconds, run_deadline_monotonic)
+                await asyncio.wait_for(self._semaphore.acquire(), timeout=wait_budget)
+                acquired = True
+                attempt_timeout = self._effective_timeout(timeout_seconds, run_deadline_monotonic)
+                response = await asyncio.wait_for(
+                    self._provider.generate_text(
+                        prompt,
+                        system_prompt=system_prompt,
+                        max_output_tokens=bounded_out,
+                        temperature=temperature,
+                        timeout_seconds=attempt_timeout,
+                        max_retries=0,
+                    ),
+                    timeout=attempt_timeout,
+                )
                 attempt_latency_ms = (time.perf_counter() - attempt_start) * 1000.0
                 reconciled_usage = await self._budget.reconcile_success(
                     reservation,
@@ -350,11 +366,11 @@ class ModelExecutor:
                 elapsed_ms = (time.perf_counter() - attempt_start) * 1000.0
                 await self._budget.reconcile_failure(
                     reservation,
-                    billing_known_unbilled=False,
+                    billing_known_unbilled=not acquired,
                     retries=attempt_index,
                     latency_ms=elapsed_ms,
                     operation=operation,
-                    reason="Attempt cancelled while in flight.",
+                    reason="Attempt cancelled while waiting or in flight.",
                 )
                 raise
             except TimeoutError as exc:
@@ -368,7 +384,7 @@ class ModelExecutor:
                 )
                 await self._budget.reconcile_failure(
                     reservation,
-                    billing_known_unbilled=False,
+                    billing_known_unbilled=not acquired,
                     retries=attempt_index,
                     latency_ms=elapsed_ms,
                     operation=operation,
@@ -389,5 +405,8 @@ class ModelExecutor:
                 )
                 if not err.retryable or attempt_index >= max_retries:
                     raise
+            finally:
+                if acquired:
+                    self._semaphore.release()
             attempt_index += 1
             await asyncio.sleep(self._base_backoff_seconds * (2 ** (attempt_index - 1)))

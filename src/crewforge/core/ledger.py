@@ -1,69 +1,44 @@
-"""Versioned claim ledger and evidence provenance validation."""
+"""Versioned claim ledger with provenance validation and arithmetic tool integration."""
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 
+from crewforge.core.evidence_verifier import verify_evidence_proposal
 from crewforge.schemas import (
     Claim,
+    ClaimCategory,
     ClaimStatus,
+    ClaimVersionRef,
     Evidence,
-    EvidenceReliability,
     ExecutionEvent,
     ProposedClaim,
     ProposedEvidence,
+    ToolExecutionRecord,
+    VerificationStatus,
 )
-from crewforge.storage.database import Database
+from crewforge.storage.database import CrossRunReferenceError, Database
+from crewforge.tools.arithmetic import DeterministicArithmeticTool
 
-_WHITESPACE_RE = re.compile(r"\s+")
+_NON_MATERIAL_CATEGORIES = frozenset(
+    {
+        ClaimCategory.ASSUMPTION,
+        ClaimCategory.RECOMMENDATION,
+        ClaimCategory.UNCERTAINTY,
+    }
+)
 
 
-def _normalize_text(text: str) -> str:
-    return _WHITESPACE_RE.sub(" ", text).strip().lower()
-
-
-def validate_evidence_excerpt(
-    *,
-    proposal: ProposedEvidence,
-    original_prompt: str,
-    dependency_findings_text: str = "",
-) -> tuple[EvidenceReliability, bool]:
-    """Validate an evidence proposal against trusted run inputs.
-
-    Note: Matching an excerpt proves only that the quoted text exists in the
-    referenced input; it does NOT verify that the excerpt logically supports a claim.
-    External citations and calculations remain UNVERIFIED in Phase 2.
-    """
-    norm_excerpt = _normalize_text(proposal.excerpt)
-    if not norm_excerpt:
-        return EvidenceReliability.UNVERIFIED, False
-
-    if proposal.source_type == "user_prompt":
-        matched = norm_excerpt in _normalize_text(original_prompt)
-        return (
-            (EvidenceReliability.MEDIUM, True)
-            if matched
-            else (EvidenceReliability.UNVERIFIED, False)
-        )
-
-    if proposal.source_type == "dependency_finding":
-        matched = bool(dependency_findings_text) and (
-            norm_excerpt in _normalize_text(dependency_findings_text)
-        )
-        return (
-            (EvidenceReliability.LOW, True) if matched else (EvidenceReliability.UNVERIFIED, False)
-        )
-
-    # 'external_unverified' and 'calculation' cannot be verified without Phase 3 tools/reviewers.
-    return EvidenceReliability.UNVERIFIED, False
+class ClaimRevisionError(ValueError):
+    """Raised when a targeted claim revision reference is invalid, stale, or unauthorized."""
 
 
 class ClaimLedger:
-    """Run-scoped immutable versioned ledger for claims and evidence proposals."""
+    """Run-scoped immutable versioned ledger for claims, evidence, and tool provenance."""
 
     def __init__(self, database: Database) -> None:
         self._db = database
+        self._arithmetic = DeterministicArithmeticTool(database)
 
     async def record_specialist_outputs(
         self,
@@ -75,22 +50,51 @@ class ClaimLedger:
         dependency_findings_text: str,
         evidence_proposals: list[ProposedEvidence],
         claim_proposals: list[ProposedClaim],
-    ) -> tuple[list[Evidence], list[Claim]]:
-        """Validate and persist evidence proposals and initial claim versions."""
+    ) -> tuple[list[Evidence], list[Claim], list[ToolExecutionRecord]]:
+        """Validate evidence, run arithmetic requests, and persist initial claim versions."""
+        existing_claims = await self._db.get_claims_for_run(run_id, latest_only=True)
+        existing_by_id = {c.claim_id: c for c in existing_claims}
+        prior_tool_records = await self._db.get_tool_executions_for_run(run_id)
+
+        grounded_texts = [original_prompt, dependency_findings_text]
+        grounded_texts.extend(
+            f"{r.computed_result} {r.units}"
+            for r in prior_tool_records
+            if r.success and r.computed_result is not None
+        )
+
+        # Execute computation requests attached to claims before validating computation evidence.
+        claim_tool_records: dict[int, ToolExecutionRecord] = {}
+        all_new_tool_records: list[ToolExecutionRecord] = []
+        for idx, prop_claim in enumerate(claim_proposals):
+            if prop_claim.computation is not None:
+                rec = await self._arithmetic.execute(
+                    run_id=run_id,
+                    actor=agent_id,
+                    request=prop_claim.computation,
+                    grounded_texts=grounded_texts,
+                    task_id=task_id,
+                )
+                claim_tool_records[idx] = rec
+                all_new_tool_records.append(rec)
+
+        combined_tool_records = [*prior_tool_records, *all_new_tool_records]
+
         persisted_evidence: list[Evidence] = []
         for proposal in evidence_proposals:
-            reliability, verified_in_input = validate_evidence_excerpt(
+            check = verify_evidence_proposal(
                 proposal=proposal,
                 original_prompt=original_prompt,
                 dependency_findings_text=dependency_findings_text,
+                matching_tool_records=combined_tool_records,
             )
             evd = Evidence(
                 run_id=run_id,
                 source_type=proposal.source_type,
                 source_ref=proposal.source_ref,
                 excerpt=proposal.excerpt,
-                reliability=reliability,
-                verified_in_input=verified_in_input,
+                reliability=check.reliability,
+                verified_in_input=check.verified_in_input,
                 task_id=task_id,
                 created_by=agent_id,
             )
@@ -98,28 +102,58 @@ class ClaimLedger:
             persisted_evidence.append(evd)
 
         persisted_claims: list[Claim] = []
-        for prop_claim in claim_proposals:
+        local_ref_map: dict[str, Claim] = {}
+
+        for idx, prop_claim in enumerate(claim_proposals):
             linked_evidence_ids = [
-                persisted_evidence[idx].evidence_id
-                for idx in prop_claim.evidence_indices
-                if 0 <= idx < len(persisted_evidence)
+                persisted_evidence[e_idx].evidence_id
+                for e_idx in prop_claim.evidence_indices
+                if 0 <= e_idx < len(persisted_evidence)
             ]
-            # Phase 2 never marks claims as SUPPORTED purely from model self-assertion.
+
+            premise_refs: list[ClaimVersionRef] = []
+            dep_claim_ids: list[str] = []
+            for raw_pid in prop_claim.premise_claim_ids:
+                target = existing_by_id.get(raw_pid) or local_ref_map.get(raw_pid)
+                if target is not None:
+                    premise_refs.append(
+                        ClaimVersionRef(claim_id=target.claim_id, claim_version=target.version)
+                    )
+                    if target.claim_id not in dep_claim_ids:
+                        dep_claim_ids.append(target.claim_id)
+
+            tool_ids: list[str] = []
+            if idx in claim_tool_records:
+                tool_ids.append(claim_tool_records[idx].tool_execution_id)
+
+            # Workers can NEVER promote their own claims to SUPPORTED.
             status = ClaimStatus.UNRESOLVED if prop_claim.is_unresolved else ClaimStatus.ASSERTED
+            is_material = prop_claim.category not in _NON_MATERIAL_CATEGORIES
+
             claim = Claim(
                 run_id=run_id,
                 statement=prop_claim.statement,
+                category=prop_claim.category,
                 status=status,
+                verification_status=VerificationStatus.UNSUPPORTED,
                 version=1,
                 parent_claim_id=None,
                 author_agent_id=agent_id,
                 task_id=task_id,
                 evidence_ids=linked_evidence_ids,
-                assumptions=prop_claim.assumptions,
+                depends_on_claim_ids=dep_claim_ids,
+                premise_refs=premise_refs,
+                tool_execution_ids=tool_ids,
+                requirement_refs=list(prop_claim.requirement_refs),
+                assumptions=list(prop_claim.assumptions),
                 confidence=prop_claim.confidence,
+                is_material=is_material,
             )
             await self._db.insert_claim(claim)
             persisted_claims.append(claim)
+            if prop_claim.claim_ref:
+                local_ref_map[prop_claim.claim_ref] = claim
+            existing_by_id[claim.claim_id] = claim
 
         if persisted_evidence or persisted_claims:
             await self._db.append_event(
@@ -135,44 +169,118 @@ class ClaimLedger:
                         "task_id": task_id,
                         "claim_ids": [c.claim_id for c in persisted_claims],
                         "evidence_ids": [e.evidence_id for e in persisted_evidence],
+                        "tool_execution_ids": [t.tool_execution_id for t in all_new_tool_records],
                     },
                 )
             )
 
-        return persisted_evidence, persisted_claims
+        return persisted_evidence, persisted_claims, all_new_tool_records
 
-    async def revise_claim(
+    async def apply_targeted_revision(
         self,
         *,
-        prior_claim: Claim,
+        run_id: str,
+        target_claim_id: str,
+        expected_version: int,
         new_statement: str,
         author_agent_id: str,
-        task_id: str | None = None,
+        original_prompt: str,
+        dependency_findings_text: str = "",
+        category: ClaimCategory | None = None,
         additional_evidence_ids: list[str] | None = None,
+        premise_claim_ids: list[str] | None = None,
+        computation_request: object | None = None,
         assumptions: list[str] | None = None,
         revision_notes: str | None = None,
         is_unresolved: bool = False,
         confidence: float | None = None,
+        require_same_author: bool = True,
     ) -> Claim:
-        """Append an immutable version (version + 1) without overwriting the original claim."""
+        """Append an immutable claim version targeting an explicit claim_id and expected_version."""
+        latest_claims = await self._db.get_claims_for_run(run_id, latest_only=True)
+        latest_by_id = {c.claim_id: c for c in latest_claims}
+
+        prior_claim = latest_by_id.get(target_claim_id)
+        if prior_claim is None:
+            raise CrossRunReferenceError(
+                f"Target claim '{target_claim_id}' does not exist in run '{run_id}'."
+            )
+        if prior_claim.version != expected_version:
+            raise ClaimRevisionError(
+                f"Stale revision target for '{target_claim_id}': expected v{expected_version}, "
+                f"latest is v{prior_claim.version}."
+            )
+        if require_same_author and prior_claim.author_agent_id != author_agent_id:
+            raise ClaimRevisionError(
+                f"Unauthorized revision for '{target_claim_id}': author '{author_agent_id}' "
+                f"does not match originating specialist '{prior_claim.author_agent_id}'."
+            )
+
+        tool_ids = list(prior_claim.tool_execution_ids)
+        if computation_request is not None:
+            prior_tools = await self._db.get_tool_executions_for_run(run_id)
+            grounded_texts = [original_prompt, dependency_findings_text]
+            grounded_texts.extend(
+                f"{r.computed_result} {r.units}"
+                for r in prior_tools
+                if r.success and r.computed_result is not None
+            )
+            rec = await self._arithmetic.execute(
+                run_id=run_id,
+                actor=author_agent_id,
+                request=computation_request,  # type: ignore[arg-type]
+                grounded_texts=grounded_texts,
+                task_id=prior_claim.task_id,
+            )
+            tool_ids = [rec.tool_execution_id]
+
+        resolved_premises = list(prior_claim.premise_refs)
+        resolved_dep_ids = list(prior_claim.depends_on_claim_ids)
+        if premise_claim_ids is not None:
+            resolved_premises = []
+            resolved_dep_ids = []
+            for pid in premise_claim_ids:
+                p_claim = latest_by_id.get(pid)
+                if p_claim is None:
+                    raise CrossRunReferenceError(
+                        f"Premise claim '{pid}' does not exist in run '{run_id}'."
+                    )
+                if pid == target_claim_id:
+                    raise ClaimRevisionError(f"Claim '{target_claim_id}' cannot depend on itself.")
+                resolved_premises.append(
+                    ClaimVersionRef(claim_id=p_claim.claim_id, claim_version=p_claim.version)
+                )
+                if p_claim.claim_id not in resolved_dep_ids:
+                    resolved_dep_ids.append(p_claim.claim_id)
+
         merged_evidence = list(
             dict.fromkeys([*prior_claim.evidence_ids, *(additional_evidence_ids or [])])
         )
+        next_category = category or prior_claim.category
         status = ClaimStatus.UNRESOLVED if is_unresolved else ClaimStatus.ASSERTED
+        is_material = next_category not in _NON_MATERIAL_CATEGORIES
+
+        # A revised claim NEVER inherits approval from its previous version.
         revised = Claim(
             claim_id=prior_claim.claim_id,
             run_id=prior_claim.run_id,
             statement=new_statement,
+            category=next_category,
             status=status,
+            verification_status=VerificationStatus.UNSUPPORTED,
             version=prior_claim.version + 1,
             parent_claim_id=prior_claim.claim_id,
             author_agent_id=author_agent_id,
-            task_id=task_id or prior_claim.task_id,
+            task_id=prior_claim.task_id,
             evidence_ids=merged_evidence,
-            depends_on_claim_ids=prior_claim.depends_on_claim_ids,
-            assumptions=assumptions if assumptions is not None else prior_claim.assumptions,
+            depends_on_claim_ids=resolved_dep_ids,
+            premise_refs=resolved_premises,
+            tool_execution_ids=tool_ids,
+            requirement_refs=list(prior_claim.requirement_refs),
+            assumptions=assumptions if assumptions is not None else list(prior_claim.assumptions),
             revision_notes=revision_notes,
             confidence=confidence if confidence is not None else prior_claim.confidence,
+            is_material=is_material,
             created_at=prior_claim.created_at,
             updated_at=datetime.now(UTC),
         )
@@ -191,6 +299,35 @@ class ClaimLedger:
             )
         )
         return revised
+
+    async def revise_claim(
+        self,
+        *,
+        prior_claim: Claim,
+        new_statement: str,
+        author_agent_id: str,
+        task_id: str | None = None,
+        additional_evidence_ids: list[str] | None = None,
+        assumptions: list[str] | None = None,
+        revision_notes: str | None = None,
+        is_unresolved: bool = False,
+        confidence: float | None = None,
+    ) -> Claim:
+        """Backward-compatible wrapper around apply_targeted_revision."""
+        return await self.apply_targeted_revision(
+            run_id=prior_claim.run_id,
+            target_claim_id=prior_claim.claim_id,
+            expected_version=prior_claim.version,
+            new_statement=new_statement,
+            author_agent_id=author_agent_id,
+            original_prompt="",
+            additional_evidence_ids=additional_evidence_ids,
+            assumptions=assumptions,
+            revision_notes=revision_notes,
+            is_unresolved=is_unresolved,
+            confidence=confidence,
+            require_same_author=False,
+        )
 
     async def get_claims(self, run_id: str, *, latest_only: bool = False) -> list[Claim]:
         """Fetch claims for a run (all immutable versions or latest per claim_id)."""

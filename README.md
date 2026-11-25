@@ -2,28 +2,28 @@
 
 CrewForge is a model-agnostic, self-assembling multi-agent intelligence network exposed through the Model Context Protocol (MCP), built by **Team Git Commit** for the **SEED Hackathon 2026 — Chain of Command** challenge.
 
-## Implemented Functionality (Phase 1 & Phase 2)
+## Implemented Functionality (Phase 1, Phase 2 & Phase 3)
 
-- **Budget-Safe `ModelExecutor` & Corrected Accounting:**
-  - Single shared `asyncio.Semaphore` enforcing configured concurrency across baseline, planning, specialists, follow-ups, and synthesis.
-  - Every individual attempt acquires its own atomic pre-call SQLite `BEGIN IMMEDIATE` reservation and reconciles exactly once.
-  - Hidden SDK/provider retries are disabled when invoked through `ModelExecutor`; retry orchestration is owned by `ModelExecutor`.
-  - Dispatched attempts count toward `max_model_calls_per_run` even when released as known-unbilled; unknown billing outcomes (e.g., timeouts or missing paid usage) conservatively retain their reserved cost.
-  - Pre-call input token estimation incorporates system prompts, task context, and serialized structured-output JSON schemas.
-  - Raw provider errors and credentials are sanitized before persistence.
-- **Dynamic Lead Planner (`LeadPlanner`):** Decomposes arbitrary prompts into a validated `ExecutionPlan` with prompt-specific specialist roles, DAG dependencies, acceptance criteria, and deliverables (no hard-coded domain routing or role lists), allowing at most one budgeted plan-repair attempt.
-- **Dependency-Aware Async Scheduler (`DAGScheduler`):** Executes independent tasks concurrently up to configured concurrency, transitions tasks through `pending -> running -> completed | failed | blocked`, prevents deadlocks on dependency failure, and enforces a total `run_deadline_seconds` alongside per-request timeouts.
-- **Specialist Execution & Provenance Ledger (`SpecialistWorker`, `ClaimLedger`):** Produces concise findings, immutable versioned `Claim`s (`asserted` / `unresolved` — never `supported` on self-assertion alone), and provenance-checked `Evidence` records (`user_prompt` and `dependency_finding` substring verification; `external_unverified` and `calculation` kept `unverified`).
-- **Real Peer-to-Peer Messaging (`MessageBus`):** Run-scoped direct and broadcast `AgentMessage` persistence with per-recipient delivery/consumption tracking (`pending -> delivered -> consumed`), feeding messages into dependent tasks and one bounded communication follow-up round.
-- **Lead Synthesis (`LeadSynthesizer`) & `NetworkRunner`:** Synthesizes specialist findings within reserved synthesis call headroom, validates all referenced `claim_id`s belong to the current run, returns explicit `partial` results on budget/deadline exhaustion, and surfaces Phase 2 verification limits honestly.
-- **MCP Server (`FastMCP`) & CLI:** Exposes `solve(prompt)`, `baseline(prompt)`, and `trace(run_id)` over `stdio` (with `stderr`-only operational logging) and localhost `streamable-http`.
+- **Budget-Safe `ModelExecutor` & Shared MCP Execution:**
+  - Single shared `asyncio.Semaphore` with deadline-bounded acquisition enforcing configured concurrency across baseline, planning, specialists, follow-ups, reviewers, targeted repairs, and synthesis (shared cleanly across concurrent MCP `solve` / `baseline` tool calls).
+  - Every individual attempt acquires its own atomic pre-call SQLite `BEGIN IMMEDIATE` reservation and reconciles exactly once; hidden SDK/provider retries remain disabled when invoked through `ModelExecutor`.
+  - Dispatched attempts count toward `max_model_calls_per_run` even when released as known-unbilled; unknown billing outcomes conservatively retain reserved cost.
+  - Pre-call input token estimation incorporates system prompts, task context, and serialized structured-output JSON schemas; credentials and raw provider errors are sanitized before persistence.
+- **Dynamic Lead Planner (`LeadPlanner`) & DAG Scheduler (`DAGScheduler`):** Decomposes arbitrary prompts into a validated `ExecutionPlan` with prompt-specific specialist roles and acyclic dependencies (`effective_max_workers=3`, `effective_max_tasks=3` for local Ollama), executes independent branches concurrently, enforces deadline/call-budget reservations (`optional_stage_skipped`), and transitions failed dependents cleanly to `blocked`.
+- **Claim Contracts, Provenance & Safe Arithmetic Tool (`DeterministicArithmeticTool`):**
+  - Explicit `ClaimCategory` (`given_fact`, `external_factual_assertion`, `computation`, `logical_inference`, `assumption`, `recommendation`, `uncertainty`) and separate `VerificationStatus` (`provenance_verified`, `computationally_verified`, `independently_reviewed_inference`, `unsupported`, `contradicted`, `stale_pending_review`).
+  - Safe `Decimal` + allowlisted AST calculator (`src/crewforge/tools/arithmetic.py`, no `eval`/`exec`) persists immutable `tool_executions` records, checks numeric/provenance input grounding, and supports fair baseline tool parity (`BaselineRunner`).
+  - Deterministic provenance verification (`evidence_verifier.py`) checks verbatim quotation, numeric consistency, and surrounding negation polarity for `user_prompt` / `dependency_finding` excerpts while keeping unretrieved `external_unverified` citations as `unverified` (`UnavailableExternalRetriever`).
+- **Independent Adversarial Review (`ReviewerPool`), `ClaimDependencyGraph` & `TargetedRepairEngine`:**
+  - Enforces strict author/reviewer separation (`reviewer_id != author_agent_id`) in code and SQLite, running deterministic prechecks plus compact/separate model review; omitted verdicts deterministically mark claims `unresolved`.
+  - Blocking objections are routed back via `MessageBus` to the originating specialist for explicit `(claim_id, expected_version)` targeted revision (never positional replacement), preserving rejected prior versions, transitively marking downstream dependents `stale`, and re-reviewing revised claims.
+- **Evidence-Constrained `LeadSynthesizer` & Deterministic `HonestyGate`:** Consumes Lead inbox messages (`consumed` only after model invocation), requires versioned claim citations on released assertions, blocks rejected/stale/unreviewed claims and unverified new factual text on both full and partial release paths, and persists `honesty_gate_decisions` + `VerificationSummary`.
+- **MCP Server (`FastMCP`) & CLI:** Exposes `solve(prompt)`, `baseline(prompt)`, and `trace(run_id)` over `stdio` (`stderr`-only logging) and localhost `streamable-http`.
 
-### Planned Functionality (Phase 3)
+### Planned / Remaining Before Final Submission
 
-- Independent reviewer pool (`ReviewVerdict` generation) checking unsupported claims, calculation accuracy, and cross-claim contradictions
-- Targeted revision loop returning rejected claims to originating specialists
-- Deterministic verification tools & full Honesty Gate enforcement
-- David vs Goliath benchmark evaluation (`qwen3:4b` network vs single-agent baseline)
+- Optional external `EvidenceRetriever` backend if an authorized retrieval source is configured (internet fetching remains disabled by default via `UnavailableExternalRetriever`).
+- Final pre-submission David vs Goliath evaluation comparing the local `qwen3:4b` network against a stronger cloud baseline within the untouched \$6.10 OpenAI budget cap.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md) for full details.
 
@@ -61,13 +61,15 @@ cp .env.example .env
 | `CREWFORGE_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Local Ollama endpoint |
 | `CREWFORGE_OLLAMA_NUM_CTX` | `4096` | Ollama context window (`options.num_ctx`) |
 | `CREWFORGE_OLLAMA_THINK` | unset (`false` in `.env.example`) | Optional top-level Ollama `think` parameter |
-| `CREWFORGE_REQUEST_TIMEOUT_SECONDS` | `60.0` | Per-attempt request timeout |
-| `CREWFORGE_RUN_DEADLINE_SECONDS` | `300.0` | Total wall-clock deadline per run |
+| `CREWFORGE_REQUEST_TIMEOUT_SECONDS` | `60.0` (`180.0` in local `.env`) | Per-attempt request timeout |
+| `CREWFORGE_RUN_DEADLINE_SECONDS` | `300.0` (`480.0` in local `.env`) | Total wall-clock deadline per run |
 | `CREWFORGE_MAX_RETRIES` | `0` | Bounded retry count owned by `ModelExecutor` |
 | `CREWFORGE_MAX_CONCURRENCY` | `3` (`1` auto-default for Ollama) | Shared concurrency semaphore limit |
-| `CREWFORGE_MAX_OUTPUT_TOKENS` | `1024` | Output token cap per call |
-| `CREWFORGE_MAX_WORKERS` / `CREWFORGE_MAX_TASKS` | `4` / `6` | Planner team and DAG size bounds |
+| `CREWFORGE_MAX_OUTPUT_TOKENS` | `1024` | Output token cap per call (operation caps configurable for planner/worker/review/revision/synthesis) |
+| `CREWFORGE_MAX_WORKERS` / `CREWFORGE_MAX_TASKS` | `4` / `6` (`3` / `3` auto-cap for Ollama) | Planner team and DAG size bounds |
 | `CREWFORGE_MAX_COMMUNICATION_ROUNDS` | `1` | Max peer follow-up rounds after DAG tasks |
+| `CREWFORGE_MAX_REVISION_ROUNDS` | `1` | Max targeted claim-repair rounds after review |
+| `CREWFORGE_SEPARATE_REVIEW_DIMENSIONS` | `false` | `false` runs compact combined reviewer pass; `true` splits evidence/consistency passes |
 | `CREWFORGE_MAX_MODEL_CALLS_PER_RUN` | `16` | Maximum dispatched model attempts per run |
 | `CREWFORGE_MAX_COST_PER_RUN_USD` | `0.05` | Maximum estimated cloud cost per run (USD) |
 | `CREWFORGE_MAX_CUMULATIVE_COST_USD` | `1.00` | Maximum cumulative expenditure across runs (USD) |

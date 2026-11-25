@@ -14,11 +14,17 @@ def build_worker_system_prompt(agent: AgentSpec) -> str:
         f"Allowed capabilities: [{caps}].\n\n"
         "Output rules:\n"
         "- Produce concise, accurate `findings` directly addressing your assigned task.\n"
-        "- Express key analytical points as atomic `claims` linked to "
-        "`evidence_proposals` indices.\n"
-        "- Only cite `user_prompt` or `dependency_finding` excerpts that verbatim exist in the "
-        "provided input; mark any outside knowledge or unverified reference as "
-        "`external_unverified` and calculations as `calculation`.\n"
+        "- Express key points as atomic `claims` with explicit `category` (`given_fact`, "
+        "`external_factual_assertion`, `computation`, `logical_inference`, `assumption`, "
+        "`recommendation`, `uncertainty`) and `evidence_indices`.\n"
+        "- For `computation` claims, attach `computation` (`expression`, `variables`, "
+        "`input_provenance_refs`, `proposed_result`, `units`) with plain numeric values "
+        "(no currency symbols like ₹ or $) so the arithmetic tool verifies exact numbers.\n"
+        "- Only classify a claim as `external_factual_assertion` if it asserts outside facts "
+        "not given in the prompt; use `logical_inference` or `recommendation` for analysis.\n"
+        "- For derived `logical_inference` claims, link `premise_claim_ids` to upstream claims.\n"
+        "- Only cite `user_prompt` or `dependency_finding` excerpts that exist verbatim in input; "
+        "mark outside references as `external_unverified` and calculations as `calculation`.\n"
         "- Do not fabricate facts or emit hidden chain-of-thought; list `assumptions`, "
         "`uncertainties`, and `missing_information` explicitly.\n"
         "- Emit `outgoing_messages` only when a peer specialist or 'lead' genuinely needs "
@@ -38,9 +44,7 @@ def _format_inbound_messages(
         claims_note = (
             f" [claims: {', '.join(msg.related_claim_ids)}]" if msg.related_claim_ids else ""
         )
-        lines.append(
-            f"- [{msg.message_type}] from {sender_label}{claims_note}: {msg.content}"
-        )
+        lines.append(f"- [{msg.message_type}] from {sender_label}{claims_note}: {msg.content}")
     return "\n".join(lines)
 
 
@@ -50,6 +54,7 @@ def build_worker_user_prompt(
     task: TaskSpec,
     acceptance_criteria: list[str],
     dependency_findings: list[tuple[str, str]],
+    dependency_claims_summary: list[str],
     shared_assumptions: list[str],
     inbound_messages: list[AgentMessage],
     agent_labels: dict[str, str],
@@ -71,6 +76,11 @@ def build_worker_user_prompt(
         if dependency_findings
         else "None."
     )
+    dep_claims_block = (
+        "\n".join(f"- {line}" for line in dependency_claims_summary)
+        if dependency_claims_summary
+        else "None."
+    )
     peers_block = ", ".join(peer_directory) if peer_directory else "lead"
     messages_block = _format_inbound_messages(inbound_messages, agent_labels)
 
@@ -82,6 +92,8 @@ def build_worker_user_prompt(
         f"Relevant acceptance criteria:\n{criteria_block}\n\n"
         f"Shared plan assumptions:\n{assumptions_block}\n\n"
         f"Completed dependency findings:\n{deps_block}\n\n"
+        "Upstream claim IDs (reference in premise_claim_ids when deriving):\n"
+        f"{dep_claims_block}\n\n"
         f"Inbound peer messages:\n{messages_block}\n\n"
         "Available message recipients (use agent_ref or 'lead' or null for broadcast): "
         f"[{peers_block}]"
@@ -97,7 +109,7 @@ def build_followup_user_prompt(
     agent_labels: dict[str, str],
     peer_directory: list[str],
 ) -> str:
-    """Assemble bounded peer-communication follow-up prompt."""
+    """Assemble bounded peer-communication follow-up prompt with explicit claim IDs/versions."""
     claims_block = (
         "\n".join(f"- {item}" for item in prior_claims_summary)
         if prior_claims_summary
@@ -109,9 +121,10 @@ def build_followup_user_prompt(
     return (
         f"Original user request:\n{original_prompt}\n\n"
         f"Your prior findings:\n{prior_findings}\n\n"
-        f"Your prior claims:\n{claims_block}\n\n"
+        f"Your existing claims (target exact claim_id + expected_version when revising):\n"
+        f"{claims_block}\n\n"
         f"New inbound peer messages requiring your consideration:\n{messages_block}\n\n"
         f"Available message recipients: [{peers_block}]\n\n"
         "Incorporate or answer the inbound peer messages concisely, update findings, "
-        "and emit revised claims only where changed."
+        "and use `revised_claims` ONLY with exact `target_claim_id` and `expected_version`."
     )

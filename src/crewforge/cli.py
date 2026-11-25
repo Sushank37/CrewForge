@@ -37,6 +37,14 @@ def _print_run_result(result: RunResult, *, json_output: bool) -> None:
     print(f"Latency:  {result.latency_ms:.1f} ms")
     if result.specialist_roles:
         print(f"Team:     {', '.join(result.specialist_roles)}")
+    if result.verification is not None:
+        v = result.verification
+        print(
+            f"Verified: {v.supported_claim_count}/{v.material_claim_count} material claims | "
+            f"unresolved={v.unresolved_claim_count} rejected={v.rejected_claim_count} "
+            f"stale={v.stale_claim_count} revisions={v.revision_count} | "
+            f"gate_passed={v.honesty_gate_passed}"
+        )
     if result.error:
         print(f"Error:    {result.error}", file=sys.stderr)
     if result.answer:
@@ -127,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     solve_parser = subparsers.add_parser(
         "solve",
-        help="Solve a prompt with CrewForge's dynamic multi-agent network.",
+        help="Solve a prompt with CrewForge's verified multi-agent network.",
     )
     solve_parser.add_argument("prompt", help="Prompt to solve.")
     solve_parser.add_argument("--json", action="store_true", help="Emit JSON output.")

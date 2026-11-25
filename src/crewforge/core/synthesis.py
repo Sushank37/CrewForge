@@ -1,159 +1,135 @@
-"""Lead synthesis and release metadata validation (Phase 2)."""
+"""Evidence-constrained Lead synthesis and Honesty Gate integration."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 from crewforge.core.executor import ModelExecutor
+from crewforge.core.honesty_gate import HonestyGate, HonestyGateResult
+from crewforge.core.messaging import MessageBus
 from crewforge.prompts.synthesis import (
     build_synthesis_system_prompt,
     build_synthesis_user_prompt,
 )
 from crewforge.schemas import (
     Claim,
+    ClaimCategory,
+    ClaimStatus,
+    ClaimVersionRef,
+    Evidence,
     ExecutionEvent,
     ExecutionPlan,
+    ReleaseSegment,
+    ReviewVerdict,
     SynthesisOutput,
     TaskSpec,
     TaskStatus,
+    ToolExecutionRecord,
 )
 from crewforge.storage.database import Database
 
 
-@dataclass
-class ValidatedSynthesis:
-    """Validated final synthesis output with cross-run claim reference checks."""
-
-    answer: str
-    referenced_claim_ids: list[str] = field(default_factory=list)
-    assumptions: list[str] = field(default_factory=list)
-    missing_information: list[str] = field(default_factory=list)
-    confidence_notes: str = ""
-    invalid_claim_refs_removed: list[str] = field(default_factory=list)
-    used_partial_fallback: bool = False
-
-
-def validate_synthesis_output(
-    *,
-    raw: SynthesisOutput,
-    valid_claim_ids: set[str],
-    extra_assumptions: list[str],
-    extra_missing: list[str],
-    uncertainties: list[str],
-    incomplete_tasks: list[TaskSpec],
-) -> ValidatedSynthesis:
-    """Validate claim references belong to the current run and append Phase 2 honesty notes."""
-    kept_refs: list[str] = []
-    removed_refs: list[str] = []
-    for cid in raw.referenced_claim_ids:
-        if cid in valid_claim_ids and cid not in kept_refs:
-            kept_refs.append(cid)
-        elif cid not in valid_claim_ids:
-            removed_refs.append(cid)
-
-    merged_assumptions = list(dict.fromkeys([*raw.assumptions, *extra_assumptions]))
-    merged_missing = list(dict.fromkeys([*raw.missing_information, *extra_missing]))
-
-    notes_parts: list[str] = []
-    if raw.confidence_notes:
-        notes_parts.append(raw.confidence_notes.strip())
-    if raw.unverified_assertions:
-        notes_parts.append(
-            "Synthesis unverified assertions: " + "; ".join(raw.unverified_assertions)
-        )
-    if uncertainties:
-        notes_parts.append("Specialist uncertainties: " + "; ".join(uncertainties))
-    if incomplete_tasks:
-        notes_parts.append(
-            "Incomplete tasks: "
-            + ", ".join(f"{t.task_ref or t.task_id} ({t.status.value})" for t in incomplete_tasks)
-        )
-    if removed_refs:
-        notes_parts.append(f"Stripped {len(removed_refs)} invalid/out-of-run claim reference(s).")
-    notes_parts.append(
-        "Phase 2 status: claims are recorded as asserted/unresolved and have not undergone "
-        "Phase 3 independent review or deterministic verification."
-    )
-
-    return ValidatedSynthesis(
-        answer=raw.answer.strip(),
-        referenced_claim_ids=kept_refs,
-        assumptions=merged_assumptions,
-        missing_information=merged_missing,
-        confidence_notes=" ".join(notes_parts),
-        invalid_claim_refs_removed=removed_refs,
-        used_partial_fallback=False,
-    )
-
-
-def build_partial_fallback_synthesis(
+def build_partial_synthesis_output(
     *,
     plan: ExecutionPlan,
-    completed_tasks: list[TaskSpec],
-    incomplete_tasks: list[TaskSpec],
     claims: list[Claim],
-    extra_assumptions: list[str],
-    extra_missing: list[str],
-    uncertainties: list[str],
+    incomplete_tasks: list[TaskSpec],
     reason: str,
-) -> ValidatedSynthesis:
-    """Assemble an explicit partial result when budget/deadline prevents Lead synthesis call."""
-    lines = [f"[Partial Result — Lead synthesis call skipped: {reason}]"]
-    if completed_tasks:
-        lines.append("\nCompleted specialist findings:")
-        for task in completed_tasks:
-            lines.append(
-                f"- {task.task_ref or task.task_id} ({task.title}): {task.findings or 'No text.'}"
+) -> SynthesisOutput:
+    """Build a constrained partial SynthesisOutput strictly from reviewed claims.
+
+    Never releases raw unverified worker findings as verified factual prose.
+    """
+    accepted: list[ReleaseSegment] = []
+    recommendations: list[ReleaseSegment] = []
+    unresolved: list[str] = [f"Partial execution notice: {reason}"]
+
+    for claim in claims:
+        ref = ClaimVersionRef(claim_id=claim.claim_id, claim_version=claim.version)
+        if claim.status == ClaimStatus.SUPPORTED and claim.is_material:
+            accepted.append(
+                ReleaseSegment(
+                    segment_type="accepted_claim",
+                    text=claim.statement,
+                    claim_refs=[ref],
+                    is_factual_assertion=True,
+                )
             )
-    if incomplete_tasks:
-        lines.append("\nIncomplete tasks:")
-        for task in incomplete_tasks:
-            lines.append(
-                f"- {task.task_ref or task.task_id} ({task.title}): "
-                f"{task.status.value} ({task.error or 'incomplete'})"
+        elif claim.category == ClaimCategory.RECOMMENDATION:
+            recommendations.append(
+                ReleaseSegment(
+                    segment_type="recommendation",
+                    text=claim.statement,
+                    claim_refs=[ref],
+                    is_factual_assertion=False,
+                )
             )
 
-    notes = (
-        f"Partial synthesis fallback triggered ({reason}). "
-        "Claims remain unverified (Phase 3 reviewer pool not yet implemented)."
-    )
-    if uncertainties:
-        notes += " Uncertainties: " + "; ".join(uncertainties)
+    for task in incomplete_tasks:
+        unresolved.append(
+            f"Incomplete task {task.task_ref or task.task_id} ({task.title}): {task.status.value}."
+        )
 
-    return ValidatedSynthesis(
-        answer="\n".join(lines),
-        referenced_claim_ids=[c.claim_id for c in claims],
-        assumptions=list(dict.fromkeys([*plan.assumptions, *extra_assumptions])),
-        missing_information=list(dict.fromkeys([*plan.missing_information, *extra_missing])),
-        confidence_notes=notes,
-        used_partial_fallback=True,
+    return SynthesisOutput(
+        user_requirements=list(plan.user_requirements),
+        accepted_segments=accepted,
+        conditional_conclusions=[],
+        recommendations=recommendations,
+        assumptions=list(plan.assumptions),
+        unresolved_issues=unresolved,
+        missing_information=list(plan.missing_information),
+        new_factual_assertions=[],
+        referenced_claim_ids=[c.claim_id for c in claims if c.status == ClaimStatus.SUPPORTED],
     )
 
 
 class LeadSynthesizer:
-    """Synthesizes completed specialist findings and claim ledger into a validated answer."""
+    """Synthesizes reviewed claims with Lead inbox consumption and Honesty Gate enforcement."""
 
-    def __init__(self, *, executor: ModelExecutor, database: Database) -> None:
+    def __init__(
+        self,
+        *,
+        executor: ModelExecutor,
+        database: Database,
+        message_bus: MessageBus,
+    ) -> None:
         self._executor = executor
         self._db = database
+        self._bus = message_bus
+        self._gate = HonestyGate(database)
 
-    async def synthesize(
+    async def synthesize_and_gate(
         self,
         *,
         run_id: str,
         original_prompt: str,
         plan: ExecutionPlan,
         tasks: list[TaskSpec],
-        claims: list[Claim],
+        all_claims: list[Claim],
+        evidence_list: list[Evidence],
+        tool_executions: list[ToolExecutionRecord],
+        verdicts: list[ReviewVerdict],
         extra_assumptions: list[str],
         extra_missing: list[str],
         uncertainties: list[str],
+        is_partial_run: bool,
         run_deadline_monotonic: float | None = None,
-    ) -> ValidatedSynthesis:
-        """Execute Lead synthesis call and validate referenced claim IDs."""
+    ) -> HonestyGateResult:
+        """Consume Lead inbox, run Lead synthesis, and enforce deterministic Honesty Gate."""
         completed_tasks = [t for t in tasks if t.status == TaskStatus.COMPLETED]
         incomplete_tasks = [t for t in tasks if t.status != TaskStatus.COMPLETED]
-        valid_claim_ids = {c.claim_id for c in claims}
+
+        latest_by_id: dict[str, Claim] = {}
+        for claim in all_claims:
+            prev = latest_by_id.get(claim.claim_id)
+            if prev is None or claim.version > prev.version:
+                latest_by_id[claim.claim_id] = claim
+        latest_claims = list(latest_by_id.values())
+
+        # Deliver Lead's inbox messages before building synthesis prompt.
+        lead_inbox = await self._bus.read_inbox(
+            run_id=run_id,
+            recipient_id="lead",
+            mark_delivered=True,
+        )
 
         system_prompt = build_synthesis_system_prompt()
         user_prompt = build_synthesis_user_prompt(
@@ -161,7 +137,9 @@ class LeadSynthesizer:
             plan=plan,
             completed_tasks=completed_tasks,
             incomplete_tasks=incomplete_tasks,
-            claims=claims,
+            claims=latest_claims,
+            tool_executions=tool_executions,
+            lead_inbox=lead_inbox,
         )
 
         res = await self._executor.execute_structured(
@@ -173,24 +151,88 @@ class LeadSynthesizer:
             system_prompt=system_prompt,
             run_deadline_monotonic=run_deadline_monotonic,
         )
-        validated = validate_synthesis_output(
-            raw=res.parsed,
-            valid_claim_ids=valid_claim_ids,
-            extra_assumptions=extra_assumptions,
-            extra_missing=extra_missing,
-            uncertainties=uncertainties,
-            incomplete_tasks=incomplete_tasks,
-        )
+        # Only mark Lead messages consumed once synthesis actually processed them.
+        if lead_inbox:
+            await self._bus.mark_consumed(
+                run_id=run_id,
+                recipient_id="lead",
+                messages=lead_inbox,
+            )
+
         await self._db.append_event(
             ExecutionEvent(
                 run_id=run_id,
                 event_type="synthesis_completed",
                 actor="lead",
-                message="Lead synthesis completed and claim references validated.",
-                payload={
-                    "referenced_claim_ids": validated.referenced_claim_ids,
-                    "invalid_claim_refs_removed": validated.invalid_claim_refs_removed,
-                },
+                message="Lead synthesis completed; passing output to deterministic Honesty Gate.",
+                payload={"lead_messages_consumed": len(lead_inbox)},
             )
         )
-        return validated
+
+        gate_result = self._gate.evaluate(
+            run_id=run_id,
+            original_prompt=original_prompt,
+            plan=plan,
+            synthesis=res.parsed,
+            all_claims=all_claims,
+            evidence_list=evidence_list,
+            tool_executions=tool_executions,
+            verdicts=verdicts,
+            incomplete_tasks=incomplete_tasks,
+            extra_assumptions=extra_assumptions,
+            extra_missing=extra_missing,
+            uncertainties=uncertainties,
+            is_partial_run=is_partial_run,
+        )
+        assert gate_result.gate_record is not None
+        await self._gate.persist_decision(gate_result.gate_record)
+        return gate_result
+
+    async def gate_partial_fallback(
+        self,
+        *,
+        run_id: str,
+        original_prompt: str,
+        plan: ExecutionPlan,
+        tasks: list[TaskSpec],
+        all_claims: list[Claim],
+        evidence_list: list[Evidence],
+        tool_executions: list[ToolExecutionRecord],
+        verdicts: list[ReviewVerdict],
+        extra_assumptions: list[str],
+        extra_missing: list[str],
+        uncertainties: list[str],
+        reason: str,
+    ) -> HonestyGateResult:
+        """Apply the exact same Honesty Gate to partial fallback synthesis."""
+        incomplete_tasks = [t for t in tasks if t.status != TaskStatus.COMPLETED]
+        latest_by_id: dict[str, Claim] = {}
+        for claim in all_claims:
+            prev = latest_by_id.get(claim.claim_id)
+            if prev is None or claim.version > prev.version:
+                latest_by_id[claim.claim_id] = claim
+
+        partial_output = build_partial_synthesis_output(
+            plan=plan,
+            claims=list(latest_by_id.values()),
+            incomplete_tasks=incomplete_tasks,
+            reason=reason,
+        )
+        gate_result = self._gate.evaluate(
+            run_id=run_id,
+            original_prompt=original_prompt,
+            plan=plan,
+            synthesis=partial_output,
+            all_claims=all_claims,
+            evidence_list=evidence_list,
+            tool_executions=tool_executions,
+            verdicts=verdicts,
+            incomplete_tasks=incomplete_tasks,
+            extra_assumptions=extra_assumptions,
+            extra_missing=extra_missing,
+            uncertainties=uncertainties,
+            is_partial_run=True,
+        )
+        assert gate_result.gate_record is not None
+        await self._gate.persist_decision(gate_result.gate_record)
+        return gate_result

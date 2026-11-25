@@ -1,11 +1,12 @@
-"""Specialist worker execution for DAG tasks and bounded peer-message follow-ups."""
+"""Specialist worker execution for DAG tasks and targeted peer-message follow-ups."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from crewforge.config import sanitize_error_message
 from crewforge.core.executor import ModelExecutor
-from crewforge.core.ledger import ClaimLedger
+from crewforge.core.ledger import ClaimLedger, ClaimRevisionError
 from crewforge.core.messaging import MessageBus
 from crewforge.prompts.worker import (
     build_followup_user_prompt,
@@ -17,11 +18,14 @@ from crewforge.schemas import (
     AgentSpec,
     Claim,
     Evidence,
+    ExecutionEvent,
     ExecutionPlan,
     FollowUpOutput,
     SpecialistOutput,
     TaskSpec,
+    ToolExecutionRecord,
 )
+from crewforge.storage.database import CrossRunReferenceError
 
 
 @dataclass
@@ -33,6 +37,7 @@ class WorkerExecutionOutcome:
     findings: str
     claims: list[Claim] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
+    tool_executions: list[ToolExecutionRecord] = field(default_factory=list)
     sent_messages: list[AgentMessage] = field(default_factory=list)
     consumed_messages: list[AgentMessage] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
@@ -77,11 +82,22 @@ class SpecialistWorker:
     ) -> WorkerExecutionOutcome:
         """Execute a specialist's assigned task with dependency context and inbox delivery."""
         dependency_findings: list[tuple[str, str]] = []
+        dep_task_ids: set[str] = set()
         for dep_id in task.depends_on:
             dep_task = completed_tasks_by_id.get(dep_id)
             if dep_task is not None and dep_task.findings:
                 label = f"{dep_task.task_ref or dep_task.task_id}: {dep_task.title}"
                 dependency_findings.append((label, dep_task.findings))
+                dep_task_ids.add(dep_id)
+
+        dep_claims_summary: list[str] = []
+        if dep_task_ids:
+            all_claims = await self._ledger.get_claims(run_id, latest_only=True)
+            for c in all_claims:
+                if c.task_id in dep_task_ids:
+                    dep_claims_summary.append(
+                        f"{c.claim_id} (v{c.version}, {c.category.value}): {c.statement}"
+                    )
 
         dependency_text_blob = "\n".join(text for _, text in dependency_findings)
         inbound_messages = await self._bus.read_inbox(
@@ -97,6 +113,7 @@ class SpecialistWorker:
             task=task,
             acceptance_criteria=plan.acceptance_criteria,
             dependency_findings=dependency_findings,
+            dependency_claims_summary=dep_claims_summary,
             shared_assumptions=plan.assumptions,
             inbound_messages=inbound_messages,
             agent_labels=agent_labels,
@@ -120,7 +137,11 @@ class SpecialistWorker:
             )
 
         output = response.parsed
-        persisted_evidence, persisted_claims = await self._ledger.record_specialist_outputs(
+        (
+            persisted_evidence,
+            persisted_claims,
+            tool_records,
+        ) = await self._ledger.record_specialist_outputs(
             run_id=run_id,
             agent_id=agent.agent_id,
             task_id=task.task_id,
@@ -143,6 +164,7 @@ class SpecialistWorker:
             findings=output.findings,
             claims=persisted_claims,
             evidence=persisted_evidence,
+            tool_executions=tool_records,
             sent_messages=sent_messages,
             consumed_messages=inbound_messages,
             assumptions=output.assumptions,
@@ -162,7 +184,7 @@ class SpecialistWorker:
         allow_outgoing_messages: bool = True,
         run_deadline_monotonic: float | None = None,
     ) -> WorkerExecutionOutcome | None:
-        """Run a bounded peer-communication follow-up if the agent has pending messages."""
+        """Run a bounded peer-communication follow-up with explicit ID/version targeting."""
         inbound_messages = await self._bus.read_inbox(
             run_id=run_id,
             recipient_id=agent.agent_id,
@@ -172,7 +194,10 @@ class SpecialistWorker:
             return None
 
         agent_labels, peer_directory = self._build_agent_labels(plan)
-        claims_summary = [f"{c.claim_id} (v{c.version}): {c.statement}" for c in prior_claims]
+        claims_summary = [
+            f"claim_id={c.claim_id}, expected_version={c.version}: {c.statement}"
+            for c in prior_claims
+        ]
         system_prompt = build_worker_system_prompt(agent)
         user_prompt = build_followup_user_prompt(
             original_prompt=original_prompt,
@@ -200,53 +225,54 @@ class SpecialistWorker:
 
         followup = response.parsed
         inbound_blob = "\n".join(m.content for m in inbound_messages)
-        task_id = prior_claims[0].task_id if prior_claims else None
+        task_id = prior_claims[0].task_id if prior_claims else plan.tasks[0].task_id
 
-        # Record any new evidence proposals and create revised/new claims cleanly.
-        new_evidence: list[Evidence] = []
-        if followup.evidence_proposals:
-            new_evidence, _ = await self._ledger.record_specialist_outputs(
-                run_id=run_id,
-                agent_id=agent.agent_id,
-                task_id=task_id or plan.tasks[0].task_id,
-                original_prompt=original_prompt,
-                dependency_findings_text=f"{prior_findings}\n{inbound_blob}",
-                evidence_proposals=followup.evidence_proposals,
-                claim_proposals=[],
-            )
+        new_evidence, new_claims, tool_records = await self._ledger.record_specialist_outputs(
+            run_id=run_id,
+            agent_id=agent.agent_id,
+            task_id=task_id,
+            original_prompt=original_prompt,
+            dependency_findings_text=f"{prior_findings}\n{inbound_blob}",
+            evidence_proposals=followup.evidence_proposals,
+            claim_proposals=followup.new_claims,
+        )
 
-        updated_claims: list[Claim] = []
-        if followup.revised_claims:
-            for idx, prop in enumerate(followup.revised_claims):
-                evd_ids = [
-                    new_evidence[e_idx].evidence_id
-                    for e_idx in prop.evidence_indices
-                    if 0 <= e_idx < len(new_evidence)
-                ]
-                if idx < len(prior_claims):
-                    revised = await self._ledger.revise_claim(
-                        prior_claim=prior_claims[idx],
-                        new_statement=prop.statement,
-                        author_agent_id=agent.agent_id,
-                        task_id=task_id,
-                        additional_evidence_ids=evd_ids,
-                        assumptions=prop.assumptions or None,
-                        revision_notes="Updated after peer message delivery.",
-                        is_unresolved=prop.is_unresolved,
-                        confidence=prop.confidence,
-                    )
-                    updated_claims.append(revised)
-                else:
-                    _, created = await self._ledger.record_specialist_outputs(
+        updated_claims: list[Claim] = list(new_claims)
+        for rev in followup.revised_claims:
+            evd_ids = [
+                new_evidence[e_idx].evidence_id
+                for e_idx in rev.evidence_indices
+                if 0 <= e_idx < len(new_evidence)
+            ]
+            try:
+                revised = await self._ledger.apply_targeted_revision(
+                    run_id=run_id,
+                    target_claim_id=rev.target_claim_id,
+                    expected_version=rev.expected_version,
+                    new_statement=rev.new_statement,
+                    author_agent_id=agent.agent_id,
+                    original_prompt=original_prompt,
+                    dependency_findings_text=f"{prior_findings}\n{inbound_blob}",
+                    category=rev.category,
+                    additional_evidence_ids=evd_ids,
+                    premise_claim_ids=rev.premise_claim_ids or None,
+                    computation_request=rev.computation,
+                    assumptions=rev.assumptions or None,
+                    revision_notes=rev.revision_notes,
+                    is_unresolved=rev.is_unresolved,
+                    confidence=rev.confidence,
+                    require_same_author=True,
+                )
+                updated_claims.append(revised)
+            except (ClaimRevisionError, CrossRunReferenceError) as exc:
+                await self._ledger._db.append_event(
+                    ExecutionEvent(
                         run_id=run_id,
-                        agent_id=agent.agent_id,
-                        task_id=task_id or plan.tasks[0].task_id,
-                        original_prompt=original_prompt,
-                        dependency_findings_text=f"{prior_findings}\n{inbound_blob}",
-                        evidence_proposals=[],
-                        claim_proposals=[prop],
+                        event_type="revision_rejected",
+                        actor=agent.agent_id,
+                        message=sanitize_error_message(str(exc)),
                     )
-                    updated_claims.extend(created)
+                )
 
         sent_messages: list[AgentMessage] = []
         if allow_outgoing_messages and followup.outgoing_messages:
@@ -259,11 +285,12 @@ class SpecialistWorker:
             )
 
         return WorkerExecutionOutcome(
-            task_id=task_id or "",
+            task_id=task_id,
             agent_id=agent.agent_id,
             findings=followup.updated_findings,
             claims=updated_claims,
             evidence=new_evidence,
+            tool_executions=tool_records,
             sent_messages=sent_messages,
             consumed_messages=inbound_messages,
             uncertainties=followup.uncertainties,

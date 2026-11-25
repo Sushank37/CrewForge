@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,17 +11,26 @@ from pydantic import BaseModel
 
 from crewforge.config import CrewForgeSettings
 from crewforge.mcp_server import create_mcp_server
-from crewforge.schemas import FollowUpOutput, PlannerOutput, SpecialistOutput, SynthesisOutput
+from crewforge.schemas import (
+    FollowUpOutput,
+    PlannerOutput,
+    ReviewerBatchOutput,
+    SpecialistOutput,
+    SynthesisOutput,
+)
 from crewforge.storage.database import Database
 from tests.fake_provider import FakeProvider
+
+_CLAIM_HEADER_RE = re.compile(r"Claim (clm_[a-f0-9]+) \(version=(\d+),")
+_SUPPORTED_CLAIM_RE = re.compile(r"- (clm_[a-f0-9]+) \(version=(\d+),.*?status=supported")
 
 
 def _scripted_mcp_handler(prompt: str, response_model: type[BaseModel] | None) -> Any:
     if response_model is PlannerOutput:
         return {
             "goal": "Analyze prompt via dynamic specialists.",
-            "user_requirements": ["Address all parts of the request accurately."],
-            "acceptance_criteria": ["Provide structured findings and surface missing data."],
+            "user_requirements": ["Address schema validation in multi-agent systems"],
+            "acceptance_criteria": ["Provide verified findings and surface missing data."],
             "agents": [
                 {
                     "agent_ref": "a1",
@@ -57,12 +67,13 @@ def _scripted_mcp_handler(prompt: str, response_model: type[BaseModel] | None) -
             "missing_information": ["Live operational context not provided."],
         }
     if response_model is SpecialistOutput:
-        if "t1" in prompt:
+        if "Assigned task (t1)" in prompt:
             return {
                 "findings": "Core finding: schema validation prevents silent data corruption.",
                 "claims": [
                     {
-                        "statement": "Schema validation catches malformed inputs early.",
+                        "statement": "Schema validation is required in multi-agent systems.",
+                        "category": "given_fact",
                         "evidence_indices": [0],
                         "assumptions": [],
                         "confidence": 0.9,
@@ -92,9 +103,10 @@ def _scripted_mcp_handler(prompt: str, response_model: type[BaseModel] | None) -
             "findings": "Risk review confirmed contract drift risk and acknowledged message.",
             "claims": [
                 {
-                    "statement": "Unvalidated responses can propagate invalid state.",
+                    "statement": "Unvalidated responses can propagate invalid state in systems.",
+                    "category": "logical_inference",
                     "evidence_indices": [],
-                    "assumptions": [],
+                    "assumptions": ["No external validator exists downstream"],
                     "confidence": 0.85,
                 }
             ],
@@ -102,28 +114,70 @@ def _scripted_mcp_handler(prompt: str, response_model: type[BaseModel] | None) -
             "assumptions": [],
             "uncertainties": ["Runtime load profile unknown."],
             "missing_information": ["Target throughput constraints."],
-            "outgoing_messages": [],
+            "outgoing_messages": [
+                {
+                    "recipient_ref": "lead",
+                    "message_type": "finding",
+                    "content": "Risk review complete for schema validation.",
+                    "related_claim_indices": [0],
+                }
+            ],
             "task_completed": True,
         }
     if response_model is FollowUpOutput:
         return {
             "updated_findings": "Follow-up completed.",
             "revised_claims": [],
+            "new_claims": [],
             "evidence_proposals": [],
             "uncertainties": [],
             "outgoing_messages": [],
         }
+    if response_model is ReviewerBatchOutput:
+        verdicts = []
+        for cid, cver in _CLAIM_HEADER_RE.findall(prompt):
+            verdicts.append(
+                {
+                    "claim_id": cid,
+                    "claim_version": int(cver),
+                    "review_dimension": "combined_evidence_consistency",
+                    "decision": "approve",
+                    "rationale": "Consistent with prompt and verified evidence.",
+                    "evidence_refs": [],
+                    "blocking_severity": "none",
+                }
+            )
+        return {"verdicts": verdicts, "missing_requirement_coverage": []}
     if response_model is SynthesisOutput:
+        supported_refs = _SUPPORTED_CLAIM_RE.findall(prompt)
+        accepted = []
+        for cid, cver in supported_refs:
+            accepted.append(
+                {
+                    "segment_type": "accepted_claim",
+                    "text": ("Schema validation prevents invalid state in multi-agent systems."),
+                    "claim_refs": [{"claim_id": cid, "claim_version": int(cver)}],
+                    "is_factual_assertion": True,
+                }
+            )
         return {
-            "answer": (
-                "Multi-agent synthesis: schema validation catches malformed inputs "
-                "and prevents contract drift."
-            ),
-            "referenced_claim_ids": [],
-            "unverified_assertions": [],
+            "user_requirements": ["Address schema validation in multi-agent systems"],
+            "accepted_segments": accepted,
+            "conditional_conclusions": [],
+            "recommendations": [
+                {
+                    "segment_type": "recommendation",
+                    "text": "Enforce strict schema checks at every agent boundary.",
+                    "claim_refs": [],
+                    "is_factual_assertion": False,
+                }
+            ],
             "assumptions": ["Evaluated offline."],
+            "unresolved_issues": [],
             "missing_information": ["Target throughput constraints."],
-            "confidence_notes": "Synthesized from two dynamic specialists.",
+            "new_factual_assertions": [],
+            "referenced_claim_ids": [cid for cid, _ in supported_refs],
+            "confidence_notes": "Synthesized from reviewed claims.",
         }
     return {
         "answer": f"Deterministic baseline answer for: {prompt}",

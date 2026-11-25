@@ -101,12 +101,16 @@ class CrewForgeSettings(BaseSettings):
 
     planner_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
     worker_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
+    review_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
+    revision_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
     synthesis_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
 
     max_workers: int = Field(default=4, ge=1, le=8)
     max_tasks: int = Field(default=6, ge=1, le=12)
     max_communication_rounds: int = Field(default=1, ge=0, le=3)
+    max_revision_rounds: int = Field(default=1, ge=0, le=3)
     max_message_chars: int = Field(default=1000, ge=100, le=8000)
+    separate_review_dimensions: bool = False
     allowed_capabilities: list[str] = Field(
         default_factory=lambda: list(DEFAULT_ALLOWED_CAPABILITIES)
     )
@@ -190,6 +194,20 @@ class CrewForgeSettings(BaseSettings):
             return 1
         return self.max_concurrency
 
+    @property
+    def effective_max_workers(self) -> int:
+        """Compact local worker bound (3) for Ollama unless explicitly configured."""
+        if self.provider == ProviderType.OLLAMA and "max_workers" not in self.model_fields_set:
+            return 3
+        return self.max_workers
+
+    @property
+    def effective_max_tasks(self) -> int:
+        """Compact local task bound (3) for Ollama unless explicitly configured."""
+        if self.provider == ProviderType.OLLAMA and "max_tasks" not in self.model_fields_set:
+            return 3
+        return self.max_tasks
+
     def output_limit_for_operation(self, operation: str) -> int:
         """Return bounded output-token limit for a given operation."""
         override: int | None = None
@@ -197,6 +215,10 @@ class CrewForgeSettings(BaseSettings):
             override = self.planner_max_output_tokens
         elif operation in {"worker", "worker_followup"}:
             override = self.worker_max_output_tokens
+        elif operation in {"review", "review_evidence", "review_consistency"}:
+            override = self.review_max_output_tokens
+        elif operation == "revision":
+            override = self.revision_max_output_tokens
         elif operation == "synthesis":
             override = self.synthesis_max_output_tokens
         if override is None:

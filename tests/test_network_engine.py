@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -12,18 +13,22 @@ from pydantic import BaseModel
 
 from crewforge.config import CrewForgeSettings
 from crewforge.core.budget import BudgetManager
+from crewforge.core.honesty_gate import HonestyGate
 from crewforge.core.ledger import ClaimLedger
 from crewforge.core.messaging import MessageBus
 from crewforge.core.orchestrator import NetworkRunner
-from crewforge.core.synthesis import validate_synthesis_output
 from crewforge.providers.base import ProviderError
 from crewforge.schemas import (
     AgentMessage,
+    ClaimCategory,
     ClaimStatus,
+    ClaimVersionRef,
     EvidenceReliability,
     FollowUpOutput,
     PlannerOutput,
     ProposedClaim,
+    ReleaseSegment,
+    ReviewerBatchOutput,
     RunStatus,
     SpecialistOutput,
     SynthesisOutput,
@@ -31,6 +36,10 @@ from crewforge.schemas import (
 )
 from crewforge.storage.database import CrossRunReferenceError, Database
 from tests.fake_provider import FakeProvider
+
+_CLAIM_ID_VER_RE = re.compile(r"Claim (clm_[a-f0-9]+) \(version=(\d+),")
+_TARGET_CLAIM_RE = re.compile(r"claim_id=(clm_[a-f0-9]+),\s*expected_version=(\d+)")
+_SUPPORTED_LINE_RE = re.compile(r"- (clm_[a-f0-9]+) \(version=(\d+),.*?status=supported")
 
 
 def _settings(db_path: Path, **overrides: object) -> CrewForgeSettings:
@@ -42,6 +51,7 @@ def _settings(db_path: Path, **overrides: object) -> CrewForgeSettings:
         "max_model_calls_per_run": 16,
         "run_deadline_seconds": 30.0,
         "max_communication_rounds": 1,
+        "max_revision_rounds": 1,
     }
     defaults.update(overrides)
     return CrewForgeSettings(**defaults)  # type: ignore[arg-type]
@@ -60,6 +70,7 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
     max_observed_concurrency = 0
     execution_log: list[tuple[str, float]] = []
     followup_prompts: list[str] = []
+    synthesis_prompts: list[str] = []
 
     class InstrumentedProvider(FakeProvider):
         async def generate_structured(
@@ -94,7 +105,7 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
         if response_model is PlannerOutput:
             return {
                 "goal": "Solve multi-part problem",
-                "user_requirements": ["Analyze A and B independently, then combine in C"],
+                "user_requirements": ["Analyze alpha and beta independently, then combine"],
                 "acceptance_criteria": ["Both branches analyzed"],
                 "agents": [
                     {
@@ -153,10 +164,18 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
                     "claims": [
                         {
                             "statement": "Prompt includes keyword alpha.",
-                            "evidence_indices": [0, 1],
+                            "category": "given_fact",
+                            "evidence_indices": [0],
                             "assumptions": [],
-                            "confidence": 0.8,
-                        }
+                            "confidence": 0.9,
+                        },
+                        {
+                            "statement": "External citation unretrieved.",
+                            "category": "external_factual_assertion",
+                            "evidence_indices": [1],
+                            "assumptions": [],
+                            "confidence": 0.5,
+                        },
                     ],
                     "evidence_proposals": [
                         {
@@ -195,9 +214,10 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
                     "findings": "Finding B completed.",
                     "claims": [
                         {
-                            "statement": "Branch B preliminary claim.",
+                            "statement": "Branch beta preliminary analysis completed.",
+                            "category": "logical_inference",
                             "evidence_indices": [],
-                            "assumptions": [],
+                            "assumptions": ["Evaluated independently"],
                             "confidence": 0.7,
                         }
                     ],
@@ -209,7 +229,6 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
                     "task_completed": True,
                 }
             execution_log.append(("t3", now))
-            # Verify dependent task received both dependency findings AND inbound message from a1!
             assert "Finding A" in prompt
             assert "Finding B" in prompt
             assert "Handoff from a1 to a3: include A." in prompt
@@ -220,33 +239,78 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
                 "assumptions": [],
                 "uncertainties": [],
                 "missing_information": [],
-                "outgoing_messages": [],
+                "outgoing_messages": [
+                    {
+                        "recipient_ref": "lead",
+                        "message_type": "finding",
+                        "content": "Lead notice: integration C finished cleanly.",
+                        "related_claim_indices": [],
+                    }
+                ],
                 "task_completed": True,
             }
         if response_model is FollowUpOutput:
             followup_prompts.append(prompt)
-            # Confirm specialist a2 actually received a1's peer message in follow-up context!
             assert "Note from a1: verify constraint X=42." in prompt
+            targets = _TARGET_CLAIM_RE.findall(prompt)
+            assert targets, "FollowUp prompt must expose target claim_id and expected_version"
+            cid, cver = targets[0]
             return {
                 "updated_findings": "Finding B updated after incorporating X=42 from a1.",
                 "revised_claims": [
                     {
-                        "statement": "Branch B revised claim with constraint X=42.",
-                        "evidence_indices": [],
-                        "assumptions": [],
+                        "target_claim_id": cid,
+                        "expected_version": int(cver),
+                        "new_statement": "Branch beta revised analysis incorporating X=42.",
+                        "revision_notes": "Updated from peer message.",
+                        "assumptions": ["X=42 verified by peer a1"],
                         "confidence": 0.85,
                     }
                 ],
+                "new_claims": [],
                 "evidence_proposals": [],
                 "uncertainties": [],
                 "outgoing_messages": [],
             }
+        if response_model is ReviewerBatchOutput:
+            verdicts = []
+            for cid, cver in _CLAIM_ID_VER_RE.findall(prompt):
+                verdicts.append(
+                    {
+                        "claim_id": cid,
+                        "claim_version": int(cver),
+                        "review_dimension": "combined_evidence_consistency",
+                        "decision": "approve",
+                        "rationale": "Supported by prompt and consistent.",
+                        "evidence_refs": [],
+                        "blocking_severity": "none",
+                    }
+                )
+            return {"verdicts": verdicts, "missing_requirement_coverage": []}
+
+        synthesis_prompts.append(prompt)
+        assert "Lead notice: integration C finished cleanly." in prompt
+        supported = _SUPPORTED_LINE_RE.findall(prompt)
+        segments = []
+        for cid, cver in supported:
+            segments.append(
+                {
+                    "segment_type": "accepted_claim",
+                    "text": "Analysis of alpha and beta completed with verified keyword alpha.",
+                    "claim_refs": [{"claim_id": cid, "claim_version": int(cver)}],
+                    "is_factual_assertion": True,
+                }
+            )
         return {
-            "answer": "Final synthesized answer incorporating A, B (revised), and C.",
-            "referenced_claim_ids": ["clm_forged_cross_run"],
-            "unverified_assertions": [],
+            "user_requirements": ["Analyze alpha and beta independently, then combine"],
+            "accepted_segments": segments,
+            "conditional_conclusions": [],
+            "recommendations": [],
             "assumptions": [],
+            "unresolved_issues": [],
             "missing_information": [],
+            "new_factual_assertions": [],
+            "referenced_claim_ids": ["clm_forged_cross_run", *[c for c, _ in supported]],
             "confidence_notes": "All branches completed.",
         }
 
@@ -261,37 +325,38 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
         )
 
         result = await runner.run("Analyze alpha and beta concurrently.")
-        assert result.status == RunStatus.COMPLETED
+        assert result.status == RunStatus.PARTIAL  # forged claim_id triggers gate reason
         assert max_observed_concurrency >= 2
 
         order = [name for name, _ in execution_log]
         assert order.index("t3") > order.index("t1")
         assert order.index("t3") > order.index("t2")
         assert len(followup_prompts) == 1
+        assert len(synthesis_prompts) == 1
 
         trace = await db.get_run_trace(result.run_id)
         assert trace is not None
-        # Forged claim ID was stripped by synthesis validation.
         assert "clm_forged_cross_run" not in result.referenced_claim_ids
-        assert "invalid/out-of-run claim reference" in (result.confidence_notes or "")
+        assert trace.honesty_gate is not None
+        assert any("clm_forged_cross_run" in r for r in trace.honesty_gate.reasons)
 
-        # Evidence validation: user_prompt match -> MEDIUM/verified_in_input=True;
-        # external -> UNVERIFIED.
         evd_by_type = {e.source_type: e for e in trace.evidence}
         assert evd_by_type["user_prompt"].verified_in_input is True
         assert evd_by_type["user_prompt"].reliability == EvidenceReliability.MEDIUM
         assert evd_by_type["external_unverified"].verified_in_input is False
         assert evd_by_type["external_unverified"].reliability == EvidenceReliability.UNVERIFIED
 
-        # Claims remain ASSERTED (never SUPPORTED purely on model assertion),
-        # and v1+v2 history is preserved.
-        assert all(c.status in {ClaimStatus.ASSERTED, ClaimStatus.UNRESOLVED} for c in trace.claims)
+        # External unretrieved claim stays UNRESOLVED; given_fact & revised inference SUPPORTED.
+        ext_claims = [c for c in trace.claims if c.category == ClaimCategory.EXTERNAL_FACT]
+        assert len(ext_claims) == 1
+        assert ext_claims[0].status == ClaimStatus.UNRESOLVED
+
         versions = [(c.claim_id, c.version) for c in trace.claims]
         assert any(ver == 2 for _, ver in versions)
         assert any(ver == 1 for _, ver in versions)
 
-        # Peer messages marked consumed after follow-up & dependent task delivery.
-        assert len(trace.messages) == 2
+        # Peer messages + Lead inbox message all consumed!
+        assert len(trace.messages) == 3
         assert all(m.delivery_status == "consumed" for m in trace.messages)
     finally:
         await db.close()
@@ -374,12 +439,25 @@ async def test_failed_task_blocks_dependents_without_blocking_independent_branch
                 "outgoing_messages": [],
                 "task_completed": True,
             }
+        if response_model is ReviewerBatchOutput:
+            return {"verdicts": [], "missing_requirement_coverage": []}
         return {
-            "answer": "Partial answer from t3 only.",
-            "referenced_claim_ids": [],
-            "unverified_assertions": [],
+            "user_requirements": ["Run two branches"],
+            "accepted_segments": [],
+            "conditional_conclusions": [
+                {
+                    "segment_type": "conditional_conclusion",
+                    "text": "Only the independent branch finished; dependent work was blocked.",
+                    "claim_refs": [],
+                    "is_factual_assertion": False,
+                }
+            ],
+            "recommendations": [],
             "assumptions": [],
+            "unresolved_issues": ["t1 failed and t2 was blocked."],
             "missing_information": [],
+            "new_factual_assertions": [],
+            "referenced_claim_ids": [],
             "confidence_notes": "t1 failed and t2 was blocked.",
         }
 
@@ -408,7 +486,6 @@ async def test_run_deadline_and_budget_exhaustion_produce_partial_results(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "limits.db"
-    # Allow only 2 calls total: 1 for planner, 0 tasks allowed (1 reserved for synthesis!).
     settings = _settings(db_path, max_model_calls_per_run=2, max_communication_rounds=0)
     db = Database(db_path)
     await db.initialize()
@@ -441,11 +518,15 @@ async def test_run_deadline_and_budget_exhaustion_produce_partial_results(
                 "missing_information": [],
             }
         return {
-            "answer": "Synthesized partial summary within call limit.",
-            "referenced_claim_ids": [],
-            "unverified_assertions": [],
+            "user_requirements": ["Req"],
+            "accepted_segments": [],
+            "conditional_conclusions": [],
+            "recommendations": [],
             "assumptions": [],
+            "unresolved_issues": ["Task t1 could not run due to call reserve."],
             "missing_information": ["Task t1 could not run due to call reserve."],
+            "new_factual_assertions": [],
+            "referenced_claim_ids": [],
             "confidence_notes": "Partial result.",
         }
 
@@ -458,11 +539,12 @@ async def test_run_deadline_and_budget_exhaustion_produce_partial_results(
         )
         res = await runner.run("Test budget cap reservation for synthesis")
         assert res.status == RunStatus.PARTIAL
-        assert res.usage.model_calls == 2  # 1 planner + 1 synthesis!
+        assert res.usage.model_calls == 2
+        assert res.verification is not None
+        assert res.verification.review_completeness is None  # 0 material claims -> None, not 100%!
     finally:
         await db.close()
 
-    # Now test run_deadline_seconds expiration during worker execution.
     db_path_2 = tmp_path / "deadline.db"
     deadline_settings = _settings(
         db_path_2,
@@ -496,6 +578,7 @@ async def test_run_deadline_and_budget_exhaustion_produce_partial_results(
         trace2 = await db2.get_run_trace(res2.run_id)
         assert trace2 is not None
         assert trace2.tasks[0].status in {TaskStatus.FAILED, TaskStatus.BLOCKED}
+        assert trace2.honesty_gate is not None
     finally:
         await db2.close()
 
@@ -545,7 +628,7 @@ async def test_cross_run_isolation_and_ledger_immutability(tmp_path: Path) -> No
         ledger = ClaimLedger(db)
         bus = MessageBus(db)
 
-        _, claims_a = await ledger.record_specialist_outputs(
+        _, claims_a, _ = await ledger.record_specialist_outputs(
             run_id="run_A",
             agent_id=plan_a.agents[0].agent_id,
             task_id=plan_a.tasks[0].task_id,
@@ -574,7 +657,6 @@ async def test_cross_run_isolation_and_ledger_immutability(tmp_path: Path) -> No
         ]
         assert v2.parent_claim_id == v1.claim_id
 
-        # Reject cross-run message reference to run_A's claim from run_B.
         with pytest.raises(CrossRunReferenceError):
             await db.insert_message(
                 AgentMessage(
@@ -587,23 +669,36 @@ async def test_cross_run_isolation_and_ledger_immutability(tmp_path: Path) -> No
                 [],
             )
 
-        # Reject cross-run agent ID.
         with pytest.raises(CrossRunReferenceError):
             await bus.read_inbox(run_id="run_B", recipient_id=plan_a.agents[0].agent_id)
 
-        # Synthesis validation strips invalid claim references.
-        syn = validate_synthesis_output(
-            raw=SynthesisOutput(
-                answer="Ans",
+        gate = HonestyGate(db)
+        gate_res = gate.evaluate(
+            run_id="run_A",
+            original_prompt="Prompt A",
+            plan=plan_a,
+            synthesis=SynthesisOutput(
+                accepted_segments=[
+                    ReleaseSegment(
+                        segment_type="accepted_claim",
+                        text="Cross-run claim",
+                        claim_refs=[ClaimVersionRef(claim_id="clm_other_run", claim_version=1)],
+                    )
+                ],
                 referenced_claim_ids=[v1.claim_id, "clm_other_run"],
             ),
-            valid_claim_ids={v1.claim_id},
+            all_claims=all_versions,
+            evidence_list=[],
+            tool_executions=[],
+            verdicts=[],
+            incomplete_tasks=[],
             extra_assumptions=[],
             extra_missing=[],
             uncertainties=[],
-            incomplete_tasks=[],
+            is_partial_run=False,
         )
-        assert syn.referenced_claim_ids == [v1.claim_id]
-        assert syn.invalid_claim_refs_removed == ["clm_other_run"]
+        assert gate_res.gate_record is not None
+        assert gate_res.gate_record.passed is False
+        assert len(gate_res.gate_record.rejected_claim_refs) >= 1
     finally:
         await db.close()

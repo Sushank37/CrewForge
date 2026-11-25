@@ -1,4 +1,4 @@
-"""Typed Pydantic v2 data contracts for CrewForge."""
+"""Typed Pydantic v2 data contracts for CrewForge (Phases 1-3)."""
 
 from __future__ import annotations
 
@@ -25,6 +25,30 @@ class ClaimStatus(StrEnum):
     SUPPORTED = "supported"
     REJECTED = "rejected"
     UNRESOLVED = "unresolved"
+    STALE = "stale"
+
+
+class ClaimCategory(StrEnum):
+    """Domain-agnostic epistemic category of a claim."""
+
+    GIVEN_FACT = "given_fact"
+    EXTERNAL_FACT = "external_factual_assertion"
+    COMPUTATION = "computation"
+    INFERENCE = "logical_inference"
+    ASSUMPTION = "assumption"
+    RECOMMENDATION = "recommendation"
+    UNCERTAINTY = "uncertainty"
+
+
+class VerificationStatus(StrEnum):
+    """Granular verification outcome independent of raw model confidence."""
+
+    PROVENANCE_VALIDATED = "provenance_validated"
+    COMPUTATIONALLY_VERIFIED = "computationally_verified"
+    INDEPENDENTLY_REVIEWED_INFERENCE = "independently_reviewed_inference"
+    UNSUPPORTED = "unsupported"
+    CONTRADICTED = "contradicted"
+    STALE_PENDING_REVIEW = "stale_pending_review"
 
 
 class ReviewDecision(StrEnum):
@@ -94,6 +118,13 @@ class UsageMetrics(BaseModel):
         return self
 
 
+class ClaimVersionRef(BaseModel):
+    """Exact version-pinned reference to a claim in the same run."""
+
+    claim_id: str = Field(min_length=1)
+    claim_version: int = Field(ge=1)
+
+
 class AgentSpec(BaseModel):
     """Specification of a dynamically assembled specialist or reviewer agent."""
 
@@ -105,6 +136,16 @@ class AgentSpec(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     model_override: str | None = None
     created_by: str = Field(default="lead")
+    created_at: datetime = Field(default_factory=_utc_now)
+
+
+class ReviewerIdentity(BaseModel):
+    """Registered independent reviewer identity within a run."""
+
+    reviewer_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    dimensions: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_utc_now)
 
 
@@ -161,28 +202,56 @@ class Evidence(BaseModel):
     created_at: datetime = Field(default_factory=_utc_now)
 
 
+class ToolExecutionRecord(BaseModel):
+    """Immutable audit record of a deterministic tool execution."""
+
+    tool_execution_id: str = Field(default_factory=lambda: _new_id("tlx"))
+    run_id: str = Field(min_length=1)
+    tool_name: str = Field(default="arithmetic", min_length=1)
+    actor: str = Field(min_length=1)
+    task_id: str | None = None
+    expression: str = Field(min_length=1)
+    variables: dict[str, str] = Field(default_factory=dict)
+    input_provenance_refs: dict[str, str] = Field(default_factory=dict)
+    proposed_result: str | None = None
+    computed_result: str | None = None
+    units: str = ""
+    assumptions: list[str] = Field(default_factory=list)
+    matches_proposed: bool | None = None
+    inputs_grounded: bool = False
+    success: bool = False
+    error: str | None = None
+    created_at: datetime = Field(default_factory=_utc_now)
+
+
 class Claim(BaseModel):
-    """Versioned factual or analytical claim stored in the ledger."""
+    """Versioned factual, computational, or analytical claim stored in the ledger."""
 
     claim_id: str = Field(default_factory=lambda: _new_id("clm"))
     run_id: str = Field(min_length=1)
     statement: str = Field(min_length=1)
+    category: ClaimCategory = ClaimCategory.INFERENCE
     status: ClaimStatus = ClaimStatus.ASSERTED
+    verification_status: VerificationStatus = VerificationStatus.UNSUPPORTED
     version: int = Field(default=1, ge=1)
     parent_claim_id: str | None = None
     author_agent_id: str = Field(min_length=1)
     task_id: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     depends_on_claim_ids: list[str] = Field(default_factory=list)
+    premise_refs: list[ClaimVersionRef] = Field(default_factory=list)
+    tool_execution_ids: list[str] = Field(default_factory=list)
+    requirement_refs: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     revision_notes: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    is_material: bool = True
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
 
 
 class AgentMessage(BaseModel):
-    """Message exchanged between agents via the shared message bus."""
+    """Message exchanged between agents, reviewers, and Lead via MessageBus."""
 
     message_id: str = Field(default_factory=lambda: _new_id("msg"))
     run_id: str = Field(min_length=1)
@@ -203,9 +272,43 @@ class ReviewVerdict(BaseModel):
     claim_id: str = Field(min_length=1)
     claim_version: int = Field(ge=1)
     reviewer_id: str = Field(min_length=1)
+    review_dimension: str = Field(default="general", min_length=1)
     decision: ReviewDecision
     rationale: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(default_factory=list)
+    required_correction: str | None = None
+    blocking_severity: Literal["none", "minor", "blocking"] = "none"
     blocking_issues: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=_utc_now)
+
+
+class VerificationSummary(BaseModel):
+    """Quantitative verification & coverage metrics surfaced on RunResult."""
+
+    material_claim_count: int = Field(default=0, ge=0)
+    supported_claim_count: int = Field(default=0, ge=0)
+    unresolved_claim_count: int = Field(default=0, ge=0)
+    rejected_claim_count: int = Field(default=0, ge=0)
+    stale_claim_count: int = Field(default=0, ge=0)
+    revision_count: int = Field(default=0, ge=0)
+    evidence_types: dict[str, int] = Field(default_factory=dict)
+    review_completeness: float | None = Field(default=None, ge=0.0, le=1.0)
+    requirement_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    honesty_gate_passed: bool = False
+    honesty_gate_reasons: list[str] = Field(default_factory=list)
+
+
+class HonestyGateRecord(BaseModel):
+    """Persisted deterministic Honesty Gate decision for a run."""
+
+    gate_id: str = Field(default_factory=lambda: _new_id("hgt"))
+    run_id: str = Field(min_length=1)
+    passed: bool
+    release_mode: Literal["full", "partial", "blocked"]
+    rejected_segments: list[dict[str, Any]] = Field(default_factory=list)
+    rejected_claim_refs: list[dict[str, Any]] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    verification_summary: VerificationSummary = Field(default_factory=VerificationSummary)
     created_at: datetime = Field(default_factory=_utc_now)
 
 
@@ -253,6 +356,7 @@ class RunResult(BaseModel):
     referenced_claim_ids: list[str] = Field(default_factory=list)
     specialist_roles: list[str] = Field(default_factory=list)
     incomplete_tasks: list[str] = Field(default_factory=list)
+    verification: VerificationSummary | None = None
     usage: UsageMetrics = Field(default_factory=UsageMetrics)
     latency_ms: float = Field(default=0.0, ge=0.0)
     error: str | None = None
@@ -273,12 +377,15 @@ class RunTrace(BaseModel):
     result: RunResult | None = None
     plan: ExecutionPlan | None = None
     agents: list[AgentSpec] = Field(default_factory=list)
+    reviewers: list[ReviewerIdentity] = Field(default_factory=list)
     tasks: list[TaskSpec] = Field(default_factory=list)
     task_transitions: list[dict[str, Any]] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+    tool_executions: list[ToolExecutionRecord] = Field(default_factory=list)
     messages: list[AgentMessage] = Field(default_factory=list)
     review_verdicts: list[ReviewVerdict] = Field(default_factory=list)
+    honesty_gate: HonestyGateRecord | None = None
     events: list[ExecutionEvent] = Field(default_factory=list)
     usage_records: list[dict[str, Any]] = Field(default_factory=list)
     budget_reservations: list[dict[str, Any]] = Field(default_factory=list)
@@ -325,6 +432,17 @@ class PlannerOutput(BaseModel):
     missing_information: list[str] = Field(default_factory=list)
 
 
+class ArithmeticRequest(BaseModel):
+    """Structured deterministic computation request emitted by baseline or specialists."""
+
+    expression: str = Field(min_length=1, max_length=256)
+    variables: dict[str, str | int | float] = Field(default_factory=dict)
+    input_provenance_refs: dict[str, str] = Field(default_factory=dict)
+    proposed_result: str | int | float | None = None
+    units: str = ""
+    assumptions: list[str] = Field(default_factory=list)
+
+
 class ProposedEvidence(BaseModel):
     """Compact evidence proposal emitted by a specialist."""
 
@@ -341,8 +459,13 @@ class ProposedEvidence(BaseModel):
 class ProposedClaim(BaseModel):
     """Compact claim assertion emitted by a specialist."""
 
+    claim_ref: str | None = Field(default=None, max_length=32)
     statement: str = Field(min_length=1, max_length=600)
+    category: ClaimCategory = ClaimCategory.INFERENCE
     evidence_indices: list[int] = Field(default_factory=list)
+    premise_claim_ids: list[str] = Field(default_factory=list)
+    computation: ArithmeticRequest | None = None
+    requirement_refs: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     is_unresolved: bool = False
@@ -373,22 +496,91 @@ class SpecialistOutput(BaseModel):
     task_completed: bool = True
 
 
+class TargetedClaimRevision(BaseModel):
+    """Explicit claim-ID and version-targeted revision emitted by a specialist."""
+
+    target_claim_id: str = Field(min_length=1)
+    expected_version: int = Field(ge=1)
+    new_statement: str = Field(min_length=1, max_length=600)
+    category: ClaimCategory | None = None
+    evidence_indices: list[int] = Field(default_factory=list)
+    premise_claim_ids: list[str] = Field(default_factory=list)
+    computation: ArithmeticRequest | None = None
+    assumptions: list[str] = Field(default_factory=list)
+    revision_notes: str = Field(min_length=1, max_length=400)
+    is_unresolved: bool = False
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class FollowUpOutput(BaseModel):
     """Compact structured output from a bounded peer-communication checkpoint."""
 
     updated_findings: str = Field(min_length=1)
-    revised_claims: list[ProposedClaim] = Field(default_factory=list)
+    revised_claims: list[TargetedClaimRevision] = Field(default_factory=list)
+    new_claims: list[ProposedClaim] = Field(default_factory=list)
     evidence_proposals: list[ProposedEvidence] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     outgoing_messages: list[OutgoingMessageInstruction] = Field(default_factory=list)
 
 
-class SynthesisOutput(BaseModel):
-    """Compact structured synthesis output produced by the Lead synthesizer."""
+class RevisionOutput(BaseModel):
+    """Compact structured output from targeted dispute-resolution repair."""
 
-    answer: str = Field(min_length=1)
-    referenced_claim_ids: list[str] = Field(default_factory=list)
-    unverified_assertions: list[str] = Field(default_factory=list)
+    updated_findings: str = Field(min_length=1)
+    revisions: list[TargetedClaimRevision] = Field(default_factory=list)
+    evidence_proposals: list[ProposedEvidence] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    outgoing_messages: list[OutgoingMessageInstruction] = Field(default_factory=list)
+
+
+class ReviewerVerdictItem(BaseModel):
+    """Model-facing verdict entry for a specific claim ID and version."""
+
+    claim_id: str = Field(min_length=1)
+    claim_version: int = Field(ge=1)
+    review_dimension: str = Field(default="combined_evidence_consistency", min_length=1)
+    decision: ReviewDecision
+    rationale: str = Field(min_length=1, max_length=250)
+    evidence_refs: list[str] = Field(default_factory=list)
+    required_correction: str | None = Field(default=None, max_length=200)
+    blocking_severity: Literal["none", "minor", "blocking"] = "none"
+
+
+class ReviewerBatchOutput(BaseModel):
+    """Batched independent reviewer output."""
+
+    verdicts: list[ReviewerVerdictItem] = Field(default_factory=list)
+    missing_requirement_coverage: list[str] = Field(default_factory=list)
+
+
+class ReleaseSegment(BaseModel):
+    """Structured release segment audited by the deterministic Honesty Gate."""
+
+    segment_type: Literal[
+        "requirement_answer",
+        "accepted_claim",
+        "conditional_conclusion",
+        "recommendation",
+        "assumption",
+        "unresolved_issue",
+        "missing_information",
+    ]
+    text: str = Field(min_length=1, max_length=1000)
+    claim_refs: list[ClaimVersionRef] = Field(default_factory=list)
+    requirement_ref: str | None = None
+    is_factual_assertion: bool = True
+
+
+class SynthesisOutput(BaseModel):
+    """Evidence-constrained structured release output produced by Lead synthesizer."""
+
+    user_requirements: list[str] = Field(default_factory=list)
+    accepted_segments: list[ReleaseSegment] = Field(default_factory=list)
+    conditional_conclusions: list[ReleaseSegment] = Field(default_factory=list)
+    recommendations: list[ReleaseSegment] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+    unresolved_issues: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
+    new_factual_assertions: list[str] = Field(default_factory=list)
+    referenced_claim_ids: list[str] = Field(default_factory=list)
     confidence_notes: str | None = None

@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from crewforge.config import CrewForgeSettings, configure_logging
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
 from crewforge.core.budget import BudgetManager
+from crewforge.core.executor import ModelExecutor
 from crewforge.core.orchestrator import NetworkRunner
 from crewforge.providers.base import ModelProvider
 from crewforge.storage.database import Database
@@ -31,10 +32,7 @@ def create_mcp_server(
 ) -> FastMCP:
     """Create and configure the CrewForge FastMCP server instance.
 
-    Exposes:
-    - solve(prompt): dynamic multi-agent network execution
-    - baseline(prompt): single-agent baseline execution
-    - trace(run_id): full persisted run trace retrieval
+    Shares one ModelExecutor concurrency semaphore across concurrent MCP tool runs.
     """
     resolved_settings = settings or CrewForgeSettings()
     configure_logging(resolved_settings.log_level)
@@ -42,17 +40,27 @@ def create_mcp_server(
     resolved_db = database or Database(resolved_settings.db_path)
     owns_provider = provider is None
     resolved_provider: ModelProvider | None = provider
+    shared_budget: BudgetManager | None = None
+    shared_executor: ModelExecutor | None = None
     initialized = False
 
-    async def _ensure_initialized() -> tuple[Database, ModelProvider, BudgetManager]:
-        nonlocal resolved_provider, initialized
+    async def _ensure_initialized() -> tuple[Database, ModelProvider, BudgetManager, ModelExecutor]:
+        nonlocal resolved_provider, shared_budget, shared_executor, initialized
         if not initialized:
             await resolved_db.initialize()
             initialized = True
         if resolved_provider is None:
             resolved_provider = build_provider_from_settings(resolved_settings)
-        budget_manager = BudgetManager(resolved_db, resolved_settings)
-        return resolved_db, resolved_provider, budget_manager
+        if shared_budget is None:
+            shared_budget = BudgetManager(resolved_db, resolved_settings)
+        if shared_executor is None:
+            shared_executor = ModelExecutor(
+                provider=resolved_provider,
+                database=resolved_db,
+                budget_manager=shared_budget,
+                settings=resolved_settings,
+            )
+        return resolved_db, resolved_provider, shared_budget, shared_executor
 
     @asynccontextmanager
     async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
@@ -69,9 +77,10 @@ def create_mcp_server(
     mcp = FastMCP(
         name="CrewForge",
         instructions=(
-            "CrewForge Phase 2 MCP server providing dynamic multi-agent problem solving "
-            "(solve), single-agent baseline comparison (baseline), and full persisted "
-            "execution trace inspection (trace)."
+            "CrewForge Phase 3 MCP server providing verified dynamic multi-agent problem "
+            "solving with deterministic arithmetic, independent review, targeted repair, and "
+            "an enforceable Honesty Gate (solve), single-agent baseline comparison (baseline), "
+            "and full persisted execution trace inspection (trace)."
         ),
         host=host,
         port=port,
@@ -80,13 +89,14 @@ def create_mcp_server(
 
     @mcp.tool()
     async def solve(prompt: str) -> dict[str, Any]:
-        """Solve an arbitrary prompt using CrewForge's dynamic multi-agent network."""
-        db, active_provider, budget_manager = await _ensure_initialized()
+        """Solve an arbitrary prompt using CrewForge's verified multi-agent network."""
+        db, active_provider, budget_manager, executor = await _ensure_initialized()
         runner = NetworkRunner(
             provider=active_provider,
             database=db,
             budget_manager=budget_manager,
             settings=resolved_settings,
+            executor=executor,
         )
         logger.info(
             "Executing solve tool (provider=%s, model=%s)",
@@ -98,13 +108,14 @@ def create_mcp_server(
 
     @mcp.tool()
     async def baseline(prompt: str) -> dict[str, Any]:
-        """Run the single-agent baseline on an arbitrary prompt and return a structured result."""
-        db, active_provider, budget_manager = await _ensure_initialized()
+        """Run the single-agent baseline with equivalent arithmetic tool parity."""
+        db, active_provider, budget_manager, executor = await _ensure_initialized()
         runner = BaselineRunner(
             provider=active_provider,
             database=db,
             budget_manager=budget_manager,
             settings=resolved_settings,
+            executor=executor,
         )
         logger.info(
             "Executing baseline tool (provider=%s, model=%s)",
@@ -116,8 +127,8 @@ def create_mcp_server(
 
     @mcp.tool()
     async def trace(run_id: str) -> dict[str, Any]:
-        """Retrieve the persisted execution trace, plan, tasks, claims, and budget records."""
-        db, _, _ = await _ensure_initialized()
+        """Retrieve the persisted execution trace, verdicts, tool records, and gate decisions."""
+        db, _, _, _ = await _ensure_initialized()
         run_trace = await db.get_run_trace(run_id)
         if run_trace is None:
             return {

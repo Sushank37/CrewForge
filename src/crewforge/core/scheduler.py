@@ -179,8 +179,7 @@ class DAGScheduler:
                                 event_type="task_started",
                                 actor=agent.agent_id,
                                 message=(
-                                    f"Started task {task.task_ref or task.task_id}: "
-                                    f"{task.title}"
+                                    f"Started task {task.task_ref or task.task_id}: {task.title}"
                                 ),
                                 payload={"task_id": task.task_id, "agent_id": agent.agent_id},
                             )

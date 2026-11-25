@@ -41,13 +41,13 @@ def validate_and_materialize_plan(
     """Validate a compact PlannerOutput and assign trusted CrewForge identifiers."""
     errors: list[str] = []
     allowed_caps = set(settings.allowed_capabilities)
+    max_workers = settings.effective_max_workers
+    max_tasks = settings.effective_max_tasks
 
-    if len(raw_plan.agents) > settings.max_workers:
-        errors.append(
-            f"Agent count {len(raw_plan.agents)} exceeds max_workers ({settings.max_workers})."
-        )
-    if len(raw_plan.tasks) > settings.max_tasks:
-        errors.append(f"Task count {len(raw_plan.tasks)} exceeds max_tasks ({settings.max_tasks}).")
+    if len(raw_plan.agents) > max_workers:
+        errors.append(f"Agent count {len(raw_plan.agents)} exceeds max_workers ({max_workers}).")
+    if len(raw_plan.tasks) > max_tasks:
+        errors.append(f"Task count {len(raw_plan.tasks)} exceeds max_tasks ({max_tasks}).")
     if not [c for c in raw_plan.acceptance_criteria if c.strip()]:
         errors.append("Plan must define at least one non-empty acceptance criterion.")
     if not [r for r in raw_plan.user_requirements if r.strip()]:
@@ -96,7 +96,6 @@ def validate_and_materialize_plan(
         seen_task_refs.add(t_ref)
         task_ref_to_id[t_ref] = f"tsk_{run_id[-6:]}_{idx}_{uuid4().hex[:4]}"
 
-    # Validate assignments, deliverables, dependency references, and acyclicity.
     adjacency: dict[str, list[str]] = {ref: [] for ref in seen_task_refs}
     in_degree: dict[str, int] = dict.fromkeys(seen_task_refs, 0)
     plan_id = f"pln_{uuid4().hex[:12]}"
@@ -151,7 +150,6 @@ def validate_and_materialize_plan(
                 )
             )
 
-    # Kahn's topological cycle detection.
     queue: deque[str] = deque(ref for ref, deg in in_degree.items() if deg == 0)
     visited_count = 0
     while queue:
@@ -205,8 +203,8 @@ class LeadPlanner:
     ) -> ExecutionPlan:
         """Generate and persist a validated ExecutionPlan for an arbitrary prompt."""
         system_prompt = build_planner_system_prompt(
-            max_workers=self._settings.max_workers,
-            max_tasks=self._settings.max_tasks,
+            max_workers=self._settings.effective_max_workers,
+            max_tasks=self._settings.effective_max_tasks,
             allowed_capabilities=self._settings.allowed_capabilities,
         )
         planner_prompt = build_planner_user_prompt(user_prompt)

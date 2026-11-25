@@ -17,12 +17,16 @@ from crewforge.schemas import (
     AgentMessage,
     AgentSpec,
     Claim,
+    ClaimCategory,
     ClaimStatus,
+    ClaimVersionRef,
     Evidence,
     EvidenceReliability,
     ExecutionEvent,
     ExecutionPlan,
+    HonestyGateRecord,
     ReviewDecision,
+    ReviewerIdentity,
     ReviewVerdict,
     RunConfig,
     RunResult,
@@ -30,7 +34,10 @@ from crewforge.schemas import (
     RunTrace,
     TaskSpec,
     TaskStatus,
+    ToolExecutionRecord,
     UsageMetrics,
+    VerificationStatus,
+    VerificationSummary,
 )
 
 
@@ -255,10 +262,62 @@ CREATE TABLE IF NOT EXISTS review_verdicts (
 CREATE INDEX IF NOT EXISTS idx_review_verdicts_run ON review_verdicts(run_id);
 """
 
+_MIGRATION_V3_SQL = """
+CREATE TABLE IF NOT EXISTS run_reviewers (
+    reviewer_id TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    dimensions_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, reviewer_id)
+);
+
+CREATE TABLE IF NOT EXISTS tool_executions (
+    tool_execution_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+    expression TEXT NOT NULL,
+    variables_json TEXT NOT NULL,
+    input_provenance_refs_json TEXT NOT NULL,
+    proposed_result TEXT,
+    computed_result TEXT,
+    units TEXT NOT NULL DEFAULT '',
+    assumptions_json TEXT NOT NULL,
+    matches_proposed INTEGER,
+    inputs_grounded INTEGER NOT NULL DEFAULT 0,
+    success INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_executions_run ON tool_executions(run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS honesty_gate_decisions (
+    gate_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id) ON DELETE CASCADE,
+    passed INTEGER NOT NULL,
+    release_mode TEXT NOT NULL,
+    rejected_segments_json TEXT NOT NULL,
+    rejected_claim_refs_json TEXT NOT NULL,
+    reasons_json TEXT NOT NULL,
+    verification_summary_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
 _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "phase1_core_tables", _MIGRATION_V1_SQL),
     (2, "phase2_network_ledger_messaging", _MIGRATION_V2_SQL),
+    (3, "phase3_verification_tools_and_gate", _MIGRATION_V3_SQL),
 )
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition};")
 
 
 class Database:
@@ -319,6 +378,45 @@ class Database:
                 if version in applied:
                     continue
                 conn.executescript(sql)
+                if version == 3:
+                    _ensure_column(
+                        conn,
+                        "claims",
+                        "category",
+                        "TEXT NOT NULL DEFAULT 'logical_inference'",
+                    )
+                    _ensure_column(
+                        conn,
+                        "claims",
+                        "verification_status",
+                        "TEXT NOT NULL DEFAULT 'unsupported'",
+                    )
+                    _ensure_column(
+                        conn, "claims", "premise_refs_json", "TEXT NOT NULL DEFAULT '[]'"
+                    )
+                    _ensure_column(
+                        conn, "claims", "tool_execution_ids_json", "TEXT NOT NULL DEFAULT '[]'"
+                    )
+                    _ensure_column(
+                        conn, "claims", "requirement_refs_json", "TEXT NOT NULL DEFAULT '[]'"
+                    )
+                    _ensure_column(conn, "claims", "is_material", "INTEGER NOT NULL DEFAULT 1")
+                    _ensure_column(
+                        conn,
+                        "review_verdicts",
+                        "review_dimension",
+                        "TEXT NOT NULL DEFAULT 'general'",
+                    )
+                    _ensure_column(
+                        conn, "review_verdicts", "evidence_refs_json", "TEXT NOT NULL DEFAULT '[]'"
+                    )
+                    _ensure_column(conn, "review_verdicts", "required_correction", "TEXT")
+                    _ensure_column(
+                        conn,
+                        "review_verdicts",
+                        "blocking_severity",
+                        "TEXT NOT NULL DEFAULT 'none'",
+                    )
                 conn.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                     (version, name, _utc_iso()),
@@ -821,14 +919,23 @@ class Database:
 
     @staticmethod
     def _assert_agent_in_run(conn: sqlite3.Connection, run_id: str, agent_id: str) -> None:
-        if agent_id == "lead":
+        if agent_id in {"lead", "baseline"}:
             return
         row = conn.execute(
             "SELECT run_id FROM agents WHERE agent_id = ?",
             (agent_id,),
         ).fetchone()
-        if row is None or row["run_id"] != run_id:
-            raise CrossRunReferenceError(f"Agent '{agent_id}' does not belong to run '{run_id}'.")
+        if row is not None and row["run_id"] == run_id:
+            return
+        rev_row = conn.execute(
+            "SELECT run_id FROM run_reviewers WHERE run_id = ? AND reviewer_id = ?",
+            (run_id, agent_id),
+        ).fetchone()
+        if rev_row is not None:
+            return
+        raise CrossRunReferenceError(
+            f"Agent or actor '{agent_id}' does not belong to run '{run_id}'."
+        )
 
     @staticmethod
     def _assert_task_in_run(conn: sqlite3.Connection, run_id: str, task_id: str) -> None:
@@ -1109,6 +1216,27 @@ class Database:
                         f"to run '{claim.run_id}'."
                     )
 
+            for pref in claim.premise_refs:
+                pref_row = conn.execute(
+                    "SELECT run_id FROM claims WHERE claim_id = ? AND version = ?",
+                    (pref.claim_id, pref.claim_version),
+                ).fetchone()
+                if pref_row is None or pref_row["run_id"] != claim.run_id:
+                    raise CrossRunReferenceError(
+                        f"Premise claim '{pref.claim_id}' v{pref.claim_version} "
+                        f"does not belong to run '{claim.run_id}'."
+                    )
+
+            for tlx_id in claim.tool_execution_ids:
+                tlx_row = conn.execute(
+                    "SELECT run_id FROM tool_executions WHERE tool_execution_id = ?",
+                    (tlx_id,),
+                ).fetchone()
+                if tlx_row is None or tlx_row["run_id"] != claim.run_id:
+                    raise CrossRunReferenceError(
+                        f"Tool execution '{tlx_id}' does not belong to run '{claim.run_id}'."
+                    )
+
             existing_for_id = conn.execute(
                 "SELECT run_id, MAX(version) AS max_ver FROM claims WHERE claim_id = ?",
                 (claim.claim_id,),
@@ -1128,25 +1256,33 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO claims (
-                    claim_id, version, run_id, statement, status, parent_claim_id,
-                    author_agent_id, task_id, evidence_ids_json, depends_on_claim_ids_json,
-                    assumptions_json, revision_notes, confidence, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    claim_id, version, run_id, statement, category, status, verification_status,
+                    parent_claim_id, author_agent_id, task_id, evidence_ids_json,
+                    depends_on_claim_ids_json, premise_refs_json, tool_execution_ids_json,
+                    requirement_refs_json, assumptions_json, revision_notes, confidence,
+                    is_material, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     claim.claim_id,
                     claim.version,
                     claim.run_id,
                     claim.statement,
+                    claim.category.value,
                     claim.status.value,
+                    claim.verification_status.value,
                     claim.parent_claim_id,
                     claim.author_agent_id,
                     claim.task_id,
                     json.dumps(claim.evidence_ids, ensure_ascii=False),
                     json.dumps(claim.depends_on_claim_ids, ensure_ascii=False),
+                    json.dumps([p.model_dump() for p in claim.premise_refs], ensure_ascii=False),
+                    json.dumps(claim.tool_execution_ids, ensure_ascii=False),
+                    json.dumps(claim.requirement_refs, ensure_ascii=False),
                     json.dumps(claim.assumptions, ensure_ascii=False),
                     claim.revision_notes,
                     claim.confidence,
+                    1 if claim.is_material else 0,
                     claim.created_at.isoformat(),
                     claim.updated_at.isoformat(),
                 ),
@@ -1155,6 +1291,178 @@ class Database:
     async def insert_claim(self, claim: Claim) -> None:
         """Persist a claim version row with strict cross-run validation."""
         await asyncio.to_thread(self._insert_claim_sync, claim)
+
+    def _update_claim_verification_sync(
+        self,
+        *,
+        run_id: str,
+        claim_id: str,
+        version: int,
+        status: ClaimStatus,
+        verification_status: VerificationStatus,
+        revision_notes: str | None = None,
+    ) -> None:
+        now = _utc_iso()
+        with self._transaction(immediate=True) as conn:
+            cur = conn.execute(
+                """
+                UPDATE claims
+                SET status = ?,
+                    verification_status = ?,
+                    revision_notes = COALESCE(?, revision_notes),
+                    updated_at = ?
+                WHERE run_id = ? AND claim_id = ? AND version = ?
+                """,
+                (
+                    status.value,
+                    verification_status.value,
+                    revision_notes,
+                    now,
+                    run_id,
+                    claim_id,
+                    version,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise CrossRunReferenceError(
+                    f"Claim '{claim_id}' v{version} does not exist in run '{run_id}'."
+                )
+
+    async def update_claim_verification_state(
+        self,
+        *,
+        run_id: str,
+        claim_id: str,
+        version: int,
+        status: ClaimStatus,
+        verification_status: VerificationStatus,
+        revision_notes: str | None = None,
+    ) -> None:
+        """Update verification state of an existing claim version without modifying statement."""
+        await asyncio.to_thread(
+            self._update_claim_verification_sync,
+            run_id=run_id,
+            claim_id=claim_id,
+            version=version,
+            status=status,
+            verification_status=verification_status,
+            revision_notes=revision_notes,
+        )
+
+    def _register_reviewer_sync(self, reviewer: ReviewerIdentity) -> None:
+        with self._transaction(immediate=True) as conn:
+            run_row = conn.execute(
+                "SELECT run_id FROM runs WHERE run_id = ?",
+                (reviewer.run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise CrossRunReferenceError(f"Run '{reviewer.run_id}' does not exist.")
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO run_reviewers (
+                    reviewer_id, run_id, role, dimensions_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    reviewer.reviewer_id,
+                    reviewer.run_id,
+                    reviewer.role,
+                    json.dumps(reviewer.dimensions, ensure_ascii=False),
+                    reviewer.created_at.isoformat(),
+                ),
+            )
+
+    async def register_reviewer(self, reviewer: ReviewerIdentity) -> None:
+        """Register an independent reviewer identity in the run."""
+        await asyncio.to_thread(self._register_reviewer_sync, reviewer)
+
+    def _insert_tool_execution_sync(self, record: ToolExecutionRecord) -> None:
+        with self._transaction(immediate=True) as conn:
+            self._assert_agent_in_run(conn, record.run_id, record.actor)
+            if record.task_id is not None:
+                self._assert_task_in_run(conn, record.run_id, record.task_id)
+            conn.execute(
+                """
+                INSERT INTO tool_executions (
+                    tool_execution_id, run_id, tool_name, actor, task_id, expression,
+                    variables_json, input_provenance_refs_json, proposed_result, computed_result,
+                    units, assumptions_json, matches_proposed, inputs_grounded, success, error,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.tool_execution_id,
+                    record.run_id,
+                    record.tool_name,
+                    record.actor,
+                    record.task_id,
+                    record.expression,
+                    json.dumps(record.variables, ensure_ascii=False),
+                    json.dumps(record.input_provenance_refs, ensure_ascii=False),
+                    record.proposed_result,
+                    record.computed_result,
+                    record.units,
+                    json.dumps(record.assumptions, ensure_ascii=False),
+                    (
+                        None
+                        if record.matches_proposed is None
+                        else (1 if record.matches_proposed else 0)
+                    ),
+                    1 if record.inputs_grounded else 0,
+                    1 if record.success else 0,
+                    record.error,
+                    record.created_at.isoformat(),
+                ),
+            )
+
+    async def insert_tool_execution(self, record: ToolExecutionRecord) -> None:
+        """Persist an immutable deterministic tool execution record."""
+        await asyncio.to_thread(self._insert_tool_execution_sync, record)
+
+    def _get_tool_executions_sync(self, run_id: str) -> list[ToolExecutionRecord]:
+        with self._lock:
+            conn = self._get_connection()
+            rows = conn.execute(
+                "SELECT * FROM tool_executions WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+        return [self._row_to_tool_execution(row) for row in rows]
+
+    async def get_tool_executions_for_run(self, run_id: str) -> list[ToolExecutionRecord]:
+        """Return all deterministic tool execution records for a run."""
+        return await asyncio.to_thread(self._get_tool_executions_sync, run_id)
+
+    def _save_honesty_gate_sync(self, gate: HonestyGateRecord) -> None:
+        with self._transaction(immediate=True) as conn:
+            run_row = conn.execute(
+                "SELECT run_id FROM runs WHERE run_id = ?",
+                (gate.run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise CrossRunReferenceError(f"Run '{gate.run_id}' does not exist.")
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO honesty_gate_decisions (
+                    gate_id, run_id, passed, release_mode, rejected_segments_json,
+                    rejected_claim_refs_json, reasons_json, verification_summary_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    gate.gate_id,
+                    gate.run_id,
+                    1 if gate.passed else 0,
+                    gate.release_mode,
+                    json.dumps(gate.rejected_segments, ensure_ascii=False),
+                    json.dumps(gate.rejected_claim_refs, ensure_ascii=False),
+                    json.dumps(gate.reasons, ensure_ascii=False),
+                    gate.verification_summary.model_dump_json(),
+                    gate.created_at.isoformat(),
+                ),
+            )
+
+    async def save_honesty_gate_decision(self, gate: HonestyGateRecord) -> None:
+        """Persist the final deterministic Honesty Gate decision for a run."""
+        await asyncio.to_thread(self._save_honesty_gate_sync, gate)
 
     def _insert_message_sync(
         self,
@@ -1336,7 +1644,7 @@ class Database:
     def _insert_review_verdict_sync(self, verdict: ReviewVerdict) -> None:
         with self._transaction(immediate=True) as conn:
             row = conn.execute(
-                "SELECT run_id FROM claims WHERE claim_id = ? AND version = ?",
+                "SELECT run_id, author_agent_id FROM claims WHERE claim_id = ? AND version = ?",
                 (verdict.claim_id, verdict.claim_version),
             ).fetchone()
             if row is None or row["run_id"] != verdict.run_id:
@@ -1344,12 +1652,28 @@ class Database:
                     f"Claim '{verdict.claim_id}' v{verdict.claim_version} "
                     f"does not belong to run '{verdict.run_id}'."
                 )
+            if row["author_agent_id"] == verdict.reviewer_id:
+                raise ValueError(
+                    f"Independence violation: reviewer '{verdict.reviewer_id}' cannot "
+                    f"review its own claim '{verdict.claim_id}'."
+                )
+            for evd_id in verdict.evidence_refs:
+                evd_row = conn.execute(
+                    "SELECT run_id FROM evidence WHERE evidence_id = ?",
+                    (evd_id,),
+                ).fetchone()
+                if evd_row is None or evd_row["run_id"] != verdict.run_id:
+                    raise CrossRunReferenceError(
+                        f"Verdict evidence '{evd_id}' does not belong to run '{verdict.run_id}'."
+                    )
+
             conn.execute(
                 """
                 INSERT INTO review_verdicts (
                     verdict_id, run_id, claim_id, claim_version, reviewer_id,
-                    decision, rationale, blocking_issues_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    review_dimension, decision, rationale, evidence_refs_json,
+                    required_correction, blocking_severity, blocking_issues_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     verdict.verdict_id,
@@ -1357,15 +1681,19 @@ class Database:
                     verdict.claim_id,
                     verdict.claim_version,
                     verdict.reviewer_id,
+                    verdict.review_dimension,
                     verdict.decision.value,
                     verdict.rationale,
+                    json.dumps(verdict.evidence_refs, ensure_ascii=False),
+                    verdict.required_correction,
+                    verdict.blocking_severity,
                     json.dumps(verdict.blocking_issues, ensure_ascii=False),
                     verdict.created_at.isoformat(),
                 ),
             )
 
     async def insert_review_verdict(self, verdict: ReviewVerdict) -> None:
-        """Persist a reviewer verdict (extension point for Phase 3)."""
+        """Persist an independent reviewer verdict targeting a specific claim version."""
         await asyncio.to_thread(self._insert_review_verdict_sync, verdict)
 
     # ------------------------------------------------------------------
@@ -1373,21 +1701,64 @@ class Database:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _row_to_tool_execution(row: sqlite3.Row) -> ToolExecutionRecord:
+        matches_raw = row["matches_proposed"]
+        return ToolExecutionRecord(
+            tool_execution_id=row["tool_execution_id"],
+            run_id=row["run_id"],
+            tool_name=row["tool_name"],
+            actor=row["actor"],
+            task_id=row["task_id"],
+            expression=row["expression"],
+            variables=json.loads(row["variables_json"]),
+            input_provenance_refs=json.loads(row["input_provenance_refs_json"]),
+            proposed_result=row["proposed_result"],
+            computed_result=row["computed_result"],
+            units=row["units"],
+            assumptions=json.loads(row["assumptions_json"]),
+            matches_proposed=None if matches_raw is None else bool(matches_raw),
+            inputs_grounded=bool(row["inputs_grounded"]),
+            success=bool(row["success"]),
+            error=row["error"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    @staticmethod
     def _row_to_claim(row: sqlite3.Row) -> Claim:
+        keys = set(row.keys())
+        premise_raw = json.loads(row["premise_refs_json"]) if "premise_refs_json" in keys else []
         return Claim(
             claim_id=row["claim_id"],
             version=int(row["version"]),
             run_id=row["run_id"],
             statement=row["statement"],
+            category=ClaimCategory(row["category"])
+            if "category" in keys
+            else ClaimCategory.INFERENCE,
             status=ClaimStatus(row["status"]),
+            verification_status=(
+                VerificationStatus(row["verification_status"])
+                if "verification_status" in keys
+                else VerificationStatus.UNSUPPORTED
+            ),
             parent_claim_id=row["parent_claim_id"],
             author_agent_id=row["author_agent_id"],
             task_id=row["task_id"],
             evidence_ids=json.loads(row["evidence_ids_json"]),
             depends_on_claim_ids=json.loads(row["depends_on_claim_ids_json"]),
+            premise_refs=[ClaimVersionRef.model_validate(item) for item in premise_raw],
+            tool_execution_ids=(
+                json.loads(row["tool_execution_ids_json"])
+                if "tool_execution_ids_json" in keys
+                else []
+            ),
+            requirement_refs=(
+                json.loads(row["requirement_refs_json"]) if "requirement_refs_json" in keys else []
+            ),
             assumptions=json.loads(row["assumptions_json"]),
             revision_notes=row["revision_notes"],
             confidence=row["confidence"],
+            is_material=bool(row["is_material"]) if "is_material" in keys else True,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -1478,6 +1849,18 @@ class Database:
                 "SELECT * FROM review_verdicts WHERE run_id = ? ORDER BY created_at ASC",
                 (run_id,),
             ).fetchall()
+            reviewer_rows = conn.execute(
+                "SELECT * FROM run_reviewers WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            tool_rows = conn.execute(
+                "SELECT * FROM tool_executions WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            gate_row = conn.execute(
+                "SELECT * FROM honesty_gate_decisions WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
             event_rows = conn.execute(
                 "SELECT * FROM execution_events WHERE run_id = ? ORDER BY seq ASC",
                 (run_id,),
@@ -1583,6 +1966,17 @@ class Database:
             )
             for row in message_rows
         ]
+        reviewers = [
+            ReviewerIdentity(
+                reviewer_id=row["reviewer_id"],
+                run_id=row["run_id"],
+                role=row["role"],
+                dimensions=json.loads(row["dimensions_json"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in reviewer_rows
+        ]
+        tool_executions = [self._row_to_tool_execution(row) for row in tool_rows]
         verdicts = [
             ReviewVerdict(
                 verdict_id=row["verdict_id"],
@@ -1590,13 +1984,42 @@ class Database:
                 claim_id=row["claim_id"],
                 claim_version=int(row["claim_version"]),
                 reviewer_id=row["reviewer_id"],
+                review_dimension=(
+                    row["review_dimension"] if "review_dimension" in set(row.keys()) else "general"
+                ),
                 decision=ReviewDecision(row["decision"]),
                 rationale=row["rationale"],
+                evidence_refs=(
+                    json.loads(row["evidence_refs_json"])
+                    if "evidence_refs_json" in set(row.keys())
+                    else []
+                ),
+                required_correction=(
+                    row["required_correction"] if "required_correction" in set(row.keys()) else None
+                ),
+                blocking_severity=(
+                    row["blocking_severity"] if "blocking_severity" in set(row.keys()) else "none"
+                ),
                 blocking_issues=json.loads(row["blocking_issues_json"]),
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
             for row in verdict_rows
         ]
+        honesty_gate: HonestyGateRecord | None = None
+        if gate_row is not None:
+            honesty_gate = HonestyGateRecord(
+                gate_id=gate_row["gate_id"],
+                run_id=gate_row["run_id"],
+                passed=bool(gate_row["passed"]),
+                release_mode=gate_row["release_mode"],
+                rejected_segments=json.loads(gate_row["rejected_segments_json"]),
+                rejected_claim_refs=json.loads(gate_row["rejected_claim_refs_json"]),
+                reasons=json.loads(gate_row["reasons_json"]),
+                verification_summary=VerificationSummary.model_validate_json(
+                    gate_row["verification_summary_json"]
+                ),
+                created_at=datetime.fromisoformat(gate_row["created_at"]),
+            )
         events = [
             ExecutionEvent(
                 event_id=row["event_id"],
@@ -1621,12 +2044,15 @@ class Database:
             result=result,
             plan=plan,
             agents=agents,
+            reviewers=reviewers,
             tasks=tasks,
             task_transitions=[dict(row) for row in transition_rows],
             claims=claims,
             evidence=evidence,
+            tool_executions=tool_executions,
             messages=messages,
             review_verdicts=verdicts,
+            honesty_gate=honesty_gate,
             events=events,
             usage_records=[dict(row) for row in usage_rows],
             budget_reservations=[dict(row) for row in res_rows],

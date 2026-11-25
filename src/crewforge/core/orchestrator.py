@@ -1,4 +1,4 @@
-"""End-to-end NetworkRunner for dynamic planning, DAG execution, messaging, and synthesis."""
+"""End-to-end NetworkRunner orchestrating planning, DAG, messaging, review, repair, and Gate."""
 
 from __future__ import annotations
 
@@ -10,12 +10,15 @@ from uuid import uuid4
 
 from crewforge.config import CrewForgeSettings, sanitize_error_message
 from crewforge.core.budget import BudgetError, BudgetExceededError, BudgetManager
+from crewforge.core.claim_graph import ClaimDependencyGraph
 from crewforge.core.executor import ModelExecutor, RunDeadlineExceededError
 from crewforge.core.ledger import ClaimLedger
 from crewforge.core.messaging import MessageBus
 from crewforge.core.planner import LeadPlanner, PlanValidationError
+from crewforge.core.repair import TargetedRepairEngine
+from crewforge.core.reviewer import ReviewerPool
 from crewforge.core.scheduler import DAGScheduler
-from crewforge.core.synthesis import LeadSynthesizer, build_partial_fallback_synthesis
+from crewforge.core.synthesis import LeadSynthesizer
 from crewforge.core.worker import SpecialistWorker
 from crewforge.providers.base import ModelProvider, ProviderError
 from crewforge.schemas import ExecutionEvent, ExecutionPlan, RunResult, RunStatus, TaskStatus
@@ -23,7 +26,7 @@ from crewforge.storage.database import Database
 
 
 class ReviewHook(Protocol):
-    """Extension point for Phase 3 independent reviewers and targeted claim repair."""
+    """Optional external review extension hook invoked alongside ReviewerPool."""
 
     async def after_workers(
         self,
@@ -35,7 +38,7 @@ class ReviewHook(Protocol):
 
 
 class NetworkRunner:
-    """Orchestrates CrewForge's dynamic multi-agent network execution."""
+    """Orchestrates CrewForge's verified dynamic multi-agent network execution."""
 
     def __init__(
         self,
@@ -58,6 +61,7 @@ class NetworkRunner:
             settings=settings,
         )
         self._ledger = ClaimLedger(database)
+        self._graph = ClaimDependencyGraph(database)
         self._bus = MessageBus(
             database,
             max_message_chars=settings.max_message_chars,
@@ -77,9 +81,23 @@ class NetworkRunner:
             worker=self._worker,
             settings=settings,
         )
+        self._reviewer = ReviewerPool(
+            executor=self._executor,
+            database=database,
+            settings=settings,
+        )
+        self._repair = TargetedRepairEngine(
+            executor=self._executor,
+            database=database,
+            ledger=self._ledger,
+            message_bus=self._bus,
+            reviewer_pool=self._reviewer,
+            settings=settings,
+        )
         self._synthesizer = LeadSynthesizer(
             executor=self._executor,
             database=database,
+            message_bus=self._bus,
         )
         self._review_hook = review_hook
 
@@ -92,7 +110,7 @@ class NetworkRunner:
         tasks_by_id: dict[str, object],
         run_deadline_monotonic: float,
     ) -> tuple[list[str], bool, bool]:
-        """Run bounded communication follow-up rounds for specialists with pending messages."""
+        """Run bounded communication follow-up rounds when mandatory capacity is safe."""
         uncertainties: list[str] = []
         deadline_exceeded = False
         budget_exhausted = False
@@ -100,7 +118,8 @@ class NetworkRunner:
         claims_all = await self._ledger.get_claims(run_id, latest_only=True)
 
         for round_idx in range(self._settings.max_communication_rounds):
-            if time.monotonic() >= run_deadline_monotonic:
+            remaining_seconds = run_deadline_monotonic - time.monotonic()
+            if remaining_seconds <= 0.0:
                 deadline_exceeded = True
                 break
 
@@ -108,14 +127,42 @@ class NetworkRunner:
             if not pending_agent_ids:
                 break
 
+            # Reserve time for mandatory review + synthesis stages.
+            if self._settings.run_deadline_seconds >= 60.0 and remaining_seconds < 90.0:
+                await self._db.append_event(
+                    ExecutionEvent(
+                        run_id=run_id,
+                        event_type="optional_stage_skipped",
+                        actor="orchestrator",
+                        message=(
+                            "Skipped optional communication follow-up to preserve deadline "
+                            "for mandatory verification and synthesis."
+                        ),
+                        payload={"remaining_seconds": round(remaining_seconds, 2)},
+                    )
+                )
+                break
+
             for agent_id in pending_agent_ids:
                 summary = await self._db.get_budget_summary(run_id)
                 remaining_calls = self._settings.max_model_calls_per_run - int(
                     summary["run_committed_calls"]
                 )
-                # Always keep at least 1 call reserved for Lead synthesis.
-                if remaining_calls <= 1:
+                # Reserve at least 2 calls for mandatory review + Lead synthesis when cap permits.
+                mandatory_reserve = 2 if self._settings.max_model_calls_per_run >= 4 else 1
+                if remaining_calls <= mandatory_reserve:
                     budget_exhausted = True
+                    await self._db.append_event(
+                        ExecutionEvent(
+                            run_id=run_id,
+                            event_type="optional_stage_skipped",
+                            actor="orchestrator",
+                            message=(
+                                "Skipped optional communication follow-up to reserve calls for "
+                                "mandatory verification and synthesis."
+                            ),
+                        )
+                    )
                     break
 
                 agent = agents_by_id.get(agent_id)
@@ -147,7 +194,6 @@ class NetworkRunner:
                     )
                     if outcome is not None:
                         uncertainties.extend(outcome.uncertainties)
-                        # Reflect updated findings into tasks_by_id for synthesis.
                         for t in plan.tasks:
                             if t.assigned_agent_id == agent_id and t.task_id in tasks_by_id:
                                 current_task = tasks_by_id[t.task_id]
@@ -173,7 +219,7 @@ class NetworkRunner:
         return uncertainties, deadline_exceeded, budget_exhausted
 
     async def run(self, prompt: str, *, run_id: str | None = None) -> RunResult:
-        """Execute a full dynamic multi-agent run and return the validated RunResult."""
+        """Execute dynamic planning, DAG, review, targeted repair, synthesis, and Honesty Gate."""
         cleaned_prompt = prompt.strip()
         if not cleaned_prompt:
             raise ValueError("Prompt must be a non-empty string.")
@@ -205,6 +251,8 @@ class NetworkRunner:
                     "provider": self._provider.provider_name,
                     "model": self._provider.model_name,
                     "max_concurrency": self._settings.effective_max_concurrency,
+                    "max_workers": self._settings.effective_max_workers,
+                    "max_tasks": self._settings.effective_max_tasks,
                     "run_deadline_seconds": self._settings.run_deadline_seconds,
                 },
             )
@@ -218,11 +266,12 @@ class NetworkRunner:
                 run_deadline_monotonic=run_deadline_monotonic,
             )
 
+            reserve_mandatory = 2 if self._settings.max_model_calls_per_run >= 4 else 1
             sched_outcome = await self._scheduler.run_plan(
                 run_id=resolved_run_id,
                 original_prompt=cleaned_prompt,
                 plan=plan,
-                reserve_synthesis_calls=1,
+                reserve_synthesis_calls=reserve_mandatory,
                 run_deadline_monotonic=run_deadline_monotonic,
             )
 
@@ -245,7 +294,32 @@ class NetworkRunner:
                     ledger=self._ledger,
                 )
 
-            latest_claims = await self._ledger.get_claims(resolved_run_id, latest_only=True)
+            # Validate claim dependency graph before independent review.
+            all_claims_pre_review = await self._ledger.get_claims(
+                resolved_run_id, latest_only=False
+            )
+            if all_claims_pre_review:
+                self._graph.validate_graph(all_claims_pre_review, run_id=resolved_run_id)
+
+            # Independent adversarial review & targeted dispute resolution.
+            review_outcome = await self._reviewer.review_claims(
+                run_id=resolved_run_id,
+                original_prompt=cleaned_prompt,
+                plan=plan,
+                run_deadline_monotonic=run_deadline_monotonic,
+            )
+            if review_outcome.blocking_claims:
+                await self._repair.resolve_disputes(
+                    run_id=resolved_run_id,
+                    original_prompt=cleaned_prompt,
+                    plan=plan,
+                    blocking_claims=review_outcome.blocking_claims,
+                    verdicts=review_outcome.verdicts,
+                    run_deadline_monotonic=run_deadline_monotonic,
+                )
+
+            trace_snapshot = await self._db.get_run_trace(resolved_run_id)
+            assert trace_snapshot is not None
             final_tasks = list(sched_outcome.tasks_by_id.values())
             completed_tasks = [t for t in final_tasks if t.status == TaskStatus.COMPLETED]
             incomplete_tasks = [t for t in final_tasks if t.status != TaskStatus.COMPLETED]
@@ -257,54 +331,64 @@ class NetworkRunner:
                 dict.fromkeys([*sched_outcome.uncertainties, *followup_uncertainties])
             )
 
+            deadline_hit = sched_outcome.deadline_exceeded or msg_deadline
+            budget_hit = sched_outcome.budget_exhausted or msg_budget
+            is_partial_before_synth = bool(incomplete_tasks or deadline_hit or budget_hit)
+
             synthesis_error: str | None = None
+            used_fallback = False
             try:
-                validated_synthesis = await self._synthesizer.synthesize(
+                gate_result = await self._synthesizer.synthesize_and_gate(
                     run_id=resolved_run_id,
                     original_prompt=cleaned_prompt,
                     plan=plan,
                     tasks=final_tasks,
-                    claims=latest_claims,
+                    all_claims=trace_snapshot.claims,
+                    evidence_list=trace_snapshot.evidence,
+                    tool_executions=trace_snapshot.tool_executions,
+                    verdicts=trace_snapshot.review_verdicts,
                     extra_assumptions=all_assumptions,
                     extra_missing=all_missing,
                     uncertainties=all_uncertainties,
+                    is_partial_run=is_partial_before_synth,
                     run_deadline_monotonic=run_deadline_monotonic,
                 )
             except (BudgetError, RunDeadlineExceededError, ProviderError) as exc:
+                used_fallback = True
                 synthesis_error = sanitize_error_message(str(exc))
                 await self._db.append_event(
                     ExecutionEvent(
                         run_id=resolved_run_id,
                         event_type="synthesis_fallback",
                         actor="lead",
-                        message=f"Used partial synthesis fallback: {synthesis_error}",
+                        message=f"Used gated partial synthesis fallback: {synthesis_error}",
                     )
                 )
-                validated_synthesis = build_partial_fallback_synthesis(
+                gate_result = await self._synthesizer.gate_partial_fallback(
+                    run_id=resolved_run_id,
+                    original_prompt=cleaned_prompt,
                     plan=plan,
-                    completed_tasks=completed_tasks,
-                    incomplete_tasks=incomplete_tasks,
-                    claims=latest_claims,
+                    tasks=final_tasks,
+                    all_claims=trace_snapshot.claims,
+                    evidence_list=trace_snapshot.evidence,
+                    tool_executions=trace_snapshot.tool_executions,
+                    verdicts=trace_snapshot.review_verdicts,
                     extra_assumptions=all_assumptions,
                     extra_missing=all_missing,
                     uncertainties=all_uncertainties,
                     reason=synthesis_error,
                 )
 
-            deadline_hit = sched_outcome.deadline_exceeded or msg_deadline
-            budget_hit = sched_outcome.budget_exhausted or msg_budget
-
-            if not completed_tasks and validated_synthesis.used_partial_fallback:
+            assert gate_result.gate_record is not None
+            release_mode = gate_result.gate_record.release_mode
+            if not completed_tasks and used_fallback:
                 final_status = RunStatus.BUDGET_EXCEEDED if budget_hit else RunStatus.FAILED
-            elif (
-                incomplete_tasks
-                or deadline_hit
-                or budget_hit
-                or validated_synthesis.used_partial_fallback
-            ):
+            elif release_mode == "full" and not is_partial_before_synth and not used_fallback:
+                final_status = RunStatus.COMPLETED
+            elif release_mode in {"full", "partial"}:
                 final_status = RunStatus.PARTIAL
             else:
-                final_status = RunStatus.COMPLETED
+                final_status = RunStatus.PARTIAL if completed_tasks else RunStatus.FAILED
 
             total_latency_ms = (time.perf_counter() - start_perf) * 1000.0
             aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)
@@ -316,15 +400,16 @@ class NetworkRunner:
                 prompt=cleaned_prompt,
                 provider=self._provider.provider_name,
                 model=self._provider.model_name,
-                answer=validated_synthesis.answer,
-                missing_information=validated_synthesis.missing_information,
-                assumptions=validated_synthesis.assumptions,
-                confidence_notes=validated_synthesis.confidence_notes,
-                referenced_claim_ids=validated_synthesis.referenced_claim_ids,
+                answer=gate_result.rendered_answer,
+                missing_information=gate_result.missing_information,
+                assumptions=gate_result.assumptions,
+                confidence_notes=gate_result.confidence_notes,
+                referenced_claim_ids=gate_result.referenced_claim_ids,
                 specialist_roles=[a.role for a in plan.agents],
                 incomplete_tasks=[
                     f"{t.task_ref or t.task_id} ({t.status.value})" for t in incomplete_tasks
                 ],
+                verification=gate_result.verification,
                 usage=aggregated_usage,
                 latency_ms=total_latency_ms,
                 error=synthesis_error,
@@ -337,7 +422,11 @@ class NetworkRunner:
                     event_type="run_completed",
                     actor="lead",
                     message=f"Network run finished with status={final_status.value}.",
-                    payload={"status": final_status.value, "latency_ms": total_latency_ms},
+                    payload={
+                        "status": final_status.value,
+                        "release_mode": release_mode,
+                        "latency_ms": total_latency_ms,
+                    },
                 )
             )
             await self._db.complete_run(result)

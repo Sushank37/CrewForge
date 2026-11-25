@@ -507,7 +507,7 @@ async def test_phase1_database_migrates_cleanly_to_phase2(tmp_path: Path) -> Non
     db = Database(db_path)
     await db.initialize()
     try:
-        assert await db.get_schema_version() == 2
+        assert await db.get_schema_version() == 3
         trace = await db.get_run_trace("run_legacy_1")
         assert trace is not None
         assert trace.prompt == "legacy prompt"

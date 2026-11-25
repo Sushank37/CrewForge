@@ -1,8 +1,9 @@
-"""Single-agent baseline execution runner powered by ModelExecutor."""
+"""Single-agent baseline execution runner with deterministic arithmetic tool parity."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -15,12 +16,17 @@ from crewforge.core.executor import ModelExecutor, RunDeadlineExceededError
 from crewforge.providers.base import ModelProvider, ProviderError
 from crewforge.providers.ollama_provider import OllamaProvider
 from crewforge.providers.openai_provider import OpenAIProvider
-from crewforge.schemas import ExecutionEvent, RunResult, RunStatus
+from crewforge.schemas import ArithmeticRequest, ExecutionEvent, RunResult, RunStatus
 from crewforge.storage.database import Database
+from crewforge.tools.arithmetic import DeterministicArithmeticTool, tool_record_to_dict
 
 BASELINE_SYSTEM_PROMPT = (
     "You are a careful, thorough single-agent problem solver. "
     "Provide a direct, well-reasoned, and genuinely helpful answer to the user's prompt. "
+    "When numerical calculations are needed, you may emit `computations` using the "
+    "deterministic arithmetic tool (expression, variables, input_provenance_refs, "
+    "proposed_result, units). Set `needs_tool_followup` to true if you want the exact "
+    "tool outputs returned to you before finalizing your answer. "
     "Do not invent facts or hide uncertainty: list any important missing information in "
     "`missing_information`, state explicit working assumptions in `assumptions`, and summarize "
     "overall certainty or caveats in `confidence_notes`."
@@ -43,6 +49,14 @@ class BaselineModelOutput(BaseModel):
         default=None,
         description="Brief notes on confidence, uncertainty, or scope limitations.",
     )
+    computations: list[ArithmeticRequest] = Field(
+        default_factory=list,
+        description="Optional deterministic arithmetic requests to evaluate and record.",
+    )
+    needs_tool_followup: bool = Field(
+        default=False,
+        description="Request one follow-up call after arithmetic tool evaluation.",
+    )
 
 
 def build_provider_from_settings(settings: CrewForgeSettings) -> ModelProvider:
@@ -55,7 +69,7 @@ def build_provider_from_settings(settings: CrewForgeSettings) -> ModelProvider:
 
 
 class BaselineRunner:
-    """Executes single-agent baseline runs via the shared ModelExecutor."""
+    """Executes single-agent baseline runs via ModelExecutor with shared tool parity."""
 
     def __init__(
         self,
@@ -76,6 +90,7 @@ class BaselineRunner:
             budget_manager=budget_manager,
             settings=settings,
         )
+        self._arithmetic = DeterministicArithmeticTool(database)
 
     async def run(self, prompt: str, *, run_id: str | None = None) -> RunResult:
         """Execute a baseline run for an arbitrary prompt and persist full trace."""
@@ -123,6 +138,40 @@ class BaselineRunner:
                 max_output_tokens=self._settings.max_output_tokens,
                 timeout_seconds=self._settings.request_timeout_seconds,
             )
+
+            parsed = response.parsed
+            if parsed.computations:
+                tool_summaries = []
+                for req in parsed.computations[:4]:
+                    rec = await self._arithmetic.execute(
+                        run_id=resolved_run_id,
+                        actor="baseline",
+                        request=req,
+                        grounded_texts=[cleaned_prompt],
+                    )
+                    tool_summaries.append(tool_record_to_dict(rec))
+
+                if parsed.needs_tool_followup:
+                    followup_prompt = (
+                        f"Original user request:\n{cleaned_prompt}\n\n"
+                        f"Your draft answer:\n{parsed.answer}\n\n"
+                        "Deterministic arithmetic tool results:\n"
+                        f"{json.dumps(tool_summaries, ensure_ascii=False, indent=2)}\n\n"
+                        "Provide your final answer incorporating these exact tool results "
+                        "(set needs_tool_followup=false)."
+                    )
+                    followup_res = await self._executor.execute_structured(
+                        run_id=resolved_run_id,
+                        actor="baseline",
+                        operation="baseline",
+                        prompt=followup_prompt,
+                        response_model=BaselineModelOutput,
+                        system_prompt=BASELINE_SYSTEM_PROMPT,
+                        max_output_tokens=self._settings.max_output_tokens,
+                        timeout_seconds=self._settings.request_timeout_seconds,
+                    )
+                    parsed = followup_res.parsed
+
             total_latency_ms = (time.perf_counter() - start_perf) * 1000.0
             aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)
 
@@ -133,10 +182,10 @@ class BaselineRunner:
                 prompt=cleaned_prompt,
                 provider=response.provider,
                 model=response.model,
-                answer=response.parsed.answer,
-                missing_information=response.parsed.missing_information,
-                assumptions=response.parsed.assumptions,
-                confidence_notes=response.parsed.confidence_notes,
+                answer=parsed.answer,
+                missing_information=parsed.missing_information,
+                assumptions=parsed.assumptions,
+                confidence_notes=parsed.confidence_notes,
                 usage=aggregated_usage,
                 latency_ms=total_latency_ms,
                 created_at=created_at,

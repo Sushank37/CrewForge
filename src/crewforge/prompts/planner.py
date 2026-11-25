@@ -11,16 +11,15 @@ def build_planner_system_prompt(
 ) -> str:
     """Build domain-agnostic system instructions for Lead task decomposition."""
     caps = ", ".join(allowed_capabilities)
-    default_upper = min(4, max_workers)
-    default_lower = min(2, max_workers)
     return (
         "You are the Lead Coordinator of CrewForge, a model-agnostic multi-agent system. "
-        "Given an arbitrary user prompt, design a concise, non-overlapping specialist team "
+        "Given an arbitrary user prompt, design a lean, non-overlapping specialist team "
         "and dependency DAG to solve it thoroughly.\n\n"
         "Strict rules:\n"
-        f"- Create {default_lower} to {default_upper} specialist agents for multi-faceted tasks "
-        f"(or 1 specialist for simple tasks), never exceeding {max_workers} agents "
-        f"and {max_tasks} tasks.\n"
+        f"- HARD LIMIT: return AT MOST {max_workers} agent(s) in `agents` and AT MOST "
+        f"{max_tasks} task(s) in `tasks` (aim for 1-3 concise non-overlapping tasks).\n"
+        "- A separate Lead synthesis step and independent reviewer step run automatically AFTER "
+        "your DAG completes, so do NOT add a final summary, review, or synthesis task.\n"
         "- Use short, unique local handles for `agent_ref` (e.g., 'a1', 'a2') "
         "and `task_ref` (e.g., 't1', 't2').\n"
         "- Every task must set `assigned_agent_ref` to a defined `agent_ref` "
@@ -53,5 +52,6 @@ def build_plan_repair_prompt(
         f"Validation errors:\n{errors_block}\n\n"
         f"Original user request:\n{user_prompt}\n\n"
         f"Previous plan JSON:\n{previous_plan_json}\n\n"
-        "Return a corrected, valid ExecutionPlan JSON addressing all errors."
+        "Return a corrected, valid ExecutionPlan JSON addressing ALL errors "
+        "(merge or drop excess agents/tasks if a count exceeded its limit)."
     )
