@@ -282,11 +282,52 @@ class LeadSynthesizer:
             )
         )
 
+        # Preserve all supported material claims deterministically even if model synthesis
+        # omitted them or focused on unresolved/rejected supplementary claims.
+        parsed_synthesis = res.parsed
+        existing_accepted_ids = {
+            ref.claim_id for seg in parsed_synthesis.accepted_segments for ref in seg.claim_refs
+        }
+        extra_supported_segments: list[ReleaseSegment] = []
+        extra_ref_ids: list[str] = []
+        for claim in latest_claims:
+            if (
+                claim.is_material
+                and claim.status == ClaimStatus.SUPPORTED
+                and claim.claim_id not in existing_accepted_ids
+            ):
+                extra_supported_segments.append(
+                    ReleaseSegment(
+                        segment_type="accepted_claim",
+                        text=claim.statement,
+                        claim_refs=[
+                            ClaimVersionRef(claim_id=claim.claim_id, claim_version=claim.version)
+                        ],
+                        requirement_ref=(
+                            claim.requirement_refs[0] if claim.requirement_refs else None
+                        ),
+                        is_factual_assertion=True,
+                    )
+                )
+                extra_ref_ids.append(claim.claim_id)
+        if extra_supported_segments:
+            parsed_synthesis = parsed_synthesis.model_copy(
+                update={
+                    "accepted_segments": [
+                        *parsed_synthesis.accepted_segments,
+                        *extra_supported_segments,
+                    ],
+                    "referenced_claim_ids": list(
+                        dict.fromkeys([*parsed_synthesis.referenced_claim_ids, *extra_ref_ids])
+                    ),
+                }
+            )
+
         gate_result = self._gate.evaluate(
             run_id=run_id,
             original_prompt=original_prompt,
             plan=plan,
-            synthesis=res.parsed,
+            synthesis=parsed_synthesis,
             all_claims=all_claims,
             evidence_list=evidence_list,
             tool_executions=tool_executions,

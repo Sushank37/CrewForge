@@ -80,6 +80,7 @@ class SpecialistWorker:
         task: TaskSpec,
         completed_tasks_by_id: dict[str, TaskSpec],
         run_deadline_monotonic: float | None = None,
+        compact_recovery: bool = False,
     ) -> WorkerExecutionOutcome:
         """Execute a specialist's assigned task with dependency context and inbox delivery."""
         dependency_findings: list[tuple[str, str]] = []
@@ -139,6 +140,13 @@ class SpecialistWorker:
             provenance_lines=prov_catalog.prompt_summary_lines(),
             user_requirements=plan.user_requirements,
         )
+        if compact_recovery:
+            user_prompt += (
+                "\n\nTRUNCATION RECOVERY: Your previous structured response hit "
+                "max_output_tokens. Return a much shorter, strictly valid JSON response: "
+                "concise findings (<= 80 words), 1 to 2 atomic claims, short verbatim "
+                "evidence excerpts (<= 200 chars), and no repetition."
+            )
 
         response = await self._executor.execute_structured(
             run_id=run_id,

@@ -88,10 +88,15 @@ class ClaimLedger:
         combined_tool_records = [*prior_tool_records, *all_new_tool_records]
 
         persisted_evidence: list[Evidence] = []
-        retrieved_sources_text = "\n".join(
-            e.excerpt for e in verified_evidence_all if e.source_type == "external_retrieved"
-        )
+        retrieved_docs = [e for e in verified_evidence_all if e.source_type == "external_retrieved"]
+        retrieved_sources_text = "\n".join(e.excerpt for e in retrieved_docs)
+        retrieved_refs = {
+            *(f"doc_{idx}" for idx, _ in enumerate(verified_evidence_all, start=1)),
+            *(e.source_ref for e in retrieved_docs if e.source_ref),
+            *(e.evidence_id for e in retrieved_docs),
+        }
         for proposal in evidence_proposals:
+            effective_source_type = proposal.source_type
             check = verify_evidence_proposal(
                 proposal=proposal,
                 original_prompt=original_prompt,
@@ -99,19 +104,45 @@ class ClaimLedger:
                 matching_tool_records=combined_tool_records,
                 retrieved_sources_text=retrieved_sources_text,
             )
+            # If a specialist cited an attached/retrieved document using `dependency_finding`
+            # or `user_prompt`, re-verify strictly against `external_retrieved` when it matches
+            # a known retrieved doc ref or verbatim retrieved text.
+            if (
+                not check.verified_in_input
+                and retrieved_sources_text
+                and proposal.source_type in {"user_prompt", "dependency_finding"}
+                and (
+                    proposal.source_ref in retrieved_refs
+                    or proposal.source_type == "dependency_finding"
+                    and not dependency_findings_text
+                )
+            ):
+                retrieved_proposal = proposal.model_copy(
+                    update={"source_type": "external_retrieved"}
+                )
+                retrieved_check = verify_evidence_proposal(
+                    proposal=retrieved_proposal,
+                    original_prompt=original_prompt,
+                    dependency_findings_text=dependency_findings_text,
+                    matching_tool_records=combined_tool_records,
+                    retrieved_sources_text=retrieved_sources_text,
+                )
+                if retrieved_check.verified_in_input:
+                    effective_source_type = "external_retrieved"
+                    check = retrieved_check
             evd = Evidence(
                 run_id=run_id,
-                source_type=proposal.source_type,
+                source_type=effective_source_type,
                 source_ref=proposal.source_ref,
                 excerpt=proposal.excerpt,
                 reliability=check.reliability,
                 verified_in_input=check.verified_in_input,
                 retrieval_status=(
                     "ok"
-                    if proposal.source_type == "external_retrieved" and check.verified_in_input
+                    if effective_source_type == "external_retrieved" and check.verified_in_input
                     else (
                         "unavailable"
-                        if proposal.source_type == "external_unverified"
+                        if effective_source_type == "external_unverified"
                         else "not_applicable"
                     )
                 ),
@@ -124,8 +155,8 @@ class ClaimLedger:
         persisted_claims: list[Claim] = []
         local_ref_map: dict[str, Claim] = {}
 
-        # Enforce bounded claim count per specialist call (keep at most 6 claims per batch).
-        for idx, prop_claim in enumerate(claim_proposals[:6]):
+        # Enforce bounded claim count per specialist call (keep at most 4 claims per batch).
+        for idx, prop_claim in enumerate(claim_proposals[:4]):
             linked_evidence_ids = [
                 persisted_evidence[e_idx].evidence_id
                 for e_idx in prop_claim.evidence_indices

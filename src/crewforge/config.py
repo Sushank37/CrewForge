@@ -270,7 +270,7 @@ class CrewForgeSettings(BaseSettings):
         return self.max_revision_rounds
 
     def output_limit_for_operation(self, operation: str) -> int:
-        """Return output-token limit for a given operation without silent global clamping."""
+        """Return output-token limit for a given operation clamped to global max_output_tokens."""
         override: int | None = None
         if operation in {"planner", "plan_repair"}:
             override = self.planner_max_output_tokens
@@ -283,7 +283,7 @@ class CrewForgeSettings(BaseSettings):
         elif operation == "synthesis":
             override = self.synthesis_max_output_tokens
         if override is not None:
-            return override
+            return min(override, self.max_output_tokens)
         return self.max_output_tokens
 
     @classmethod

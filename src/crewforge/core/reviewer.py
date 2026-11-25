@@ -86,7 +86,7 @@ def _build_review_user_prompt(
             evd = evidence_by_id.get(eid)
             if evd is not None:
                 evd_lines.append(
-                    f"  - {evd.evidence_id} [{evd.source_type}, "
+                    f"  - {evd.evidence_id} [{evd.source_type}, source_ref={evd.source_ref}, "
                     f"verified={evd.verified_in_input}, reliability={evd.reliability.value}]: "
                     f"{evd.excerpt}"
                 )

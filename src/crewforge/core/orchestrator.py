@@ -22,7 +22,15 @@ from crewforge.core.scheduler import DAGScheduler
 from crewforge.core.synthesis import LeadSynthesizer
 from crewforge.core.worker import SpecialistWorker
 from crewforge.providers.base import ModelProvider, ProviderError
-from crewforge.schemas import ExecutionEvent, ExecutionPlan, RunResult, RunStatus, TaskStatus
+from crewforge.schemas import (
+    Claim,
+    ClaimStatus,
+    ExecutionEvent,
+    ExecutionPlan,
+    RunResult,
+    RunStatus,
+    TaskStatus,
+)
 from crewforge.storage.database import Database
 
 
@@ -392,102 +400,6 @@ class NetworkRunner:
             completed_tasks = [t for t in final_tasks if t.status == TaskStatus.COMPLETED]
             incomplete_tasks = [t for t in final_tasks if t.status != TaskStatus.COMPLETED]
 
-            # Build accurate stage telemetry from persisted execution artifacts.
-            delivered_msgs = sum(
-                1 for m in trace_snapshot.messages if m.delivery_status != "pending"
-            )
-            followup_calls = sum(
-                1
-                for ev in trace_snapshot.events
-                if ev.event_type == "budget_reserved"
-                and ev.payload.get("operation") == "worker_followup"
-            )
-            review_calls = sum(
-                1
-                for ev in trace_snapshot.events
-                if ev.event_type == "budget_reserved"
-                and str(ev.payload.get("operation", "")).startswith("review")
-            )
-            revision_calls = sum(
-                1
-                for ev in trace_snapshot.events
-                if ev.event_type == "budget_reserved" and ev.payload.get("operation") == "revision"
-            )
-            accepted_revisions = sum(1 for c in trace_snapshot.claims if c.version > 1)
-
-            stages_executed: list[str] = ["planner", "dag_workers"]
-            if delivered_msgs > 0 or followup_calls > 0:
-                stages_executed.append("peer_messaging")
-            if review_calls > 0 or len(trace_snapshot.review_verdicts) > 0:
-                stages_executed.append("independent_review")
-            if revision_calls > 0 or accepted_revisions > 0:
-                stages_executed.append("targeted_repair")
-            stages_executed.append("honesty_gate_and_synthesis")
-
-            stage_telemetry = {
-                "planner": {"configured": True, "status": "completed"},
-                "dag_workers": {
-                    "configured": True,
-                    "completed_tasks": len(completed_tasks),
-                    "failed_or_blocked_tasks": len(incomplete_tasks),
-                    "status": "completed" if completed_tasks else "failed",
-                },
-                "peer_messaging": {
-                    "configured": self._settings.enable_peer_messaging,
-                    "delivered_messages": delivered_msgs,
-                    "followup_calls": followup_calls,
-                    "status": (
-                        "completed"
-                        if (delivered_msgs > 0 or followup_calls > 0)
-                        else (
-                            "disabled"
-                            if not self._settings.enable_peer_messaging
-                            else "skipped_no_messages"
-                        )
-                    ),
-                },
-                "independent_review": {
-                    "configured": self._settings.enable_independent_review,
-                    "reviewer_calls": review_calls,
-                    "verdict_count": len(trace_snapshot.review_verdicts),
-                    "status": (
-                        "completed"
-                        if (review_calls > 0 or trace_snapshot.review_verdicts)
-                        else (
-                            "disabled"
-                            if not self._settings.enable_independent_review
-                            else "skipped_no_claims"
-                        )
-                    ),
-                },
-                "targeted_repair": {
-                    "configured": self._settings.enable_targeted_repair,
-                    "revision_attempts": revision_calls,
-                    "accepted_revisions": accepted_revisions,
-                    "status": (
-                        "completed"
-                        if (revision_calls > 0 or accepted_revisions > 0)
-                        else (
-                            "disabled"
-                            if not self._settings.enable_targeted_repair
-                            else "skipped_no_blocking_claims"
-                        )
-                    ),
-                },
-            }
-
-            await self._db.append_event(
-                ExecutionEvent(
-                    run_id=resolved_run_id,
-                    event_type="stages_executed_summary",
-                    actor="orchestrator",
-                    message=f"Stages executed: {', '.join(stages_executed)}",
-                    payload={
-                        "stages_executed": stages_executed,
-                        "stage_telemetry": stage_telemetry,
-                    },
-                )
-            )
             all_assumptions = list(dict.fromkeys([*plan.assumptions, *sched_outcome.assumptions]))
             all_missing = list(
                 dict.fromkeys([*plan.missing_information, *sched_outcome.missing_information])
@@ -550,6 +462,124 @@ class NetworkRunner:
                 )
 
             assert gate_result.gate_record is not None
+
+            # Refresh trace after synthesis and Honesty Gate so stage telemetry reflects
+            # actual executed stages, persisted revisions, and accepted repairs.
+            trace_snapshot = await self._db.get_run_trace(resolved_run_id)
+            assert trace_snapshot is not None
+            latest_claims_map: dict[str, Claim] = {}
+            for clm in trace_snapshot.claims:
+                prev = latest_claims_map.get(clm.claim_id)
+                if prev is None or clm.version > prev.version:
+                    latest_claims_map[clm.claim_id] = clm
+
+            delivered_msgs = sum(
+                1 for m in trace_snapshot.messages if m.delivery_status != "pending"
+            )
+            followup_calls = sum(
+                1
+                for ev in trace_snapshot.events
+                if ev.event_type == "budget_reserved"
+                and ev.payload.get("operation") == "worker_followup"
+            )
+            review_calls = sum(
+                1
+                for ev in trace_snapshot.events
+                if ev.event_type == "budget_reserved"
+                and str(ev.payload.get("operation", "")).startswith("review")
+            )
+            revision_attempts = sum(
+                1
+                for ev in trace_snapshot.events
+                if ev.event_type == "budget_reserved" and ev.payload.get("operation") == "revision"
+            )
+            persisted_claim_versions = sum(1 for c in trace_snapshot.claims if c.version > 1)
+            accepted_revisions = sum(
+                1
+                for c in latest_claims_map.values()
+                if c.version > 1 and c.status == ClaimStatus.SUPPORTED
+            )
+
+            stages_executed: list[str] = ["planner", "dag_workers"]
+            if delivered_msgs > 0 or followup_calls > 0:
+                stages_executed.append("peer_messaging")
+            if review_calls > 0 or len(trace_snapshot.review_verdicts) > 0:
+                stages_executed.append("independent_review")
+            if revision_attempts > 0 or persisted_claim_versions > 0:
+                stages_executed.append("targeted_repair")
+            stages_executed.append("honesty_gate_and_synthesis")
+
+            stage_telemetry = {
+                "planner": {"configured": True, "status": "completed"},
+                "dag_workers": {
+                    "configured": True,
+                    "completed_tasks": len(completed_tasks),
+                    "failed_or_blocked_tasks": len(incomplete_tasks),
+                    "status": "completed" if completed_tasks else "failed",
+                },
+                "peer_messaging": {
+                    "configured": self._settings.enable_peer_messaging,
+                    "delivered_messages": delivered_msgs,
+                    "followup_calls": followup_calls,
+                    "status": (
+                        "completed"
+                        if (delivered_msgs > 0 or followup_calls > 0)
+                        else (
+                            "disabled"
+                            if not self._settings.enable_peer_messaging
+                            else "skipped_no_messages"
+                        )
+                    ),
+                },
+                "independent_review": {
+                    "configured": self._settings.enable_independent_review,
+                    "reviewer_calls": review_calls,
+                    "verdict_count": len(trace_snapshot.review_verdicts),
+                    "status": (
+                        "completed"
+                        if (review_calls > 0 or trace_snapshot.review_verdicts)
+                        else (
+                            "disabled"
+                            if not self._settings.enable_independent_review
+                            else "skipped_no_claims"
+                        )
+                    ),
+                },
+                "targeted_repair": {
+                    "configured": self._settings.enable_targeted_repair,
+                    "revision_attempts": revision_attempts,
+                    "persisted_claim_versions": persisted_claim_versions,
+                    "accepted_revisions": accepted_revisions,
+                    "status": (
+                        "completed"
+                        if (revision_attempts > 0 or persisted_claim_versions > 0)
+                        else (
+                            "disabled"
+                            if not self._settings.enable_targeted_repair
+                            else "skipped_no_blocking_claims"
+                        )
+                    ),
+                },
+                "honesty_gate_and_synthesis": {
+                    "configured": True,
+                    "synthesis_mode": synthesis_mode,
+                    "release_mode": gate_result.gate_record.release_mode,
+                    "status": "partial_fallback" if used_fallback else "completed",
+                },
+            }
+
+            await self._db.append_event(
+                ExecutionEvent(
+                    run_id=resolved_run_id,
+                    event_type="stages_executed_summary",
+                    actor="orchestrator",
+                    message=f"Stages executed: {', '.join(stages_executed)}",
+                    payload={
+                        "stages_executed": stages_executed,
+                        "stage_telemetry": stage_telemetry,
+                    },
+                )
+            )
             release_mode = gate_result.gate_record.release_mode
             if not completed_tasks and used_fallback:
                 final_status = RunStatus.BUDGET_EXCEEDED if budget_hit else RunStatus.FAILED

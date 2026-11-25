@@ -10,7 +10,7 @@ from crewforge.config import CrewForgeSettings, sanitize_error_message
 from crewforge.core.budget import BudgetError
 from crewforge.core.executor import RunDeadlineExceededError
 from crewforge.core.worker import SpecialistWorker, WorkerExecutionOutcome
-from crewforge.providers.base import ProviderError
+from crewforge.providers.base import ProviderError, ProviderResponseError
 from crewforge.schemas import AgentSpec, ExecutionEvent, ExecutionPlan, TaskSpec, TaskStatus
 from crewforge.storage.database import Database
 
@@ -62,6 +62,7 @@ class DAGScheduler:
         missing_info: list[str] = []
         deadline_exceeded = False
         budget_exhausted = False
+        truncation_recovery_used = False
 
         async def _mark_blocked_dependents() -> None:
             changed = True
@@ -283,6 +284,47 @@ class DAGScheduler:
                             error=err_msg,
                         )
                     except (ProviderError, Exception) as exc:
+                        if (
+                            isinstance(exc, ProviderResponseError)
+                            and exc.code in {"truncated_response", "incomplete_response"}
+                            and not truncation_recovery_used
+                            and (
+                                run_deadline_monotonic is None
+                                or time.monotonic() < run_deadline_monotonic
+                            )
+                            and await _can_launch_more_calls()
+                        ):
+                            truncation_recovery_used = True
+                            await self._db.append_event(
+                                ExecutionEvent(
+                                    run_id=run_id,
+                                    event_type="truncation_recovery_attempted",
+                                    actor=task.assigned_agent_id,
+                                    message=(
+                                        f"Retrying task {task.task_ref or tid} with compact "
+                                        f"prompt after {exc.code}."
+                                    ),
+                                    payload={"task_id": tid, "code": exc.code},
+                                )
+                            )
+                            completed_snapshot = {
+                                c_tid: c_task
+                                for c_tid, c_task in tasks_by_id.items()
+                                if c_task.status == TaskStatus.COMPLETED
+                            }
+                            retry_coro = self._worker.execute_task(
+                                run_id=run_id,
+                                original_prompt=original_prompt,
+                                plan=plan,
+                                agent=agents_by_id[task.assigned_agent_id],
+                                task=tasks_by_id[tid],
+                                completed_tasks_by_id=completed_snapshot,
+                                run_deadline_monotonic=run_deadline_monotonic,
+                                compact_recovery=True,
+                            )
+                            active_asyncio_tasks[asyncio.create_task(retry_coro)] = tid
+                            continue
+
                         err_msg = sanitize_error_message(f"{type(exc).__name__}: {exc}")
                         tasks_by_id[tid] = task.model_copy(
                             update={"status": TaskStatus.FAILED, "error": err_msg}

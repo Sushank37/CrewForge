@@ -533,15 +533,15 @@ class ProposedEvidence(BaseModel):
         "external_retrieved",
         "external_unverified",
     ]
-    source_ref: str = Field(min_length=1, max_length=200)
-    excerpt: str = Field(min_length=1, max_length=600)
+    source_ref: str = Field(min_length=1, max_length=120)
+    excerpt: str = Field(min_length=1, max_length=360)
 
 
 class ProposedClaim(BaseModel):
-    """Compact claim assertion emitted by a specialist."""
+    """Compact atomic claim assertion emitted by a specialist."""
 
     claim_ref: str | None = Field(default=None, max_length=32)
-    statement: str = Field(min_length=1, max_length=600)
+    statement: str = Field(min_length=1, max_length=360)
     category: ClaimCategory = ClaimCategory.INFERENCE
     evidence_indices: list[int] = Field(default_factory=list)
     premise_claim_ids: list[str] = Field(default_factory=list)
@@ -560,16 +560,26 @@ class OutgoingMessageInstruction(BaseModel):
         description="Target agent_ref, 'lead', or null for broadcast.",
     )
     message_type: Literal["finding", "question", "clarification", "warning"] = "finding"
-    content: str = Field(min_length=1, max_length=1000)
+    content: str = Field(min_length=1, max_length=500)
     related_claim_indices: list[int] = Field(default_factory=list)
 
 
 class SpecialistOutput(BaseModel):
     """Compact structured result returned by a specialist task execution."""
 
-    findings: str = Field(min_length=1)
-    claims: list[ProposedClaim] = Field(default_factory=list)
-    evidence_proposals: list[ProposedEvidence] = Field(default_factory=list)
+    findings: str = Field(
+        min_length=1,
+        max_length=1500,
+        description="Concise task findings (no prompt repetition).",
+    )
+    claims: list[ProposedClaim] = Field(
+        default_factory=list,
+        description="1 to 3 atomic claims directly addressing assigned deliverables.",
+    )
+    evidence_proposals: list[ProposedEvidence] = Field(
+        default_factory=list,
+        description="Short verbatim evidence excerpts supporting claims.",
+    )
     assumptions: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
@@ -582,13 +592,13 @@ class TargetedClaimRevision(BaseModel):
 
     target_claim_id: str = Field(min_length=1)
     expected_version: int = Field(ge=1)
-    new_statement: str = Field(min_length=1, max_length=600)
+    new_statement: str = Field(min_length=1, max_length=360)
     category: ClaimCategory | None = None
     evidence_indices: list[int] = Field(default_factory=list)
     premise_claim_ids: list[str] = Field(default_factory=list)
     computation: ArithmeticRequest | None = None
     assumptions: list[str] = Field(default_factory=list)
-    revision_notes: str = Field(min_length=1, max_length=400)
+    revision_notes: str = Field(min_length=1, max_length=300)
     is_unresolved: bool = False
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
@@ -596,7 +606,7 @@ class TargetedClaimRevision(BaseModel):
 class FollowUpOutput(BaseModel):
     """Compact structured output from a bounded peer-communication checkpoint."""
 
-    updated_findings: str = Field(min_length=1)
+    updated_findings: str = Field(min_length=1, max_length=1500)
     revised_claims: list[TargetedClaimRevision] = Field(default_factory=list)
     new_claims: list[ProposedClaim] = Field(default_factory=list)
     evidence_proposals: list[ProposedEvidence] = Field(default_factory=list)
@@ -607,7 +617,7 @@ class FollowUpOutput(BaseModel):
 class RevisionOutput(BaseModel):
     """Compact structured output from targeted dispute-resolution repair."""
 
-    updated_findings: str = Field(min_length=1)
+    updated_findings: str = Field(min_length=1, max_length=1500)
     revisions: list[TargetedClaimRevision] = Field(default_factory=list)
     evidence_proposals: list[ProposedEvidence] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)

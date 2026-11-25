@@ -154,3 +154,10 @@ uv run crewforge-mcp --transport streamable-http --host 127.0.0.1 --port 8000
   }
 }
 ```
+
+## Phase 5E Reliability Hardening
+
+- **Compact Specialist Protocol (`SpecialistOutput`):** Bounded `findings`, atomic `claims`, and short verbatim `evidence_proposals` reduce structured-output bloat and truncation risk.
+- **Explicit Global Output Ceiling:** `max_output_tokens` acts as a hard ceiling across all operation overrides in `CrewForgeSettings.output_limit_for_operation()` and `ModelExecutor`.
+- **Bounded Truncation Recovery:** At most one compact regeneration attempt per network run (and equivalent in `BaselineRunner`) on explicit `truncated_response` / `incomplete_response` errors, with separate budget reservation and no ceiling raise.
+- **Document Lineage & Reviewer Visibility:** Preserves primary `doc_1..doc_N` provenance aliases, normalizes retrieved-document citations, surfaces `source_ref` to independent reviewers, preserves unrelated `SUPPORTED` claims during synthesis, and emits `stages_executed_summary` after Honesty Gate completion.

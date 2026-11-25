@@ -82,7 +82,8 @@ class ModelExecutor:
         run_deadline_monotonic: float | None = None,
     ) -> StructuredGenerationResult[T]:
         """Run a structured generation call with per-attempt reservation and bounded retries."""
-        bounded_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
+        requested_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
+        bounded_out = min(requested_out, self._settings.max_output_tokens)
         max_retries = self._settings.max_retries
 
         attempt_index = 0
@@ -328,7 +329,8 @@ class ModelExecutor:
         run_deadline_monotonic: float | None = None,
     ) -> TextGenerationResult:
         """Run an unstructured text generation call with per-attempt reservation."""
-        bounded_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
+        requested_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
+        bounded_out = min(requested_out, self._settings.max_output_tokens)
         max_retries = self._settings.max_retries
 
         attempt_index = 0

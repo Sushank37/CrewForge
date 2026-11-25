@@ -14,7 +14,7 @@ from crewforge.config import CrewForgeSettings, ProviderType, sanitize_error_mes
 from crewforge.core.budget import BudgetError, BudgetExceededError, BudgetManager
 from crewforge.core.executor import ModelExecutor, RunDeadlineExceededError
 from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
-from crewforge.providers.base import ModelProvider, ProviderError
+from crewforge.providers.base import ModelProvider, ProviderError, ProviderResponseError
 from crewforge.providers.ollama_provider import OllamaProvider
 from crewforge.providers.openai_provider import OpenAIProvider
 from crewforge.schemas import ArithmeticRequest, ExecutionEvent, RunResult, RunStatus
@@ -218,18 +218,60 @@ class BaselineRunner:
                     f"{doc_excerpts}"
                 )
 
-            response = await self._executor.execute_structured(
-                run_id=resolved_run_id,
-                actor="baseline",
-                operation="baseline",
-                prompt=baseline_user_prompt,
-                response_model=BaselineModelOutput,
-                system_prompt=BASELINE_SYSTEM_PROMPT,
-                max_output_tokens=self._settings.max_output_tokens,
-                timeout_seconds=self._settings.request_timeout_seconds,
-            )
+            truncation_recovered = False
+            try:
+                response = await self._executor.execute_structured(
+                    run_id=resolved_run_id,
+                    actor="baseline",
+                    operation="baseline",
+                    prompt=baseline_user_prompt,
+                    response_model=BaselineModelOutput,
+                    system_prompt=BASELINE_SYSTEM_PROMPT,
+                    max_output_tokens=self._settings.max_output_tokens,
+                    timeout_seconds=self._settings.request_timeout_seconds,
+                )
+            except ProviderResponseError as exc:
+                if exc.code not in {"truncated_response", "incomplete_response"}:
+                    raise
+                truncation_recovered = True
+                await self._db.append_event(
+                    ExecutionEvent(
+                        run_id=resolved_run_id,
+                        event_type="truncation_recovery_attempted",
+                        actor="baseline",
+                        message=f"Retrying baseline with compact prompt after {exc.code}.",
+                        payload={"code": exc.code},
+                    )
+                )
+                compact_prompt = (
+                    baseline_user_prompt
+                    + "\n\nTRUNCATION RECOVERY: Your previous response hit max_output_tokens. "
+                    "Return a much shorter, strictly valid JSON response (answer <= 250 words, "
+                    "only essential computations, no repetition)."
+                )
+                response = await self._executor.execute_structured(
+                    run_id=resolved_run_id,
+                    actor="baseline",
+                    operation="baseline",
+                    prompt=compact_prompt,
+                    response_model=BaselineModelOutput,
+                    system_prompt=BASELINE_SYSTEM_PROMPT,
+                    max_output_tokens=self._settings.max_output_tokens,
+                    timeout_seconds=self._settings.request_timeout_seconds,
+                )
             last_returned_model = response.returned_model or response.model
             parsed = response.parsed
+            if truncation_recovered:
+                note = "Compact truncation recovery was used after initial max_output_tokens."
+                parsed = parsed.model_copy(
+                    update={
+                        "confidence_notes": (
+                            f"{parsed.confidence_notes} ({note})"
+                            if parsed.confidence_notes
+                            else note
+                        )
+                    }
+                )
             tool_summaries: list[dict[str, object]] = []
             if parsed.computations:
                 for req in parsed.computations[:4]:

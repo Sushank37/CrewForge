@@ -24,6 +24,8 @@ def build_planner_system_prompt(
         "and `task_ref` (e.g., 't1', 't2').\n"
         "- Every task must set `assigned_agent_ref` to a defined `agent_ref` "
         "and have non-empty `expected_deliverables`.\n"
+        "- Decompose multi-step problems into focused atomic tasks (1-3 concrete deliverables "
+        "per task) rather than overloading a single task.\n"
         "- `depends_on` must reference earlier `task_ref` values and MUST be acyclic.\n"
         "- Independent tasks should have empty `depends_on` so they can execute concurrently.\n"
         f"- Agent `capabilities` may ONLY use items from: [{caps}].\n"

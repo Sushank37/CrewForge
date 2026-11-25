@@ -167,12 +167,21 @@ def build_provenance_catalog(
         catalog.targets_by_key[alias] = target
 
     doc_source_texts: dict[str, list[str]] = {}
-    for idx, evd in enumerate(verified_evidence or [], start=1):
-        doc_alias = f"doc_{idx}"
+    doc_idx = 0
+    for evd in verified_evidence or []:
         is_ok = bool(evd.verified_in_input)
         reason = None if is_ok else f"Evidence '{evd.evidence_id}' is unverified."
+        # Preserve stable doc_1..doc_N aliases for primary ingested/retrieved documents
+        # without letting specialist sub-excerpts with source_ref='doc_1' overwrite them.
+        is_primary_doc = (
+            evd.source_type == "external_retrieved"
+            or evd.created_by in {"lead", "baseline", "operator"}
+        ) and not evd.source_ref.startswith("doc_")
+        alias = f"doc_{doc_idx + 1}" if is_primary_doc else evd.evidence_id
+        if is_primary_doc:
+            doc_idx += 1
         target = ProvenanceTarget(
-            alias=doc_alias,
+            alias=alias,
             kind="verified_evidence",
             target_id=evd.evidence_id,
             text=evd.excerpt,
@@ -180,8 +189,9 @@ def build_provenance_catalog(
             rejection_reason=reason,
         )
         catalog.targets_by_key[evd.evidence_id] = target
-        catalog.targets_by_key[doc_alias] = target
-        if evd.source_ref:
+        if is_primary_doc:
+            catalog.targets_by_key[alias] = target
+        if evd.source_ref and not evd.source_ref.startswith("doc_"):
             if evd.source_ref not in catalog.targets_by_key:
                 catalog.targets_by_key[evd.source_ref] = target
             doc_source_texts.setdefault(evd.source_ref, []).append(evd.excerpt)

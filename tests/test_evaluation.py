@@ -1282,13 +1282,13 @@ def test_failed_call_reconciliation_with_known_usage_and_no_clamping(tmp_path: P
     assert cloud_prof.synthesis_max_output_tokens == 6144
     assert cloud_prof.output_limit_for_operation("worker") == 8192
 
-    # Even if global max_output_tokens=2560, explicit worker_max_output_tokens=8192 is NOT clamped
-    unclamped = CrewForgeSettings(
+    # Global max_output_tokens=2560 acts as hard ceiling for operation overrides
+    clamped = CrewForgeSettings(
         _env_file=None,
         max_output_tokens=2560,
         worker_max_output_tokens=8192,
     )
-    assert unclamped.output_limit_for_operation("worker") == 8192
+    assert clamped.output_limit_for_operation("worker") == 2560
 
     # 2. Verify failed call with known usage reconciles exact cost & doesn't increment successes
     class TruncatedResponsesAPI:
@@ -1489,3 +1489,257 @@ def test_accurate_stage_telemetry_and_large_worker_output(tmp_path: Path) -> Non
         await db.close()
 
     asyncio.run(_run_no_rev())
+
+
+def test_phase5e_compact_protocol_evidence_lineage_recovery_and_telemetry(tmp_path: Path) -> None:
+    """Verify Phase 5E compact schema, doc provenance, recovery, synthesis, and telemetry."""
+    import asyncio
+
+    from openai.lib._pydantic import to_strict_json_schema
+
+    from crewforge.core.baseline import BaselineRunner
+    from crewforge.core.budget import BudgetManager
+    from crewforge.core.ledger import ClaimLedger
+    from crewforge.core.orchestrator import NetworkRunner
+    from crewforge.core.retrieval import ReferenceDocument
+    from crewforge.providers.base import ProviderResponseError
+    from crewforge.schemas import (
+        Evidence,
+        ProposedClaim,
+        ProposedEvidence,
+        SpecialistOutput,
+        UsageMetrics,
+    )
+    from tests.fake_provider import FakeProvider
+
+    # 1. Strict JSON schema compatibility for compact SpecialistOutput
+    strict_schema = to_strict_json_schema(SpecialistOutput)
+    assert strict_schema["properties"]["findings"]["maxLength"] == 1500
+
+    # 2. Retrieved-document provenance normalization when specialist mislabels source_type
+    async def _run_lineage() -> None:
+        db = Database(tmp_path / "lineage.db")
+        await db.initialize()
+        cfg = CrewForgeSettings(_env_file=None, db_path=tmp_path / "lineage.db")
+        await db.create_run(
+            run_id="run_lineage",
+            mode="network",
+            prompt="Check policy.",
+            config=cfg.to_run_config(),
+        )
+        await db.insert_evidence(
+            Evidence(
+                run_id="run_lineage",
+                source_type="external_retrieved",
+                source_ref="policy.md",
+                excerpt="Credits apply only to future invoices.",
+                verified_in_input=True,
+                retrieval_status="ok",
+                created_by="lead",
+            )
+        )
+        ledger = ClaimLedger(db)
+        evds, claims, _ = await ledger.record_specialist_outputs(
+            run_id="run_lineage",
+            agent_id="lead",
+            task_id=None,
+            original_prompt="Check policy.",
+            dependency_findings_text="",
+            evidence_proposals=[
+                ProposedEvidence(
+                    source_type="dependency_finding",
+                    source_ref="doc_1",
+                    excerpt="Credits apply only to future invoices.",
+                )
+            ],
+            claim_proposals=[
+                ProposedClaim(
+                    statement="Credits apply only to future invoices.",
+                    category="given_fact",
+                    evidence_indices=[0],
+                )
+            ],
+        )
+        assert len(evds) == 1
+        assert evds[0].source_type == "external_retrieved"
+        assert evds[0].verified_in_input is True
+        assert len(claims) == 1
+        await db.close()
+
+    asyncio.run(_run_lineage())
+
+    # 3. Network bounded truncation recovery (max 1 per run), synthesis & post-gate telemetry
+    async def _run_network_recovery() -> None:
+        db = Database(tmp_path / "net_rec.db")
+        await db.initialize()
+        cfg = CrewForgeSettings(
+            _env_file=None,
+            db_path=tmp_path / "net_rec.db",
+            max_output_tokens=4096,
+            worker_max_output_tokens=4096,
+            max_model_calls_per_run=10,
+            max_retries=0,
+        )
+        worker_calls = 0
+
+        def handler(prompt: str, rm: Any) -> dict[str, Any]:
+            nonlocal worker_calls
+            name = getattr(rm, "__name__", "")
+            if "Planner" in name:
+                return {
+                    "goal": "Compute capacity and check SLA",
+                    "user_requirements": ["Compute capacity", "Check optional item"],
+                    "acceptance_criteria": ["Verify math"],
+                    "agents": [
+                        {
+                            "agent_ref": "a1",
+                            "role": "Analyst",
+                            "instructions": "Work.",
+                            "capabilities": ["analysis"],
+                        }
+                    ],
+                    "tasks": [
+                        {
+                            "task_ref": "t1",
+                            "title": "Compute",
+                            "description": "Compute capacity",
+                            "assigned_agent_ref": "a1",
+                            "depends_on": [],
+                            "expected_deliverables": ["Capacity"],
+                        }
+                    ],
+                }
+            if "Specialist" in name:
+                worker_calls += 1
+                if worker_calls == 1:
+                    raise ProviderResponseError(
+                        "OpenAI structured response incomplete (reason=max_output_tokens).",
+                        code="truncated_response",
+                        provider="fake",
+                        model="fake-model",
+                        usage=UsageMetrics(input_tokens=100, output_tokens=4096),
+                    )
+                assert "TRUNCATION RECOVERY" in prompt
+                return {
+                    "findings": "Regular capacity is 3600 orders.",
+                    "claims": [
+                        {
+                            "statement": "Regular capacity is 3600 orders.",
+                            "category": "computation",
+                            "evidence_indices": [0],
+                            "requirement_refs": ["req_1"],
+                            "computation": {
+                                "expression": "450 * 8",
+                                "variable_bindings": [
+                                    {"name": "rate", "value": "450", "provenance_ref": "up_1"},
+                                    {"name": "hrs", "value": "8", "provenance_ref": "up_1"},
+                                ],
+                                "proposed_result": "3600",
+                                "units": "orders",
+                            },
+                        },
+                        {
+                            "statement": "Unverified external claim.",
+                            "category": "external_factual_assertion",
+                            "evidence_indices": [],
+                            "requirement_refs": ["req_2"],
+                        },
+                    ],
+                    "evidence_proposals": [
+                        {
+                            "source_type": "user_prompt",
+                            "source_ref": "up_1",
+                            "excerpt": "450 orders/hr for 8 hours.",
+                        }
+                    ],
+                    "task_completed": True,
+                }
+            if "Reviewer" in name:
+                import re
+
+                verdicts = []
+                for cid, cver in re.findall(r"Claim (clm_[a-z0-9]+) \(version=(\d+)", prompt):
+                    verdicts.append(
+                        {
+                            "claim_id": cid,
+                            "claim_version": int(cver),
+                            "review_dimension": "combined_evidence_consistency",
+                            "decision": "approve",
+                            "rationale": "Verified.",
+                            "evidence_refs": [],
+                            "blocking_severity": "none",
+                        }
+                    )
+                return {"verdicts": verdicts, "missing_requirement_coverage": []}
+            # Synthesis omits accepted_segments; LeadSynthesizer must preserve supported claim
+            return {
+                "user_requirements": ["Compute capacity", "Check optional item"],
+                "accepted_segments": [],
+                "conditional_conclusions": [],
+                "recommendations": [],
+                "assumptions": [],
+                "unresolved_issues": ["Optional item unverified."],
+                "missing_information": [],
+            }
+
+        runner = NetworkRunner(
+            provider=FakeProvider(handler=handler, max_retries=0),
+            database=db,
+            budget_manager=BudgetManager(db, cfg),
+            settings=cfg,
+        )
+        res = await runner.run("450 orders/hr for 8 hours.")
+        assert worker_calls == 2
+        assert "Regular capacity is 3600 orders." in res.answer
+        assert len(res.referenced_claim_ids) == 1
+
+        trace = await db.get_run_trace(res.run_id)
+        assert trace is not None
+        ev_types = [e.event_type for e in trace.events]
+        assert "truncation_recovery_attempted" in ev_types
+        assert ev_types.index("synthesis_completed") < ev_types.index("stages_executed_summary")
+        summary_ev = [e for e in trace.events if e.event_type == "stages_executed_summary"][-1]
+        assert "honesty_gate_and_synthesis" in summary_ev.payload["stage_telemetry"]
+        assert summary_ev.payload["stage_telemetry"]["targeted_repair"]["accepted_revisions"] == 0
+        await db.close()
+
+    asyncio.run(_run_network_recovery())
+
+    # 4. Baseline bounded truncation recovery
+    async def _run_baseline_recovery() -> None:
+        db = Database(tmp_path / "base_rec.db")
+        await db.initialize()
+        cfg = CrewForgeSettings(_env_file=None, db_path=tmp_path / "base_rec.db", max_retries=0)
+        calls = 0
+
+        def handler(prompt: str, _rm: Any) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ProviderResponseError(
+                    "truncated",
+                    code="truncated_response",
+                    provider="fake",
+                    model="fake-model",
+                )
+            assert "TRUNCATION RECOVERY" in prompt
+            return {"answer": "Recovered concise answer.", "missing_information": []}
+
+        runner = BaselineRunner(
+            provider=FakeProvider(handler=handler, max_retries=0),
+            database=db,
+            budget_manager=BudgetManager(db, cfg),
+            settings=cfg,
+        )
+        res = await runner.run(
+            "Test prompt",
+            reference_documents=[
+                ReferenceDocument(doc_id="doc_1", source_ref="doc.md", content="Policy text.")
+            ],
+        )
+        assert calls == 2
+        assert res.status == RunStatus.COMPLETED
+        assert "Compact truncation recovery" in (res.confidence_notes or "")
+        await db.close()
+
+    asyncio.run(_run_baseline_recovery())
