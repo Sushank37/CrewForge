@@ -39,7 +39,7 @@ class OpenAIProvider(ModelProvider):
         api_key: str | None,
         base_url: str | None = None,
         timeout_seconds: float = 60.0,
-        max_retries: int = 2,
+        max_retries: int = 0,
         default_max_output_tokens: int = 1024,
         client: AsyncOpenAI | None = None,
     ) -> None:
@@ -54,7 +54,7 @@ class OpenAIProvider(ModelProvider):
         self._max_retries = max_retries
         self._default_max_output_tokens = default_max_output_tokens
         self._owns_client = client is None
-        # Disable SDK-level hidden retries so our BudgetManager/retry layer has full visibility.
+        # Disable SDK-level hidden retries so BudgetManager/ModelExecutor owns all attempts.
         self._client = client or AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -75,7 +75,7 @@ class OpenAIProvider(ModelProvider):
             api_key=secret,
             base_url=settings.openai_base_url,
             timeout_seconds=settings.request_timeout_seconds,
-            max_retries=settings.max_retries,
+            max_retries=0,
             default_max_output_tokens=settings.max_output_tokens,
         )
 
@@ -113,7 +113,7 @@ class OpenAIProvider(ModelProvider):
             )
         if isinstance(exc, openai.AuthenticationError):
             return ProviderConfigurationError(
-                f"OpenAI authentication failed: {exc}",
+                "OpenAI authentication failed (check API key).",
                 provider=self.provider_name,
                 model=self._model,
             )
@@ -149,12 +149,34 @@ class OpenAIProvider(ModelProvider):
     @staticmethod
     def _extract_usage(response: Any, retries: int, latency_ms: float) -> UsageMetrics:
         usage_obj = getattr(response, "usage", None)
-        input_tokens = int(getattr(usage_obj, "input_tokens", 0) or 0)
-        output_tokens = int(getattr(usage_obj, "output_tokens", 0) or 0)
-        total_tokens = int(
-            getattr(usage_obj, "total_tokens", input_tokens + output_tokens)
-            or (input_tokens + output_tokens)
-        )
+        if usage_obj is None:
+            return UsageMetrics(
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                model_calls=1,
+                retries=retries,
+                latency_ms=latency_ms,
+                usage_reported=False,
+            )
+
+        raw_in = getattr(usage_obj, "input_tokens", None)
+        raw_out = getattr(usage_obj, "output_tokens", None)
+        if raw_in is None or raw_out is None:
+            return UsageMetrics(
+                input_tokens=int(raw_in or 0),
+                output_tokens=int(raw_out or 0),
+                total_tokens=int(getattr(usage_obj, "total_tokens", 0) or 0),
+                model_calls=1,
+                retries=retries,
+                latency_ms=latency_ms,
+                usage_reported=False,
+            )
+
+        input_tokens = int(raw_in)
+        output_tokens = int(raw_out)
+        raw_total = getattr(usage_obj, "total_tokens", None)
+        total_tokens = int(raw_total) if raw_total is not None else (input_tokens + output_tokens)
         return UsageMetrics(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -162,6 +184,7 @@ class OpenAIProvider(ModelProvider):
             model_calls=1,
             retries=retries,
             latency_ms=latency_ms,
+            usage_reported=True,
         )
 
     def _build_common_kwargs(
@@ -191,8 +214,10 @@ class OpenAIProvider(ModelProvider):
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> TextGenerationResult:
         timeout = timeout_seconds or self._timeout_seconds
+        retries_cap = self._max_retries if max_retries is None else max_retries
         kwargs = self._build_common_kwargs(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -211,7 +236,7 @@ class OpenAIProvider(ModelProvider):
             provider=self.provider_name,
             model=self._model,
             timeout_seconds=timeout,
-            max_retries=self._max_retries,
+            max_retries=retries_cap,
         )
         output_text = getattr(response, "output_text", None)
         if not isinstance(output_text, str) or not output_text.strip():
@@ -239,8 +264,10 @@ class OpenAIProvider(ModelProvider):
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> StructuredGenerationResult[T]:
         timeout = timeout_seconds or self._timeout_seconds
+        retries_cap = self._max_retries if max_retries is None else max_retries
         kwargs = self._build_common_kwargs(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -260,7 +287,7 @@ class OpenAIProvider(ModelProvider):
             provider=self.provider_name,
             model=self._model,
             timeout_seconds=timeout,
-            max_retries=self._max_retries,
+            max_retries=retries_cap,
         )
 
         raw_text = getattr(response, "output_text", "") or ""

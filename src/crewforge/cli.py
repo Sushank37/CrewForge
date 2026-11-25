@@ -1,4 +1,4 @@
-"""Command-line interface for CrewForge Phase 1 operations and smoke testing."""
+"""Command-line interface for CrewForge operations and smoke testing."""
 
 from __future__ import annotations
 
@@ -11,14 +11,52 @@ from typing import Any
 from crewforge.config import CrewForgeSettings, ProviderType, configure_logging
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
 from crewforge.core.budget import BudgetManager
+from crewforge.core.orchestrator import NetworkRunner
 from crewforge.mcp_server import run_mcp_server
-from crewforge.schemas import RunStatus
+from crewforge.schemas import RunResult, RunStatus
 from crewforge.storage.database import Database
 
 
-async def _run_baseline_cmd(
+def _print_run_result(result: RunResult, *, json_output: bool) -> None:
+    if json_output:
+        print(result.model_dump_json(indent=2))
+        return
+
+    print(f"Run ID:   {result.run_id}")
+    print(f"Mode:     {result.mode}")
+    print(f"Status:   {result.status.value}")
+    print(f"Model:    {result.provider}/{result.model}")
+    print(
+        f"Calls:    dispatched={result.usage.model_calls} "
+        f"succeeded={result.usage.successful_operations} retries={result.usage.retries}"
+    )
+    print(
+        f"Tokens:   in={result.usage.input_tokens} "
+        f"out={result.usage.output_tokens} total={result.usage.total_tokens}"
+    )
+    print(f"Latency:  {result.latency_ms:.1f} ms")
+    if result.specialist_roles:
+        print(f"Team:     {', '.join(result.specialist_roles)}")
+    if result.error:
+        print(f"Error:    {result.error}", file=sys.stderr)
+    if result.answer:
+        print(f"\nAnswer:\n{result.answer}")
+    if result.missing_information:
+        print("\nMissing Information:")
+        for item in result.missing_information:
+            print(f"- {item}")
+    if result.assumptions:
+        print("\nAssumptions:")
+        for item in result.assumptions:
+            print(f"- {item}")
+    if result.confidence_notes:
+        print(f"\nConfidence Notes:\n{result.confidence_notes}")
+
+
+async def _run_mode_cmd(
     prompt: str,
     *,
+    mode: str,
     settings: CrewForgeSettings,
     json_output: bool,
 ) -> int:
@@ -27,41 +65,27 @@ async def _run_baseline_cmd(
     provider = build_provider_from_settings(settings)
     try:
         budget = BudgetManager(db, settings)
-        runner = BaselineRunner(
-            provider=provider,
-            database=db,
-            budget_manager=budget,
-            settings=settings,
-        )
+        if mode == "network":
+            runner = NetworkRunner(
+                provider=provider,
+                database=db,
+                budget_manager=budget,
+                settings=settings,
+            )
+        else:
+            runner = BaselineRunner(
+                provider=provider,
+                database=db,
+                budget_manager=budget,
+                settings=settings,
+            )
         result = await runner.run(prompt)
     finally:
         await provider.aclose()
         await db.close()
 
-    if json_output:
-        print(result.model_dump_json(indent=2))
-    else:
-        print(f"Run ID:   {result.run_id}")
-        print(f"Status:   {result.status.value}")
-        print(f"Model:    {result.provider}/{result.model}")
-        print(
-            f"Tokens:   in={result.usage.input_tokens} "
-            f"out={result.usage.output_tokens} total={result.usage.total_tokens}"
-        )
-        print(f"Latency:  {result.latency_ms:.1f} ms")
-        if result.error:
-            print(f"Error:    {result.error}", file=sys.stderr)
-        else:
-            print(f"\nAnswer:\n{result.answer}")
-            if result.missing_information:
-                print("\nMissing Information:")
-                for item in result.missing_information:
-                    print(f"- {item}")
-            if result.assumptions:
-                print("\nAssumptions:")
-                for item in result.assumptions:
-                    print(f"- {item}")
-    return 0 if result.status == RunStatus.COMPLETED else 1
+    _print_run_result(result, json_output=json_output)
+    return 0 if result.status in {RunStatus.COMPLETED, RunStatus.PARTIAL} else 1
 
 
 async def _run_trace_cmd(run_id: str, *, settings: CrewForgeSettings) -> int:
@@ -97,9 +121,16 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser."""
     parser = argparse.ArgumentParser(
         prog="crewforge",
-        description="CrewForge Phase 1 CLI.",
+        description="CrewForge CLI.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    solve_parser = subparsers.add_parser(
+        "solve",
+        help="Solve a prompt with CrewForge's dynamic multi-agent network.",
+    )
+    solve_parser.add_argument("prompt", help="Prompt to solve.")
+    solve_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     baseline_parser = subparsers.add_parser(
         "baseline",
@@ -127,6 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override configured provider.",
     )
     smoke_parser.add_argument("--model", default=None, help="Override configured model.")
+    smoke_parser.add_argument(
+        "--mode",
+        choices=["baseline", "network"],
+        default="baseline",
+        help="Execution mode for smoke test (default: baseline).",
+    )
     smoke_parser.add_argument(
         "--prompt",
         default=(
@@ -156,8 +193,14 @@ def main(argv: list[str] | None = None) -> int:
     settings = CrewForgeSettings()
     configure_logging(settings.log_level)
 
+    if args.command == "solve":
+        return asyncio.run(
+            _run_mode_cmd(args.prompt, mode="network", settings=settings, json_output=args.json)
+        )
     if args.command == "baseline":
-        return asyncio.run(_run_baseline_cmd(args.prompt, settings=settings, json_output=args.json))
+        return asyncio.run(
+            _run_mode_cmd(args.prompt, mode="baseline", settings=settings, json_output=args.json)
+        )
     if args.command == "trace":
         return asyncio.run(_run_trace_cmd(args.run_id, settings=settings))
     if args.command == "budget":
@@ -170,8 +213,9 @@ def main(argv: list[str] | None = None) -> int:
             updates["model"] = args.model
         smoke_settings = settings.model_copy(update=updates) if updates else settings
         return asyncio.run(
-            _run_baseline_cmd(
+            _run_mode_cmd(
                 args.prompt,
+                mode=args.mode,
                 settings=smoke_settings,
                 json_output=args.json,
             )

@@ -42,6 +42,7 @@ class RunStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
     CANCELLED = "cancelled"
     BUDGET_EXCEEDED = "budget_exceeded"
@@ -75,8 +76,10 @@ class UsageMetrics(BaseModel):
     estimated_cost_usd: float = Field(default=0.0, ge=0.0)
     actual_cost_usd: float | None = Field(default=None, ge=0.0)
     model_calls: int = Field(default=0, ge=0)
+    successful_operations: int = Field(default=0, ge=0)
     retries: int = Field(default=0, ge=0)
     latency_ms: float = Field(default=0.0, ge=0.0)
+    usage_reported: bool = True
 
     @model_validator(mode="after")
     def _normalize_and_validate_tokens(self) -> UsageMetrics:
@@ -95,6 +98,8 @@ class AgentSpec(BaseModel):
     """Specification of a dynamically assembled specialist or reviewer agent."""
 
     agent_id: str = Field(default_factory=lambda: _new_id("agt"))
+    agent_ref: str | None = None
+    run_id: str | None = None
     role: str = Field(min_length=1)
     instructions: str = Field(min_length=1)
     capabilities: list[str] = Field(default_factory=list)
@@ -107,14 +112,22 @@ class TaskSpec(BaseModel):
     """Unit of work within an execution plan with explicit dependencies."""
 
     task_id: str = Field(default_factory=lambda: _new_id("tsk"))
+    task_ref: str | None = None
+    run_id: str | None = None
+    plan_id: str | None = None
     title: str = Field(min_length=1)
     description: str = Field(min_length=1)
     assigned_agent_id: str = Field(min_length=1)
     depends_on: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
+    findings: str | None = None
+    error: str | None = None
     created_by: str = Field(default="lead")
     created_at: datetime = Field(default_factory=_utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class ExecutionPlan(BaseModel):
@@ -123,9 +136,12 @@ class ExecutionPlan(BaseModel):
     plan_id: str = Field(default_factory=lambda: _new_id("pln"))
     run_id: str = Field(min_length=1)
     goal: str = Field(min_length=1)
+    user_requirements: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
     agents: list[AgentSpec] = Field(default_factory=list)
     tasks: list[TaskSpec] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
     created_by: str = Field(default="lead")
     created_at: datetime = Field(default_factory=_utc_now)
 
@@ -139,6 +155,8 @@ class Evidence(BaseModel):
     source_ref: str = Field(min_length=1)
     excerpt: str = Field(min_length=1)
     reliability: EvidenceReliability = EvidenceReliability.UNVERIFIED
+    verified_in_input: bool = False
+    task_id: str | None = None
     created_by: str = Field(min_length=1)
     created_at: datetime = Field(default_factory=_utc_now)
 
@@ -173,6 +191,7 @@ class AgentMessage(BaseModel):
     message_type: str = Field(default="statement", min_length=1)
     content: str = Field(min_length=1)
     related_claim_ids: list[str] = Field(default_factory=list)
+    delivery_status: str = Field(default="pending")
     created_at: datetime = Field(default_factory=_utc_now)
 
 
@@ -196,6 +215,7 @@ class RunConfig(BaseModel):
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
     request_timeout_seconds: float = Field(gt=0.0)
+    run_deadline_seconds: float = Field(default=300.0, gt=0.0)
     max_retries: int = Field(ge=0)
     max_concurrency: int = Field(ge=1)
     max_output_tokens: int = Field(ge=1)
@@ -230,6 +250,9 @@ class RunResult(BaseModel):
     missing_information: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     confidence_notes: str | None = None
+    referenced_claim_ids: list[str] = Field(default_factory=list)
+    specialist_roles: list[str] = Field(default_factory=list)
+    incomplete_tasks: list[str] = Field(default_factory=list)
     usage: UsageMetrics = Field(default_factory=UsageMetrics)
     latency_ms: float = Field(default=0.0, ge=0.0)
     error: str | None = None
@@ -248,8 +271,124 @@ class RunTrace(BaseModel):
     model: str
     config: RunConfig
     result: RunResult | None = None
+    plan: ExecutionPlan | None = None
+    agents: list[AgentSpec] = Field(default_factory=list)
+    tasks: list[TaskSpec] = Field(default_factory=list)
+    task_transitions: list[dict[str, Any]] = Field(default_factory=list)
+    claims: list[Claim] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    messages: list[AgentMessage] = Field(default_factory=list)
+    review_verdicts: list[ReviewVerdict] = Field(default_factory=list)
     events: list[ExecutionEvent] = Field(default_factory=list)
     usage_records: list[dict[str, Any]] = Field(default_factory=list)
     budget_reservations: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     completed_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# Compact model-facing schemas (separated from persistence IDs & timestamps)
+# ---------------------------------------------------------------------------
+
+
+class PlannedAgentSpec(BaseModel):
+    """Compact model-facing specialist definition produced by Lead planner."""
+
+    agent_ref: str = Field(min_length=1, max_length=24)
+    role: str = Field(min_length=1, max_length=120)
+    instructions: str = Field(min_length=1, max_length=1200)
+    capabilities: list[str] = Field(default_factory=list)
+    model_override: str | None = None
+
+
+class PlannedTaskSpec(BaseModel):
+    """Compact model-facing task node produced by Lead planner."""
+
+    task_ref: str = Field(min_length=1, max_length=24)
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(min_length=1, max_length=1500)
+    assigned_agent_ref: str = Field(min_length=1, max_length=24)
+    depends_on: list[str] = Field(default_factory=list)
+    expected_deliverables: list[str] = Field(min_length=1)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+
+
+class PlannerOutput(BaseModel):
+    """Structured plan returned directly by the Lead planning model call."""
+
+    goal: str = Field(min_length=1)
+    user_requirements: list[str] = Field(min_length=1)
+    acceptance_criteria: list[str] = Field(min_length=1)
+    agents: list[PlannedAgentSpec] = Field(min_length=1)
+    tasks: list[PlannedTaskSpec] = Field(min_length=1)
+    assumptions: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+
+
+class ProposedEvidence(BaseModel):
+    """Compact evidence proposal emitted by a specialist."""
+
+    source_type: Literal[
+        "user_prompt",
+        "dependency_finding",
+        "calculation",
+        "external_unverified",
+    ]
+    source_ref: str = Field(min_length=1, max_length=200)
+    excerpt: str = Field(min_length=1, max_length=600)
+
+
+class ProposedClaim(BaseModel):
+    """Compact claim assertion emitted by a specialist."""
+
+    statement: str = Field(min_length=1, max_length=600)
+    evidence_indices: list[int] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    is_unresolved: bool = False
+
+
+class OutgoingMessageInstruction(BaseModel):
+    """Structured peer message emitted by a specialist."""
+
+    recipient_ref: str | None = Field(
+        default=None,
+        description="Target agent_ref, 'lead', or null for broadcast.",
+    )
+    message_type: Literal["finding", "question", "clarification", "warning"] = "finding"
+    content: str = Field(min_length=1, max_length=1000)
+    related_claim_indices: list[int] = Field(default_factory=list)
+
+
+class SpecialistOutput(BaseModel):
+    """Compact structured result returned by a specialist task execution."""
+
+    findings: str = Field(min_length=1)
+    claims: list[ProposedClaim] = Field(default_factory=list)
+    evidence_proposals: list[ProposedEvidence] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    outgoing_messages: list[OutgoingMessageInstruction] = Field(default_factory=list)
+    task_completed: bool = True
+
+
+class FollowUpOutput(BaseModel):
+    """Compact structured output from a bounded peer-communication checkpoint."""
+
+    updated_findings: str = Field(min_length=1)
+    revised_claims: list[ProposedClaim] = Field(default_factory=list)
+    evidence_proposals: list[ProposedEvidence] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    outgoing_messages: list[OutgoingMessageInstruction] = Field(default_factory=list)
+
+
+class SynthesisOutput(BaseModel):
+    """Compact structured synthesis output produced by the Lead synthesizer."""
+
+    answer: str = Field(min_length=1)
+    referenced_claim_ids: list[str] = Field(default_factory=list)
+    unverified_assertions: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    confidence_notes: str | None = None

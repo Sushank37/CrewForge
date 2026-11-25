@@ -8,13 +8,14 @@ spending limits in your cloud provider dashboard as well.
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from crewforge.config import CrewForgeSettings, ModelPricing
+from crewforge.config import CrewForgeSettings, ModelPricing, sanitize_error_message
 from crewforge.schemas import UsageMetrics
 from crewforge.storage.database import BudgetConstraintError, Database
 
@@ -32,7 +33,7 @@ class UnknownModelPricingError(BudgetError):
 
 
 class BudgetReservation(BaseModel):
-    """Active pre-call budget reservation for a single model invocation."""
+    """Active pre-call budget reservation for a single model attempt."""
 
     reservation_id: str = Field(default_factory=lambda: f"res_{uuid4().hex[:12]}")
     run_id: str
@@ -53,8 +54,15 @@ def estimate_token_count(text: str) -> int:
     return max(1, math.ceil(len(text) / 3)) + 16
 
 
+def serialize_schema_for_estimation(response_model: type[BaseModel] | None) -> str:
+    """Serialize Pydantic JSON schema so structured-output prompt overhead is budgeted."""
+    if response_model is None:
+        return ""
+    return json.dumps(response_model.model_json_schema(), separators=(",", ":"), sort_keys=True)
+
+
 class BudgetManager:
-    """Enforces atomic pre-call cost/call reservations and post-call reconciliation."""
+    """Enforces atomic pre-call cost/call reservations and per-attempt reconciliation."""
 
     def __init__(
         self,
@@ -106,18 +114,25 @@ class BudgetManager:
         model: str,
         is_paid_provider: bool,
         usage: UsageMetrics,
-    ) -> float:
-        """Calculate actual cost from observed token usage and configured pricing."""
+        reserved_cost_usd: float = 0.0,
+    ) -> tuple[float, bool]:
+        """Calculate actual cost from observed usage.
+
+        Returns (cost_usd, usage_was_known). If a paid provider omits token usage,
+        retains reserved_cost_usd rather than assuming zero cost.
+        """
         if not is_paid_provider:
-            return 0.0
+            return 0.0, usage.usage_reported
         if usage.actual_cost_usd is not None:
-            return usage.actual_cost_usd
+            return usage.actual_cost_usd, True
+        if not usage.usage_reported:
+            return reserved_cost_usd, False
         pricing = self.get_pricing(model)
         if pricing is None:
             raise UnknownModelPricingError(
                 f"Cannot reconcile actual cost without pricing for paid model '{model}'."
             )
-        return pricing.estimate_cost_usd(usage.input_tokens, usage.output_tokens)
+        return pricing.estimate_cost_usd(usage.input_tokens, usage.output_tokens), True
 
     async def reserve_call(
         self,
@@ -128,12 +143,21 @@ class BudgetManager:
         is_paid_provider: bool,
         prompt_text: str,
         system_prompt: str | None = None,
+        response_model: type[BaseModel] | None = None,
+        response_schema_json: str | None = None,
         max_output_tokens: int | None = None,
         call_units: int = 1,
     ) -> BudgetReservation:
-        """Atomically check run/cumulative caps and persist a budget reservation."""
+        """Atomically check run/cumulative caps and persist a single-attempt reservation."""
         max_out = max_output_tokens or self._settings.max_output_tokens
-        combined_input = f"{system_prompt or ''}\n{prompt_text}".strip()
+        schema_text = (
+            response_schema_json
+            if response_schema_json is not None
+            else serialize_schema_for_estimation(response_model)
+        )
+        combined_input = "\n".join(
+            part for part in (system_prompt or "", prompt_text, schema_text) if part
+        )
         estimated_input = estimate_token_count(combined_input)
 
         reserved_cost = self.estimate_worst_case_cost_usd(
@@ -179,17 +203,28 @@ class BudgetManager:
         *,
         operation: str = "generate",
     ) -> UsageMetrics:
-        """Reconcile a completed call with actual token usage and cost."""
-        actual_cost = self.compute_actual_cost_usd(
+        """Reconcile a completed attempt with actual usage (or conservative fallback if missing)."""
+        actual_cost, usage_known = self.compute_actual_cost_usd(
             model=reservation.model,
             is_paid_provider=reservation.is_paid_provider,
             usage=usage,
+            reserved_cost_usd=reservation.reserved_cost_usd,
         )
+        status = "reconciled" if (not reservation.is_paid_provider or usage_known) else "unknown"
+        outcome = "completed" if usage_known else "completed_unknown_usage"
+        notes = (
+            None
+            if usage_known
+            else "Provider omitted usage metrics; retained conservative reserved cost."
+        )
+
         reconciled_usage = usage.model_copy(
             update={
                 "estimated_cost_usd": reservation.reserved_cost_usd,
                 "actual_cost_usd": actual_cost,
                 "model_calls": max(1, usage.model_calls),
+                "successful_operations": 1,
+                "usage_reported": usage.usage_reported,
             }
         )
         await self._db.reconcile_budget(
@@ -198,7 +233,7 @@ class BudgetManager:
             provider=reservation.provider,
             model=reservation.model,
             operation=operation,
-            status="reconciled",
+            status=status,
             actual_cost_usd=actual_cost,
             input_tokens=reconciled_usage.input_tokens,
             output_tokens=reconciled_usage.output_tokens,
@@ -206,7 +241,8 @@ class BudgetManager:
             estimated_cost_usd=reservation.reserved_cost_usd,
             retries=reconciled_usage.retries,
             latency_ms=reconciled_usage.latency_ms,
-            outcome="completed",
+            outcome=outcome,
+            notes=notes,
         )
         return reconciled_usage
 
@@ -220,10 +256,11 @@ class BudgetManager:
         operation: str = "generate",
         reason: str = "",
     ) -> None:
-        """Reconcile a failed or cancelled call conservatively.
+        """Reconcile a failed or cancelled attempt conservatively.
 
-        When billing outcome is unknown (e.g. network timeout or stream drop),
-        the full reserved cost is retained against both run and cumulative caps.
+        When billing outcome is unknown, full reserved cost is retained against
+        both run and cumulative caps. Released unbilled calls still count toward
+        dispatched model-call limits.
         """
         if billing_known_unbilled:
             status = "released"
@@ -234,6 +271,7 @@ class BudgetManager:
             actual_cost = reservation.reserved_cost_usd
             outcome = "unknown_billing"
 
+        safe_reason = sanitize_error_message(reason) if reason else None
         await self._db.reconcile_budget(
             reservation_id=reservation.reservation_id,
             run_id=reservation.run_id,
@@ -249,7 +287,7 @@ class BudgetManager:
             retries=retries,
             latency_ms=latency_ms,
             outcome=outcome,
-            notes=reason or None,
+            notes=safe_reason,
         )
 
     async def get_summary(self, run_id: str | None = None) -> dict[str, object]:

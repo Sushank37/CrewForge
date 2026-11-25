@@ -1,4 +1,4 @@
-"""Single-agent baseline execution runner."""
+"""Single-agent baseline execution runner powered by ModelExecutor."""
 
 from __future__ import annotations
 
@@ -9,12 +9,13 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from crewforge.config import CrewForgeSettings, ProviderType
-from crewforge.core.budget import BudgetError, BudgetManager, BudgetReservation
+from crewforge.config import CrewForgeSettings, ProviderType, sanitize_error_message
+from crewforge.core.budget import BudgetError, BudgetExceededError, BudgetManager
+from crewforge.core.executor import ModelExecutor, RunDeadlineExceededError
 from crewforge.providers.base import ModelProvider, ProviderError
 from crewforge.providers.ollama_provider import OllamaProvider
 from crewforge.providers.openai_provider import OpenAIProvider
-from crewforge.schemas import ExecutionEvent, RunResult, RunStatus, UsageMetrics
+from crewforge.schemas import ExecutionEvent, RunResult, RunStatus
 from crewforge.storage.database import Database
 
 BASELINE_SYSTEM_PROMPT = (
@@ -54,7 +55,7 @@ def build_provider_from_settings(settings: CrewForgeSettings) -> ModelProvider:
 
 
 class BaselineRunner:
-    """Executes single-agent baseline runs with budget checks and trace persistence."""
+    """Executes single-agent baseline runs via the shared ModelExecutor."""
 
     def __init__(
         self,
@@ -63,11 +64,18 @@ class BaselineRunner:
         database: Database,
         budget_manager: BudgetManager,
         settings: CrewForgeSettings,
+        executor: ModelExecutor | None = None,
     ) -> None:
         self._provider = provider
         self._db = database
         self._budget = budget_manager
         self._settings = settings
+        self._executor = executor or ModelExecutor(
+            provider=provider,
+            database=database,
+            budget_manager=budget_manager,
+            settings=settings,
+        )
 
     async def run(self, prompt: str, *, run_id: str | None = None) -> RunResult:
         """Execute a baseline run for an arbitrary prompt and persist full trace."""
@@ -104,62 +112,19 @@ class BaselineRunner:
             )
         )
 
-        reservation: BudgetReservation | None = None
         try:
-            reservation = await self._budget.reserve_call(
+            response = await self._executor.execute_structured(
                 run_id=resolved_run_id,
-                provider=self._provider.provider_name,
-                model=self._provider.model_name,
-                is_paid_provider=self._provider.is_paid_provider,
-                prompt_text=cleaned_prompt,
-                system_prompt=BASELINE_SYSTEM_PROMPT,
-                max_output_tokens=self._settings.max_output_tokens,
-            )
-            await self._db.append_event(
-                ExecutionEvent(
-                    run_id=resolved_run_id,
-                    event_type="budget_reserved",
-                    actor="budget_manager",
-                    message="Reserved budget for baseline model invocation.",
-                    payload={
-                        "reservation_id": reservation.reservation_id,
-                        "reserved_cost_usd": reservation.reserved_cost_usd,
-                        "max_output_tokens": reservation.max_output_tokens,
-                    },
-                )
-            )
-
-            response = await self._provider.generate_structured(
-                cleaned_prompt,
-                BaselineModelOutput,
+                actor="baseline",
+                operation="baseline",
+                prompt=cleaned_prompt,
+                response_model=BaselineModelOutput,
                 system_prompt=BASELINE_SYSTEM_PROMPT,
                 max_output_tokens=self._settings.max_output_tokens,
                 timeout_seconds=self._settings.request_timeout_seconds,
             )
-            reconciled_usage = await self._budget.reconcile_success(
-                reservation,
-                response.usage,
-                operation="baseline",
-            )
             total_latency_ms = (time.perf_counter() - start_perf) * 1000.0
-            await self._db.append_event(
-                ExecutionEvent(
-                    run_id=resolved_run_id,
-                    event_type="model_call_completed",
-                    actor="baseline",
-                    message="Baseline model call completed and reconciled.",
-                    payload={
-                        "provider": response.provider,
-                        "model": response.model,
-                        "input_tokens": reconciled_usage.input_tokens,
-                        "output_tokens": reconciled_usage.output_tokens,
-                        "total_tokens": reconciled_usage.total_tokens,
-                        "actual_cost_usd": reconciled_usage.actual_cost_usd,
-                        "retries": reconciled_usage.retries,
-                        "latency_ms": reconciled_usage.latency_ms,
-                    },
-                )
-            )
+            aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)
 
             result = RunResult(
                 run_id=resolved_run_id,
@@ -172,7 +137,7 @@ class BaselineRunner:
                 missing_information=response.parsed.missing_information,
                 assumptions=response.parsed.assumptions,
                 confidence_notes=response.parsed.confidence_notes,
-                usage=reconciled_usage,
+                usage=aggregated_usage,
                 latency_ms=total_latency_ms,
                 created_at=created_at,
                 completed_at=datetime.now(UTC),
@@ -191,14 +156,7 @@ class BaselineRunner:
 
         except asyncio.CancelledError:
             elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
-            if reservation is not None:
-                await self._budget.reconcile_failure(
-                    reservation,
-                    billing_known_unbilled=False,
-                    latency_ms=elapsed_ms,
-                    operation="baseline",
-                    reason="Run cancelled while model call was in flight.",
-                )
+            aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)
             await self._db.append_event(
                 ExecutionEvent(
                     run_id=resolved_run_id,
@@ -214,6 +172,7 @@ class BaselineRunner:
                 prompt=cleaned_prompt,
                 provider=self._provider.provider_name,
                 model=self._provider.model_name,
+                usage=aggregated_usage,
                 latency_ms=elapsed_ms,
                 error="Run cancelled.",
                 created_at=created_at,
@@ -224,17 +183,19 @@ class BaselineRunner:
 
         except BudgetError as exc:
             elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
+            safe_err = sanitize_error_message(str(exc))
+            aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)
             await self._db.append_event(
                 ExecutionEvent(
                     run_id=resolved_run_id,
                     event_type="budget_rejected",
                     actor="budget_manager",
-                    message=str(exc),
+                    message=safe_err,
                 )
             )
             status = (
                 RunStatus.BUDGET_EXCEEDED
-                if exc.__class__.__name__ == "BudgetExceededError"
+                if isinstance(exc, BudgetExceededError)
                 else RunStatus.FAILED
             )
             failed_result = RunResult(
@@ -244,32 +205,47 @@ class BaselineRunner:
                 prompt=cleaned_prompt,
                 provider=self._provider.provider_name,
                 model=self._provider.model_name,
+                usage=aggregated_usage,
                 latency_ms=elapsed_ms,
-                error=str(exc),
+                error=safe_err,
                 created_at=created_at,
                 completed_at=datetime.now(UTC),
             )
             await self._db.complete_run(failed_result)
             return failed_result
 
-        except ProviderError as exc:
+        except (ProviderError, RunDeadlineExceededError) as exc:
             elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
-            if reservation is not None:
-                await self._budget.reconcile_failure(
-                    reservation,
-                    billing_known_unbilled=(exc.billing_outcome == "unbilled"),
-                    retries=exc.retries_attempted,
-                    latency_ms=elapsed_ms,
-                    operation="baseline",
-                    reason=exc.message,
-                )
+            safe_err = sanitize_error_message(str(exc))
+            aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)
+            failed_result = RunResult(
+                run_id=resolved_run_id,
+                mode="baseline",
+                status=RunStatus.FAILED,
+                prompt=cleaned_prompt,
+                provider=self._provider.provider_name,
+                model=self._provider.model_name,
+                usage=aggregated_usage,
+                latency_ms=elapsed_ms,
+                error=safe_err,
+                created_at=created_at,
+                completed_at=datetime.now(UTC),
+            )
+            await self._db.complete_run(failed_result)
+            return failed_result
+
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
+            safe_err = sanitize_error_message(
+                f"Unexpected baseline error ({type(exc).__name__}): {exc}"
+            )
+            aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)
             await self._db.append_event(
                 ExecutionEvent(
                     run_id=resolved_run_id,
-                    event_type="model_call_failed",
+                    event_type="run_failed",
                     actor="baseline",
-                    message=exc.message,
-                    payload=exc.to_dict(),
+                    message=safe_err,
                 )
             )
             failed_result = RunResult(
@@ -279,21 +255,9 @@ class BaselineRunner:
                 prompt=cleaned_prompt,
                 provider=self._provider.provider_name,
                 model=self._provider.model_name,
-                usage=UsageMetrics(
-                    estimated_cost_usd=(
-                        reservation.reserved_cost_usd if reservation is not None else 0.0
-                    ),
-                    actual_cost_usd=(
-                        0.0
-                        if reservation is None or exc.billing_outcome == "unbilled"
-                        else reservation.reserved_cost_usd
-                    ),
-                    model_calls=1 if reservation is not None else 0,
-                    retries=exc.retries_attempted,
-                    latency_ms=elapsed_ms,
-                ),
+                usage=aggregated_usage,
                 latency_ms=elapsed_ms,
-                error=exc.message,
+                error=safe_err,
                 created_at=created_at,
                 completed_at=datetime.now(UTC),
             )

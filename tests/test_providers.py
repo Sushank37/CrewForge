@@ -157,12 +157,20 @@ async def test_ollama_provider_chat_structured_and_errors() -> None:
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(base_url="http://127.0.0.1:11434", transport=transport) as client:
-        provider = OllamaProvider(model="qwen3:4b", max_retries=0, client=client)
+        provider = OllamaProvider(
+            model="qwen3:4b",
+            max_retries=0,
+            num_ctx=4096,
+            think=False,
+            client=client,
+        )
         res = await provider.generate_structured("good", SampleAnswer, system_prompt="sys")
         assert res.parsed == SampleAnswer(answer="local", score=5)
         assert res.usage.input_tokens == 30
         assert res.usage.output_tokens == 12
         assert seen_payloads[0]["format"] == SampleAnswer.model_json_schema()
+        assert seen_payloads[0]["think"] is False
+        assert seen_payloads[0]["options"]["num_ctx"] == 4096
 
         with pytest.raises(ProviderResponseError):
             await provider.generate_structured("bad-json", SampleAnswer)

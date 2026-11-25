@@ -23,14 +23,12 @@ def _extract_tool_payload(call_result: Any) -> dict[str, Any]:
     if getattr(call_result, "structuredContent", None) is not None:
         return dict(call_result.structuredContent)
     text_parts = [
-        item.text
-        for item in call_result.content
-        if getattr(item, "type", None) == "text"
+        item.text for item in call_result.content if getattr(item, "type", None) == "text"
     ]
     return json.loads("".join(text_parts))
 
 
-async def test_mcp_stdio_client_initialization_discovery_baseline_and_trace(
+async def test_mcp_stdio_client_discovery_solve_baseline_and_trace(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "mcp_stdio.db"
@@ -54,27 +52,52 @@ async def test_mcp_stdio_client_initialization_discovery_baseline_and_trace(
 
         tools_response = await session.list_tools()
         tool_names = sorted(tool.name for tool in tools_response.tools)
-        assert tool_names == ["baseline", "trace"]
-        assert "solve" not in tool_names
+        assert tool_names == ["baseline", "solve", "trace"]
 
+        # 1. Invoke Phase 2 solve tool
+        solve_res = await session.call_tool(
+            "solve",
+            {"prompt": "Analyze why schema validation matters in multi-agent systems."},
+        )
+        assert not solve_res.isError
+        solve_data = _extract_tool_payload(solve_res)
+        assert solve_data["mode"] == "network"
+        assert solve_data["status"] == "completed"
+        assert solve_data["provider"] == "fake-mcp"
+        assert solve_data["model"] == "fake-mcp-model"
+        assert solve_data["specialist_roles"] == ["Primary Analyst", "Risk Reviewer"]
+        # Ensure solve does NOT return the full trace inline.
+        assert "events" not in solve_data
+        assert "tasks" not in solve_data
+        solve_run_id = solve_data["run_id"]
+
+        # Retrieve full network trace separately via trace(run_id).
+        solve_trace_res = await session.call_tool("trace", {"run_id": solve_run_id})
+        assert not solve_trace_res.isError
+        solve_trace = _extract_tool_payload(solve_trace_res)
+        assert solve_trace["found"] is True
+        assert solve_trace["plan"] is not None
+        assert len(solve_trace["agents"]) == 2
+        assert len(solve_trace["tasks"]) == 2
+        assert len(solve_trace["claims"]) >= 2
+        assert len(solve_trace["messages"]) == 1
+
+        # 2. Preserve Phase 1 baseline & trace compatibility
         baseline_res = await session.call_tool(
             "baseline",
             {"prompt": "Summarize key risks of skipping schema validation."},
         )
         assert not baseline_res.isError
         baseline_data = _extract_tool_payload(baseline_res)
+        assert baseline_data["mode"] == "baseline"
         assert baseline_data["status"] == "completed"
-        assert baseline_data["provider"] == "fake-mcp"
-        assert baseline_data["model"] == "fake-mcp-model"
-        run_id = baseline_data["run_id"]
-        assert run_id.startswith("run_")
+        baseline_run_id = baseline_data["run_id"]
 
-        trace_res = await session.call_tool("trace", {"run_id": run_id})
+        trace_res = await session.call_tool("trace", {"run_id": baseline_run_id})
         assert not trace_res.isError
         trace_data = _extract_tool_payload(trace_res)
         assert trace_data["found"] is True
-        assert trace_data["run_id"] == run_id
-        assert len(trace_data["events"]) == 4
+        assert trace_data["run_id"] == baseline_run_id
         assert len(trace_data["usage_records"]) == 1
 
         missing_res = await session.call_tool("trace", {"run_id": "run_missing_id"})

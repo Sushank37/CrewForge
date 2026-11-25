@@ -63,6 +63,7 @@ async def test_baseline_records_provider_failure_in_trace(tmp_path: Path) -> Non
     await db.initialize()
 
     try:
+
         def timeout_handler(_p: str, _m: object) -> None:
             raise ProviderTimeoutError(
                 "simulated timeout",

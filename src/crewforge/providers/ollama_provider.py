@@ -35,8 +35,10 @@ class OllamaProvider(ModelProvider):
         model: str,
         base_url: str = "http://127.0.0.1:11434",
         timeout_seconds: float = 60.0,
-        max_retries: int = 2,
+        max_retries: int = 0,
         default_max_output_tokens: int = 1024,
+        num_ctx: int = 4096,
+        think: bool | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._model = model
@@ -44,6 +46,8 @@ class OllamaProvider(ModelProvider):
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._default_max_output_tokens = default_max_output_tokens
+        self._num_ctx = num_ctx
+        self._think = think
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url=self._base_url,
@@ -57,8 +61,10 @@ class OllamaProvider(ModelProvider):
             model=settings.model,
             base_url=settings.ollama_base_url,
             timeout_seconds=settings.request_timeout_seconds,
-            max_retries=settings.max_retries,
+            max_retries=0,
             default_max_output_tokens=settings.max_output_tokens,
+            num_ctx=settings.ollama_num_ctx,
+            think=settings.ollama_think,
         )
 
     @property
@@ -93,6 +99,7 @@ class OllamaProvider(ModelProvider):
 
         options: dict[str, Any] = {
             "num_predict": max_output_tokens or self._default_max_output_tokens,
+            "num_ctx": self._num_ctx,
         }
         if temperature is not None:
             options["temperature"] = temperature
@@ -103,6 +110,8 @@ class OllamaProvider(ModelProvider):
             "stream": False,
             "options": options,
         }
+        if self._think is not None:
+            payload["think"] = self._think
         if json_schema is not None:
             payload["format"] = json_schema
         return payload
@@ -182,8 +191,11 @@ class OllamaProvider(ModelProvider):
             )
 
         content = message["content"]
-        input_tokens = int(data.get("prompt_eval_count") or 0)
-        output_tokens = int(data.get("eval_count") or 0)
+        raw_in = data.get("prompt_eval_count")
+        raw_out = data.get("eval_count")
+        usage_reported = raw_in is not None and raw_out is not None
+        input_tokens = int(raw_in or 0)
+        output_tokens = int(raw_out or 0)
         usage = UsageMetrics(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -193,6 +205,7 @@ class OllamaProvider(ModelProvider):
             model_calls=1,
             retries=retries,
             latency_ms=latency_ms,
+            usage_reported=usage_reported,
         )
         return content, usage
 
@@ -204,8 +217,10 @@ class OllamaProvider(ModelProvider):
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> TextGenerationResult:
         timeout = timeout_seconds or self._timeout_seconds
+        retries_cap = self._max_retries if max_retries is None else max_retries
         payload = self._build_payload(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -218,7 +233,7 @@ class OllamaProvider(ModelProvider):
             provider=self.provider_name,
             model=self._model,
             timeout_seconds=timeout,
-            max_retries=self._max_retries,
+            max_retries=retries_cap,
         )
         content, usage = self._extract_content_and_usage(
             data,
@@ -252,8 +267,10 @@ class OllamaProvider(ModelProvider):
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> StructuredGenerationResult[T]:
         timeout = timeout_seconds or self._timeout_seconds
+        retries_cap = self._max_retries if max_retries is None else max_retries
         schema = response_model.model_json_schema()
         payload = self._build_payload(
             prompt=prompt,
@@ -268,7 +285,7 @@ class OllamaProvider(ModelProvider):
             provider=self.provider_name,
             model=self._model,
             timeout_seconds=timeout,
-            max_retries=self._max_retries,
+            max_retries=retries_cap,
         )
         content, usage = self._extract_content_and_usage(
             data,

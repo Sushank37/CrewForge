@@ -10,6 +10,7 @@ from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
+from crewforge.config import sanitize_error_message
 from crewforge.schemas import UsageMetrics
 
 T = TypeVar("T", bound=BaseModel)
@@ -32,8 +33,9 @@ class ProviderError(Exception):
         status_code: int | None = None,
         retries_attempted: int = 0,
     ) -> None:
-        super().__init__(message)
-        self.message = message
+        safe_message = sanitize_error_message(message)
+        super().__init__(safe_message)
+        self.message = safe_message
         self.code = code
         self.provider = provider
         self.model = model
@@ -43,7 +45,7 @@ class ProviderError(Exception):
         self.retries_attempted = retries_attempted
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize error details for logging or event payloads."""
+        """Serialize sanitized error details for logging or event payloads."""
         return {
             "code": self.code,
             "provider": self.provider,
@@ -211,6 +213,7 @@ class ModelProvider(ABC):
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> TextGenerationResult:
         """Generate an unstructured text completion."""
 
@@ -224,6 +227,7 @@ class ModelProvider(ABC):
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> StructuredGenerationResult[T]:
         """Generate and validate a Pydantic-structured JSON response."""
 

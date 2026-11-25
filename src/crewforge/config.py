@@ -1,10 +1,11 @@
-"""Runtime configuration and stderr-only logging setup for CrewForge."""
+"""Runtime configuration, secret sanitization, and stderr-only logging for CrewForge."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import sys
 from enum import StrEnum
 from pathlib import Path
@@ -24,6 +25,33 @@ _PLACEHOLDER_KEYS = frozenset(
         "replace-me",
     }
 )
+
+DEFAULT_ALLOWED_CAPABILITIES: tuple[str, ...] = (
+    "analysis",
+    "reasoning",
+    "calculation",
+    "synthesis",
+    "critique",
+)
+
+_SECRET_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_\-]{12,}"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._\-]{10,}", re.IGNORECASE),
+    re.compile(r"(api[_-]?key\s*[=:]\s*)([^\s,;'\"]+)", re.IGNORECASE),
+)
+
+
+def sanitize_error_message(message: str, max_length: int = 500) -> str:
+    """Redact potential API credentials and bound raw provider error lengths."""
+    cleaned = message.strip()
+    for idx, pattern in enumerate(_SECRET_PATTERNS):
+        if idx == 2:
+            cleaned = pattern.sub(r"\1[REDACTED]", cleaned)
+        else:
+            cleaned = pattern.sub("[REDACTED]", cleaned)
+    if len(cleaned) > max_length:
+        return cleaned[: max_length - 3] + "..."
+    return cleaned
 
 
 class ProviderType(StrEnum):
@@ -62,11 +90,26 @@ class CrewForgeSettings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = None
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", min_length=1)
+    ollama_num_ctx: int = Field(default=4096, ge=512, le=131072)
+    ollama_think: bool | None = None
 
     request_timeout_seconds: float = Field(default=60.0, gt=0.0)
-    max_retries: int = Field(default=2, ge=0, le=10)
+    run_deadline_seconds: float = Field(default=300.0, gt=0.0)
+    max_retries: int = Field(default=0, ge=0, le=10)
     max_concurrency: int = Field(default=3, ge=1, le=32)
     max_output_tokens: int = Field(default=1024, ge=1, le=128000)
+
+    planner_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
+    worker_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
+    synthesis_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
+
+    max_workers: int = Field(default=4, ge=1, le=8)
+    max_tasks: int = Field(default=6, ge=1, le=12)
+    max_communication_rounds: int = Field(default=1, ge=0, le=3)
+    max_message_chars: int = Field(default=1000, ge=100, le=8000)
+    allowed_capabilities: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_ALLOWED_CAPABILITIES)
+    )
 
     max_model_calls_per_run: int = Field(default=16, ge=1, le=200)
     max_cost_per_run_usd: float = Field(default=0.05, ge=0.0)
@@ -107,12 +150,23 @@ class CrewForgeSettings(BaseSettings):
             raise ValueError("ollama_base_url cannot be empty.")
         return cleaned
 
+    @field_validator("allowed_capabilities", mode="before")
+    @classmethod
+    def _parse_capabilities(cls, value: Any) -> list[str]:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("["):
+                parsed = json.loads(stripped)
+                return [str(item).strip() for item in parsed if str(item).strip()]
+            return [part.strip() for part in stripped.split(",") if part.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        raise ValueError("allowed_capabilities must be a list or comma-separated string.")
+
     @model_validator(mode="after")
     def _validate_consistency_and_secrets(self) -> CrewForgeSettings:
         if self.max_cost_per_run_usd > self.max_cumulative_cost_usd:
-            raise ValueError(
-                "max_cost_per_run_usd cannot exceed max_cumulative_cost_usd."
-            )
+            raise ValueError("max_cost_per_run_usd cannot exceed max_cumulative_cost_usd.")
 
         raw_key: str | None = None
         if self.openai_api_key is not None:
@@ -129,6 +183,26 @@ class CrewForgeSettings(BaseSettings):
 
         return self
 
+    @property
+    def effective_max_concurrency(self) -> int:
+        """Default local Ollama concurrency to 1 unless explicitly configured."""
+        if self.provider == ProviderType.OLLAMA and "max_concurrency" not in self.model_fields_set:
+            return 1
+        return self.max_concurrency
+
+    def output_limit_for_operation(self, operation: str) -> int:
+        """Return bounded output-token limit for a given operation."""
+        override: int | None = None
+        if operation in {"planner", "plan_repair"}:
+            override = self.planner_max_output_tokens
+        elif operation in {"worker", "worker_followup"}:
+            override = self.worker_max_output_tokens
+        elif operation == "synthesis":
+            override = self.synthesis_max_output_tokens
+        if override is None:
+            return self.max_output_tokens
+        return min(override, self.max_output_tokens)
+
     def get_model_pricing(self, model: str) -> ModelPricing | None:
         """Return configured pricing for a model, or None if unknown."""
         return self.pricing_json.get(model)
@@ -139,8 +213,9 @@ class CrewForgeSettings(BaseSettings):
             provider=self.provider.value,
             model=self.model,
             request_timeout_seconds=self.request_timeout_seconds,
+            run_deadline_seconds=self.run_deadline_seconds,
             max_retries=self.max_retries,
-            max_concurrency=self.max_concurrency,
+            max_concurrency=self.effective_max_concurrency,
             max_output_tokens=self.max_output_tokens,
             max_model_calls_per_run=self.max_model_calls_per_run,
             max_cost_per_run_usd=self.max_cost_per_run_usd,

@@ -1,4 +1,4 @@
-"""Official MCP Python SDK server exposing CrewForge baseline and trace tools."""
+"""Official MCP Python SDK server exposing CrewForge solve, baseline, and trace tools."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from crewforge.config import CrewForgeSettings, configure_logging
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
 from crewforge.core.budget import BudgetManager
+from crewforge.core.orchestrator import NetworkRunner
 from crewforge.providers.base import ModelProvider
 from crewforge.storage.database import Database
 
@@ -30,9 +31,10 @@ def create_mcp_server(
 ) -> FastMCP:
     """Create and configure the CrewForge FastMCP server instance.
 
-    Exposes only Phase 1 tools:
-    - baseline(prompt)
-    - trace(run_id)
+    Exposes:
+    - solve(prompt): dynamic multi-agent network execution
+    - baseline(prompt): single-agent baseline execution
+    - trace(run_id): full persisted run trace retrieval
     """
     resolved_settings = settings or CrewForgeSettings()
     configure_logging(resolved_settings.log_level)
@@ -67,13 +69,32 @@ def create_mcp_server(
     mcp = FastMCP(
         name="CrewForge",
         instructions=(
-            "CrewForge Phase 1 MCP server providing single-agent baseline execution "
-            "and persistent execution trace retrieval."
+            "CrewForge Phase 2 MCP server providing dynamic multi-agent problem solving "
+            "(solve), single-agent baseline comparison (baseline), and full persisted "
+            "execution trace inspection (trace)."
         ),
         host=host,
         port=port,
         lifespan=_lifespan,
     )
+
+    @mcp.tool()
+    async def solve(prompt: str) -> dict[str, Any]:
+        """Solve an arbitrary prompt using CrewForge's dynamic multi-agent network."""
+        db, active_provider, budget_manager = await _ensure_initialized()
+        runner = NetworkRunner(
+            provider=active_provider,
+            database=db,
+            budget_manager=budget_manager,
+            settings=resolved_settings,
+        )
+        logger.info(
+            "Executing solve tool (provider=%s, model=%s)",
+            active_provider.provider_name,
+            active_provider.model_name,
+        )
+        result = await runner.run(prompt)
+        return result.model_dump(mode="json")
 
     @mcp.tool()
     async def baseline(prompt: str) -> dict[str, Any]:
@@ -95,7 +116,7 @@ def create_mcp_server(
 
     @mcp.tool()
     async def trace(run_id: str) -> dict[str, Any]:
-        """Retrieve the persisted execution trace, events, usage, and budget records for a run."""
+        """Retrieve the persisted execution trace, plan, tasks, claims, and budget records."""
         db, _, _ = await _ensure_initialized()
         run_trace = await db.get_run_trace(run_id)
         if run_trace is None:

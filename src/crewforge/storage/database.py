@@ -1,4 +1,4 @@
-"""Transaction-safe SQLite persistence for runs, events, usage, and budget reservations."""
+"""Transaction-safe SQLite persistence with repeatable migrations and run isolation."""
 
 from __future__ import annotations
 
@@ -14,11 +14,23 @@ from typing import Any
 from uuid import uuid4
 
 from crewforge.schemas import (
+    AgentMessage,
+    AgentSpec,
+    Claim,
+    ClaimStatus,
+    Evidence,
+    EvidenceReliability,
     ExecutionEvent,
+    ExecutionPlan,
+    ReviewDecision,
+    ReviewVerdict,
     RunConfig,
     RunResult,
     RunStatus,
     RunTrace,
+    TaskSpec,
+    TaskStatus,
+    UsageMetrics,
 )
 
 
@@ -26,11 +38,15 @@ class BudgetConstraintError(Exception):
     """Raised atomically when a budget reservation violates configured caps."""
 
 
+class CrossRunReferenceError(Exception):
+    """Raised when an operation attempts to reference records from another or nonexistent run."""
+
+
 def _utc_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-_SCHEMA_SQL = """
+_MIGRATION_V1_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     mode TEXT NOT NULL,
@@ -100,6 +116,150 @@ CREATE INDEX IF NOT EXISTS idx_usage_records_run
     ON usage_records(run_id);
 """
 
+_MIGRATION_V2_SQL = """
+CREATE TABLE IF NOT EXISTS execution_plans (
+    plan_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id) ON DELETE CASCADE,
+    goal TEXT NOT NULL,
+    user_requirements_json TEXT NOT NULL,
+    acceptance_criteria_json TEXT NOT NULL,
+    assumptions_json TEXT NOT NULL,
+    missing_information_json TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+    agent_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    agent_ref TEXT,
+    role TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    capabilities_json TEXT NOT NULL,
+    model_override TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_run ON agents(run_id);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    task_ref TEXT,
+    plan_id TEXT NOT NULL REFERENCES execution_plans(plan_id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    assigned_agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+    depends_on_json TEXT NOT NULL,
+    expected_outputs_json TEXT NOT NULL,
+    acceptance_criteria_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    findings TEXT,
+    error TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id);
+
+CREATE TABLE IF NOT EXISTS task_transitions (
+    transition_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_transitions_run ON task_transitions(run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS evidence (
+    evidence_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    excerpt TEXT NOT NULL,
+    reliability TEXT NOT NULL,
+    verified_in_input INTEGER NOT NULL DEFAULT 0,
+    task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
+
+CREATE TABLE IF NOT EXISTS claims (
+    claim_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    statement TEXT NOT NULL,
+    status TEXT NOT NULL,
+    parent_claim_id TEXT,
+    author_agent_id TEXT NOT NULL,
+    task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+    evidence_ids_json TEXT NOT NULL,
+    depends_on_claim_ids_json TEXT NOT NULL,
+    assumptions_json TEXT NOT NULL,
+    revision_notes TEXT,
+    confidence REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (claim_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_claims_run ON claims(run_id, claim_id, version);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+    message_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    sender_id TEXT NOT NULL,
+    recipient_id TEXT,
+    message_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    related_claim_ids_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_run ON agent_messages(run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS message_deliveries (
+    message_id TEXT NOT NULL REFERENCES agent_messages(message_id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    recipient_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    delivered_at TEXT,
+    consumed_at TEXT,
+    PRIMARY KEY (message_id, recipient_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_deliveries_inbox
+    ON message_deliveries(run_id, recipient_id, status);
+
+CREATE TABLE IF NOT EXISTS review_verdicts (
+    verdict_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    claim_id TEXT NOT NULL,
+    claim_version INTEGER NOT NULL,
+    reviewer_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    blocking_issues_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (claim_id, claim_version) REFERENCES claims(claim_id, version) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_verdicts_run ON review_verdicts(run_id);
+"""
+
+_MIGRATIONS: tuple[tuple[int, str, str], ...] = (
+    (1, "phase1_core_tables", _MIGRATION_V1_SQL),
+    (2, "phase2_network_ledger_messaging", _MIGRATION_V2_SQL),
+)
+
 
 class Database:
     """Thread-safe and async-friendly SQLite persistence manager."""
@@ -141,14 +301,45 @@ class Database:
                 raise
 
     def initialize_sync(self) -> None:
-        """Create schema tables and indexes if they do not exist."""
+        """Apply pending idempotent schema migrations safely."""
         with self._lock:
             conn = self._get_connection()
-            conn.executescript(_SCHEMA_SQL)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+                """
+            )
+            rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
+            applied = {int(row["version"]) for row in rows}
+            for version, name, sql in _MIGRATIONS:
+                if version in applied:
+                    continue
+                conn.executescript(sql)
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+                    (version, name, _utc_iso()),
+                )
 
     async def initialize(self) -> None:
-        """Asynchronously initialize the SQLite database schema."""
+        """Asynchronously initialize and migrate the SQLite database schema."""
         await asyncio.to_thread(self.initialize_sync)
+
+    def get_schema_version_sync(self) -> int:
+        """Return highest applied schema migration version."""
+        with self._lock:
+            conn = self._get_connection()
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS ver FROM schema_migrations"
+            ).fetchone()
+            return int(row["ver"]) if row is not None else 0
+
+    async def get_schema_version(self) -> int:
+        """Asynchronously return highest applied schema migration version."""
+        return await asyncio.to_thread(self.get_schema_version_sync)
 
     def close_sync(self) -> None:
         """Close the underlying SQLite connection."""
@@ -160,6 +351,10 @@ class Database:
     async def close(self) -> None:
         """Asynchronously close the underlying SQLite connection."""
         await asyncio.to_thread(self.close_sync)
+
+    # ------------------------------------------------------------------
+    # Run & event persistence
+    # ------------------------------------------------------------------
 
     def _create_run_sync(
         self,
@@ -253,6 +448,10 @@ class Database:
         """Append a sequentially numbered execution event for a run."""
         return await asyncio.to_thread(self._append_event_sync, event)
 
+    # ------------------------------------------------------------------
+    # Budget reservation & reconciliation
+    # ------------------------------------------------------------------
+
     def _reserve_budget_sync(
         self,
         *,
@@ -281,11 +480,11 @@ class Database:
                     ), 0.0) AS committed_cost,
                     COALESCE(SUM(
                         CASE
-                            WHEN status IN ('reserved', 'reconciled', 'unknown')
+                            WHEN status IN ('reserved', 'reconciled', 'unknown', 'released')
                                 THEN reserved_calls
                             ELSE 0
                         END
-                    ), 0) AS committed_calls
+                    ), 0) AS dispatched_calls
                 FROM budget_reservations
                 WHERE run_id = ?
                 """,
@@ -307,7 +506,7 @@ class Database:
             ).fetchone()
 
             run_cost = float(run_row["committed_cost"])
-            run_calls = int(run_row["committed_calls"])
+            run_calls = int(run_row["dispatched_calls"])
             cum_cost = float(cum_row["cumulative_cost"])
 
             if run_calls + call_units > max_model_calls_per_run:
@@ -402,14 +601,19 @@ class Database:
     ) -> None:
         now = _utc_iso()
         with self._transaction(immediate=True) as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE budget_reservations
                 SET status = ?, actual_cost_usd = ?, retries = ?, notes = ?, updated_at = ?
-                WHERE reservation_id = ?
+                WHERE reservation_id = ? AND status = 'reserved'
                 """,
                 (status, actual_cost_usd, retries, notes, now, reservation_id),
             )
+            if cur.rowcount == 0:
+                raise RuntimeError(
+                    f"Reservation '{reservation_id}' could not be reconciled "
+                    "(missing or already finalized)."
+                )
             conn.execute(
                 """
                 INSERT INTO usage_records (
@@ -457,7 +661,7 @@ class Database:
         outcome: str,
         notes: str | None = None,
     ) -> None:
-        """Reconcile a reservation and record token/cost accounting atomically."""
+        """Reconcile a reservation exactly once and record token/cost accounting atomically."""
         await asyncio.to_thread(
             self._reconcile_budget_sync,
             reservation_id=reservation_id,
@@ -504,6 +708,13 @@ class Database:
                             ELSE 0.0
                         END
                     ), 0.0) AS cumulative_unknown_cost_usd,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN status IN ('reserved', 'reconciled', 'unknown', 'released')
+                                THEN reserved_calls
+                            ELSE 0
+                        END
+                    ), 0) AS cumulative_dispatched_calls,
                     COALESCE(SUM(retries), 0) AS cumulative_retries
                 FROM budget_reservations
                 """
@@ -511,10 +722,9 @@ class Database:
 
             summary: dict[str, Any] = {
                 "cumulative_committed_cost_usd": float(cum_row["cumulative_committed_cost_usd"]),
-                "cumulative_reconciled_cost_usd": float(
-                    cum_row["cumulative_reconciled_cost_usd"]
-                ),
+                "cumulative_reconciled_cost_usd": float(cum_row["cumulative_reconciled_cost_usd"]),
                 "cumulative_unknown_cost_usd": float(cum_row["cumulative_unknown_cost_usd"]),
+                "cumulative_dispatched_calls": int(cum_row["cumulative_dispatched_calls"]),
                 "cumulative_retries": int(cum_row["cumulative_retries"]),
             }
 
@@ -532,11 +742,17 @@ class Database:
                         ), 0.0) AS run_committed_cost_usd,
                         COALESCE(SUM(
                             CASE
-                                WHEN status IN ('reserved', 'reconciled', 'unknown')
+                                WHEN status IN ('reserved', 'reconciled', 'unknown', 'released')
                                     THEN reserved_calls
                                 ELSE 0
                             END
                         ), 0) AS run_committed_calls,
+                        COALESCE(SUM(
+                            CASE
+                                WHEN status = 'reconciled' THEN reserved_calls
+                                ELSE 0
+                            END
+                        ), 0) AS run_successful_calls,
                         COALESCE(SUM(retries), 0) AS run_retries
                     FROM budget_reservations
                     WHERE run_id = ?
@@ -546,13 +762,665 @@ class Database:
                 summary["run_id"] = run_id
                 summary["run_committed_cost_usd"] = float(run_row["run_committed_cost_usd"])
                 summary["run_committed_calls"] = int(run_row["run_committed_calls"])
+                summary["run_successful_calls"] = int(run_row["run_successful_calls"])
                 summary["run_retries"] = int(run_row["run_retries"])
 
             return summary
 
     async def get_budget_summary(self, run_id: str | None = None) -> dict[str, Any]:
-        """Return committed, reconciled, and unknown-outcome budget totals."""
+        """Return committed, reconciled, dispatched-call, and unknown-outcome budget totals."""
         return await asyncio.to_thread(self._get_budget_summary_sync, run_id)
+
+    def _aggregate_run_usage_sync(self, run_id: str) -> UsageMetrics:
+        with self._lock:
+            conn = self._get_connection()
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(estimated_cost_usd), 0.0) AS estimated_cost_usd,
+                    COALESCE(SUM(COALESCE(actual_cost_usd, 0.0)), 0.0) AS actual_cost_usd,
+                    COUNT(*) AS model_calls,
+                    COALESCE(SUM(
+                        CASE WHEN outcome IN ('completed', 'completed_unknown_usage')
+                            THEN 1 ELSE 0 END
+                    ), 0) AS successful_operations,
+                    COALESCE(SUM(retries), 0) AS retries,
+                    COALESCE(SUM(latency_ms), 0.0) AS latency_ms,
+                    COALESCE(MIN(
+                        CASE WHEN outcome = 'completed_unknown_usage' THEN 0 ELSE 1 END
+                    ), 1) AS all_usage_reported
+                FROM usage_records
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+
+        return UsageMetrics(
+            input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]),
+            total_tokens=int(row["total_tokens"]),
+            estimated_cost_usd=float(row["estimated_cost_usd"]),
+            actual_cost_usd=float(row["actual_cost_usd"]),
+            model_calls=int(row["model_calls"]),
+            successful_operations=int(row["successful_operations"]),
+            retries=int(row["retries"]),
+            latency_ms=float(row["latency_ms"]),
+            usage_reported=bool(row["all_usage_reported"]),
+        )
+
+    async def aggregate_run_usage(self, run_id: str) -> UsageMetrics:
+        """Aggregate usage metrics across every dispatched model attempt in a run."""
+        return await asyncio.to_thread(self._aggregate_run_usage_sync, run_id)
+
+    # ------------------------------------------------------------------
+    # Phase 2 Plan, Agent, Task, Ledger & Messaging persistence
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _assert_agent_in_run(conn: sqlite3.Connection, run_id: str, agent_id: str) -> None:
+        if agent_id == "lead":
+            return
+        row = conn.execute(
+            "SELECT run_id FROM agents WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if row is None or row["run_id"] != run_id:
+            raise CrossRunReferenceError(f"Agent '{agent_id}' does not belong to run '{run_id}'.")
+
+    @staticmethod
+    def _assert_task_in_run(conn: sqlite3.Connection, run_id: str, task_id: str) -> None:
+        row = conn.execute(
+            "SELECT run_id FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["run_id"] != run_id:
+            raise CrossRunReferenceError(f"Task '{task_id}' does not belong to run '{run_id}'.")
+
+    def _save_execution_plan_sync(self, plan: ExecutionPlan) -> None:
+        with self._transaction(immediate=True) as conn:
+            run_row = conn.execute(
+                "SELECT run_id FROM runs WHERE run_id = ?",
+                (plan.run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise CrossRunReferenceError(f"Run '{plan.run_id}' does not exist.")
+
+            conn.execute(
+                """
+                INSERT INTO execution_plans (
+                    plan_id, run_id, goal, user_requirements_json, acceptance_criteria_json,
+                    assumptions_json, missing_information_json, created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan.plan_id,
+                    plan.run_id,
+                    plan.goal,
+                    json.dumps(plan.user_requirements, ensure_ascii=False),
+                    json.dumps(plan.acceptance_criteria, ensure_ascii=False),
+                    json.dumps(plan.assumptions, ensure_ascii=False),
+                    json.dumps(plan.missing_information, ensure_ascii=False),
+                    plan.created_by,
+                    plan.created_at.isoformat(),
+                ),
+            )
+
+            agent_ids_in_plan: set[str] = set()
+            for agent in plan.agents:
+                if agent.run_id not in (None, plan.run_id):
+                    raise CrossRunReferenceError(
+                        f"Agent '{agent.agent_id}' run_id mismatch "
+                        f"({agent.run_id} != {plan.run_id})."
+                    )
+                agent_ids_in_plan.add(agent.agent_id)
+                conn.execute(
+                    """
+                    INSERT INTO agents (
+                        agent_id, run_id, agent_ref, role, instructions,
+                        capabilities_json, model_override, created_by, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        agent.agent_id,
+                        plan.run_id,
+                        agent.agent_ref,
+                        agent.role,
+                        agent.instructions,
+                        json.dumps(agent.capabilities, ensure_ascii=False),
+                        agent.model_override,
+                        agent.created_by,
+                        agent.created_at.isoformat(),
+                    ),
+                )
+
+            for task in plan.tasks:
+                if task.run_id not in (None, plan.run_id):
+                    raise CrossRunReferenceError(
+                        f"Task '{task.task_id}' run_id mismatch ({task.run_id} != {plan.run_id})."
+                    )
+                if task.assigned_agent_id not in agent_ids_in_plan:
+                    raise CrossRunReferenceError(
+                        f"Task '{task.task_id}' assigned to unknown agent "
+                        f"'{task.assigned_agent_id}'."
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        task_id, run_id, task_ref, plan_id, title, description,
+                        assigned_agent_id, depends_on_json, expected_outputs_json,
+                        acceptance_criteria_json, status, findings, error,
+                        created_by, created_at, started_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task.task_id,
+                        plan.run_id,
+                        task.task_ref,
+                        plan.plan_id,
+                        task.title,
+                        task.description,
+                        task.assigned_agent_id,
+                        json.dumps(task.depends_on, ensure_ascii=False),
+                        json.dumps(task.expected_outputs, ensure_ascii=False),
+                        json.dumps(task.acceptance_criteria, ensure_ascii=False),
+                        task.status.value,
+                        task.findings,
+                        task.error,
+                        task.created_by,
+                        task.created_at.isoformat(),
+                        task.started_at.isoformat() if task.started_at else None,
+                        task.completed_at.isoformat() if task.completed_at else None,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO task_transitions (
+                        transition_id, run_id, task_id, from_status, to_status, reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"trn_{uuid4().hex[:12]}",
+                        plan.run_id,
+                        task.task_id,
+                        None,
+                        task.status.value,
+                        "Plan initialized",
+                        task.created_at.isoformat(),
+                    ),
+                )
+
+    async def save_execution_plan(self, plan: ExecutionPlan) -> None:
+        """Persist a validated ExecutionPlan, its specialist agents, and its tasks."""
+        await asyncio.to_thread(self._save_execution_plan_sync, plan)
+
+    def _transition_task_sync(
+        self,
+        *,
+        run_id: str,
+        task_id: str,
+        to_status: TaskStatus,
+        reason: str = "",
+        findings: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        now = _utc_iso()
+        with self._transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT run_id, status, started_at FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None or row["run_id"] != run_id:
+                raise CrossRunReferenceError(f"Task '{task_id}' does not belong to run '{run_id}'.")
+
+            from_status = row["status"]
+            started_at = row["started_at"]
+            completed_at: str | None = None
+            if to_status == TaskStatus.RUNNING and started_at is None:
+                started_at = now
+            if to_status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED}:
+                completed_at = now
+
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?,
+                    findings = COALESCE(?, findings),
+                    error = COALESCE(?, error),
+                    started_at = ?,
+                    completed_at = COALESCE(?, completed_at)
+                WHERE task_id = ? AND run_id = ?
+                """,
+                (
+                    to_status.value,
+                    findings,
+                    error,
+                    started_at,
+                    completed_at,
+                    task_id,
+                    run_id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO task_transitions (
+                    transition_id, run_id, task_id, from_status, to_status, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"trn_{uuid4().hex[:12]}",
+                    run_id,
+                    task_id,
+                    from_status,
+                    to_status.value,
+                    reason or None,
+                    now,
+                ),
+            )
+
+    async def transition_task(
+        self,
+        *,
+        run_id: str,
+        task_id: str,
+        to_status: TaskStatus,
+        reason: str = "",
+        findings: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record an atomic task status transition inside the task's run."""
+        await asyncio.to_thread(
+            self._transition_task_sync,
+            run_id=run_id,
+            task_id=task_id,
+            to_status=to_status,
+            reason=reason,
+            findings=findings,
+            error=error,
+        )
+
+    def _insert_evidence_sync(self, evd: Evidence) -> None:
+        with self._transaction(immediate=True) as conn:
+            self._assert_agent_in_run(conn, evd.run_id, evd.created_by)
+            if evd.task_id is not None:
+                self._assert_task_in_run(conn, evd.run_id, evd.task_id)
+            conn.execute(
+                """
+                INSERT INTO evidence (
+                    evidence_id, run_id, source_type, source_ref, excerpt,
+                    reliability, verified_in_input, task_id, created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evd.evidence_id,
+                    evd.run_id,
+                    evd.source_type,
+                    evd.source_ref,
+                    evd.excerpt,
+                    evd.reliability.value,
+                    1 if evd.verified_in_input else 0,
+                    evd.task_id,
+                    evd.created_by,
+                    evd.created_at.isoformat(),
+                ),
+            )
+
+    async def insert_evidence(self, evd: Evidence) -> None:
+        """Persist a provenance-checked evidence record."""
+        await asyncio.to_thread(self._insert_evidence_sync, evd)
+
+    def _insert_claim_sync(self, claim: Claim) -> None:
+        with self._transaction(immediate=True) as conn:
+            self._assert_agent_in_run(conn, claim.run_id, claim.author_agent_id)
+            if claim.task_id is not None:
+                self._assert_task_in_run(conn, claim.run_id, claim.task_id)
+
+            for evd_id in claim.evidence_ids:
+                row = conn.execute(
+                    "SELECT run_id FROM evidence WHERE evidence_id = ?",
+                    (evd_id,),
+                ).fetchone()
+                if row is None or row["run_id"] != claim.run_id:
+                    raise CrossRunReferenceError(
+                        f"Evidence '{evd_id}' does not belong to run '{claim.run_id}'."
+                    )
+
+            if claim.parent_claim_id is not None:
+                parent_row = conn.execute(
+                    "SELECT run_id FROM claims WHERE claim_id = ? LIMIT 1",
+                    (claim.parent_claim_id,),
+                ).fetchone()
+                if parent_row is None or parent_row["run_id"] != claim.run_id:
+                    raise CrossRunReferenceError(
+                        f"Parent claim '{claim.parent_claim_id}' does not belong "
+                        f"to run '{claim.run_id}'."
+                    )
+
+            for dep_claim_id in claim.depends_on_claim_ids:
+                dep_row = conn.execute(
+                    "SELECT run_id FROM claims WHERE claim_id = ? LIMIT 1",
+                    (dep_claim_id,),
+                ).fetchone()
+                if dep_row is None or dep_row["run_id"] != claim.run_id:
+                    raise CrossRunReferenceError(
+                        f"Dependency claim '{dep_claim_id}' does not belong "
+                        f"to run '{claim.run_id}'."
+                    )
+
+            existing_for_id = conn.execute(
+                "SELECT run_id, MAX(version) AS max_ver FROM claims WHERE claim_id = ?",
+                (claim.claim_id,),
+            ).fetchone()
+            if existing_for_id is not None and existing_for_id["run_id"] is not None:
+                if existing_for_id["run_id"] != claim.run_id:
+                    raise CrossRunReferenceError(
+                        f"Claim ID '{claim.claim_id}' already belongs to another run."
+                    )
+                expected_ver = int(existing_for_id["max_ver"]) + 1
+                if claim.version != expected_ver:
+                    raise ValueError(
+                        f"Immutable claim version violation for '{claim.claim_id}': "
+                        f"expected version {expected_ver}, got {claim.version}."
+                    )
+
+            conn.execute(
+                """
+                INSERT INTO claims (
+                    claim_id, version, run_id, statement, status, parent_claim_id,
+                    author_agent_id, task_id, evidence_ids_json, depends_on_claim_ids_json,
+                    assumptions_json, revision_notes, confidence, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    claim.claim_id,
+                    claim.version,
+                    claim.run_id,
+                    claim.statement,
+                    claim.status.value,
+                    claim.parent_claim_id,
+                    claim.author_agent_id,
+                    claim.task_id,
+                    json.dumps(claim.evidence_ids, ensure_ascii=False),
+                    json.dumps(claim.depends_on_claim_ids, ensure_ascii=False),
+                    json.dumps(claim.assumptions, ensure_ascii=False),
+                    claim.revision_notes,
+                    claim.confidence,
+                    claim.created_at.isoformat(),
+                    claim.updated_at.isoformat(),
+                ),
+            )
+
+    async def insert_claim(self, claim: Claim) -> None:
+        """Persist a claim version row with strict cross-run validation."""
+        await asyncio.to_thread(self._insert_claim_sync, claim)
+
+    def _insert_message_sync(
+        self,
+        msg: AgentMessage,
+        delivery_recipients: list[str],
+    ) -> None:
+        with self._transaction(immediate=True) as conn:
+            self._assert_agent_in_run(conn, msg.run_id, msg.sender_id)
+            if msg.recipient_id is not None:
+                self._assert_agent_in_run(conn, msg.run_id, msg.recipient_id)
+            for target_id in delivery_recipients:
+                self._assert_agent_in_run(conn, msg.run_id, target_id)
+            for claim_id in msg.related_claim_ids:
+                row = conn.execute(
+                    "SELECT run_id FROM claims WHERE claim_id = ? LIMIT 1",
+                    (claim_id,),
+                ).fetchone()
+                if row is None or row["run_id"] != msg.run_id:
+                    raise CrossRunReferenceError(
+                        f"Message related claim '{claim_id}' does not belong to run '{msg.run_id}'."
+                    )
+
+            conn.execute(
+                """
+                INSERT INTO agent_messages (
+                    message_id, run_id, sender_id, recipient_id, message_type,
+                    content, related_claim_ids_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    msg.message_id,
+                    msg.run_id,
+                    msg.sender_id,
+                    msg.recipient_id,
+                    msg.message_type,
+                    msg.content,
+                    json.dumps(msg.related_claim_ids, ensure_ascii=False),
+                    msg.created_at.isoformat(),
+                ),
+            )
+            for target_id in delivery_recipients:
+                conn.execute(
+                    """
+                    INSERT INTO message_deliveries (
+                        message_id, run_id, recipient_id, status, delivered_at, consumed_at
+                    ) VALUES (?, ?, ?, 'pending', NULL, NULL)
+                    """,
+                    (msg.message_id, msg.run_id, target_id),
+                )
+
+    async def insert_message(
+        self,
+        msg: AgentMessage,
+        delivery_recipients: list[str],
+    ) -> None:
+        """Persist an agent message and initialize per-recipient delivery rows."""
+        await asyncio.to_thread(self._insert_message_sync, msg, delivery_recipients)
+
+    def _get_pending_messages_sync(
+        self,
+        *,
+        run_id: str,
+        recipient_id: str,
+        mark_delivered: bool = True,
+    ) -> list[AgentMessage]:
+        now = _utc_iso()
+        with self._transaction(immediate=True) as conn:
+            self._assert_agent_in_run(conn, run_id, recipient_id)
+            rows = conn.execute(
+                """
+                SELECT m.*, d.status AS delivery_status
+                FROM agent_messages m
+                JOIN message_deliveries d ON m.message_id = d.message_id
+                WHERE d.run_id = ? AND d.recipient_id = ? AND d.status IN ('pending', 'delivered')
+                ORDER BY m.created_at ASC
+                """,
+                (run_id, recipient_id),
+            ).fetchall()
+
+            if mark_delivered and rows:
+                msg_ids = [row["message_id"] for row in rows if row["delivery_status"] == "pending"]
+                for mid in msg_ids:
+                    conn.execute(
+                        """
+                        UPDATE message_deliveries
+                        SET status = 'delivered', delivered_at = COALESCE(delivered_at, ?)
+                        WHERE message_id = ? AND recipient_id = ?
+                        """,
+                        (now, mid, recipient_id),
+                    )
+
+            return [
+                AgentMessage(
+                    message_id=row["message_id"],
+                    run_id=row["run_id"],
+                    sender_id=row["sender_id"],
+                    recipient_id=row["recipient_id"],
+                    message_type=row["message_type"],
+                    content=row["content"],
+                    related_claim_ids=json.loads(row["related_claim_ids_json"]),
+                    delivery_status="delivered" if mark_delivered else row["delivery_status"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
+
+    async def get_pending_messages_for_agent(
+        self,
+        *,
+        run_id: str,
+        recipient_id: str,
+        mark_delivered: bool = True,
+    ) -> list[AgentMessage]:
+        """Fetch unconsumed inbox messages for an agent in the same run."""
+        return await asyncio.to_thread(
+            self._get_pending_messages_sync,
+            run_id=run_id,
+            recipient_id=recipient_id,
+            mark_delivered=mark_delivered,
+        )
+
+    def _mark_messages_consumed_sync(
+        self,
+        *,
+        run_id: str,
+        recipient_id: str,
+        message_ids: list[str],
+    ) -> None:
+        if not message_ids:
+            return
+        now = _utc_iso()
+        with self._transaction(immediate=True) as conn:
+            for mid in message_ids:
+                conn.execute(
+                    """
+                    UPDATE message_deliveries
+                    SET status = 'consumed',
+                        delivered_at = COALESCE(delivered_at, ?),
+                        consumed_at = ?
+                    WHERE message_id = ? AND run_id = ? AND recipient_id = ?
+                    """,
+                    (now, now, mid, run_id, recipient_id),
+                )
+
+    async def mark_messages_consumed(
+        self,
+        *,
+        run_id: str,
+        recipient_id: str,
+        message_ids: list[str],
+    ) -> None:
+        """Mark delivered messages as consumed by the target agent."""
+        await asyncio.to_thread(
+            self._mark_messages_consumed_sync,
+            run_id=run_id,
+            recipient_id=recipient_id,
+            message_ids=message_ids,
+        )
+
+    def _list_agents_with_pending_messages_sync(self, run_id: str) -> list[str]:
+        with self._lock:
+            conn = self._get_connection()
+            rows = conn.execute(
+                """
+                SELECT DISTINCT d.recipient_id
+                FROM message_deliveries d
+                JOIN agents a ON a.agent_id = d.recipient_id AND a.run_id = d.run_id
+                WHERE d.run_id = ? AND d.status IN ('pending', 'delivered')
+                ORDER BY d.recipient_id ASC
+                """,
+                (run_id,),
+            ).fetchall()
+            return [str(row["recipient_id"]) for row in rows]
+
+    async def list_agents_with_pending_messages(self, run_id: str) -> list[str]:
+        """Return specialist agent IDs in a run that still have unconsumed messages."""
+        return await asyncio.to_thread(self._list_agents_with_pending_messages_sync, run_id)
+
+    def _insert_review_verdict_sync(self, verdict: ReviewVerdict) -> None:
+        with self._transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT run_id FROM claims WHERE claim_id = ? AND version = ?",
+                (verdict.claim_id, verdict.claim_version),
+            ).fetchone()
+            if row is None or row["run_id"] != verdict.run_id:
+                raise CrossRunReferenceError(
+                    f"Claim '{verdict.claim_id}' v{verdict.claim_version} "
+                    f"does not belong to run '{verdict.run_id}'."
+                )
+            conn.execute(
+                """
+                INSERT INTO review_verdicts (
+                    verdict_id, run_id, claim_id, claim_version, reviewer_id,
+                    decision, rationale, blocking_issues_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    verdict.verdict_id,
+                    verdict.run_id,
+                    verdict.claim_id,
+                    verdict.claim_version,
+                    verdict.reviewer_id,
+                    verdict.decision.value,
+                    verdict.rationale,
+                    json.dumps(verdict.blocking_issues, ensure_ascii=False),
+                    verdict.created_at.isoformat(),
+                ),
+            )
+
+    async def insert_review_verdict(self, verdict: ReviewVerdict) -> None:
+        """Persist a reviewer verdict (extension point for Phase 3)."""
+        await asyncio.to_thread(self._insert_review_verdict_sync, verdict)
+
+    # ------------------------------------------------------------------
+    # Query helpers & RunTrace assembly
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_claim(row: sqlite3.Row) -> Claim:
+        return Claim(
+            claim_id=row["claim_id"],
+            version=int(row["version"]),
+            run_id=row["run_id"],
+            statement=row["statement"],
+            status=ClaimStatus(row["status"]),
+            parent_claim_id=row["parent_claim_id"],
+            author_agent_id=row["author_agent_id"],
+            task_id=row["task_id"],
+            evidence_ids=json.loads(row["evidence_ids_json"]),
+            depends_on_claim_ids=json.loads(row["depends_on_claim_ids_json"]),
+            assumptions=json.loads(row["assumptions_json"]),
+            revision_notes=row["revision_notes"],
+            confidence=row["confidence"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def _get_claims_for_run_sync(self, run_id: str, latest_only: bool = False) -> list[Claim]:
+        with self._lock:
+            conn = self._get_connection()
+            if latest_only:
+                rows = conn.execute(
+                    """
+                    SELECT c.*
+                    FROM claims c
+                    JOIN (
+                        SELECT claim_id, MAX(version) AS max_ver
+                        FROM claims
+                        WHERE run_id = ?
+                        GROUP BY claim_id
+                    ) latest ON c.claim_id = latest.claim_id AND c.version = latest.max_ver
+                    WHERE c.run_id = ?
+                    ORDER BY c.created_at ASC
+                    """,
+                    (run_id, run_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM claims WHERE run_id = ? ORDER BY created_at ASC, version ASC",
+                    (run_id,),
+                ).fetchall()
+        return [self._row_to_claim(row) for row in rows]
+
+    async def get_claims_for_run(self, run_id: str, *, latest_only: bool = False) -> list[Claim]:
+        """Return all claim versions (or latest version per claim_id) for a run."""
+        return await asyncio.to_thread(self._get_claims_for_run_sync, run_id, latest_only)
 
     def _get_run_trace_sync(self, run_id: str) -> RunTrace | None:
         with self._lock:
@@ -564,6 +1432,52 @@ class Database:
             if run_row is None:
                 return None
 
+            plan_row = conn.execute(
+                "SELECT * FROM execution_plans WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            agent_rows = conn.execute(
+                "SELECT * FROM agents WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            task_rows = conn.execute(
+                "SELECT * FROM tasks WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            transition_rows = conn.execute(
+                "SELECT * FROM task_transitions WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            evidence_rows = conn.execute(
+                "SELECT * FROM evidence WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            claim_rows = conn.execute(
+                "SELECT * FROM claims WHERE run_id = ? ORDER BY created_at ASC, version ASC",
+                (run_id,),
+            ).fetchall()
+            message_rows = conn.execute(
+                """
+                SELECT m.*,
+                    COALESCE((
+                        SELECT d.status FROM message_deliveries d
+                        WHERE d.message_id = m.message_id
+                        ORDER BY CASE d.status
+                            WHEN 'consumed' THEN 3
+                            WHEN 'delivered' THEN 2
+                            ELSE 1 END DESC
+                        LIMIT 1
+                    ), 'pending') AS agg_status
+                FROM agent_messages m
+                WHERE m.run_id = ?
+                ORDER BY m.created_at ASC
+                """,
+                (run_id,),
+            ).fetchall()
+            verdict_rows = conn.execute(
+                "SELECT * FROM review_verdicts WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
             event_rows = conn.execute(
                 "SELECT * FROM execution_events WHERE run_id = ? ORDER BY seq ASC",
                 (run_id,),
@@ -583,6 +1497,106 @@ class Database:
             if run_row["result_json"]
             else None
         )
+        agents = [
+            AgentSpec(
+                agent_id=row["agent_id"],
+                agent_ref=row["agent_ref"],
+                run_id=row["run_id"],
+                role=row["role"],
+                instructions=row["instructions"],
+                capabilities=json.loads(row["capabilities_json"]),
+                model_override=row["model_override"],
+                created_by=row["created_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in agent_rows
+        ]
+        tasks = [
+            TaskSpec(
+                task_id=row["task_id"],
+                task_ref=row["task_ref"],
+                run_id=row["run_id"],
+                plan_id=row["plan_id"],
+                title=row["title"],
+                description=row["description"],
+                assigned_agent_id=row["assigned_agent_id"],
+                depends_on=json.loads(row["depends_on_json"]),
+                expected_outputs=json.loads(row["expected_outputs_json"]),
+                acceptance_criteria=json.loads(row["acceptance_criteria_json"]),
+                status=TaskStatus(row["status"]),
+                findings=row["findings"],
+                error=row["error"],
+                created_by=row["created_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                started_at=(
+                    datetime.fromisoformat(row["started_at"]) if row["started_at"] else None
+                ),
+                completed_at=(
+                    datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
+                ),
+            )
+            for row in task_rows
+        ]
+        plan: ExecutionPlan | None = None
+        if plan_row is not None:
+            plan = ExecutionPlan(
+                plan_id=plan_row["plan_id"],
+                run_id=plan_row["run_id"],
+                goal=plan_row["goal"],
+                user_requirements=json.loads(plan_row["user_requirements_json"]),
+                acceptance_criteria=json.loads(plan_row["acceptance_criteria_json"]),
+                agents=agents,
+                tasks=tasks,
+                assumptions=json.loads(plan_row["assumptions_json"]),
+                missing_information=json.loads(plan_row["missing_information_json"]),
+                created_by=plan_row["created_by"],
+                created_at=datetime.fromisoformat(plan_row["created_at"]),
+            )
+
+        evidence = [
+            Evidence(
+                evidence_id=row["evidence_id"],
+                run_id=row["run_id"],
+                source_type=row["source_type"],
+                source_ref=row["source_ref"],
+                excerpt=row["excerpt"],
+                reliability=EvidenceReliability(row["reliability"]),
+                verified_in_input=bool(row["verified_in_input"]),
+                task_id=row["task_id"],
+                created_by=row["created_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in evidence_rows
+        ]
+        claims = [self._row_to_claim(row) for row in claim_rows]
+        messages = [
+            AgentMessage(
+                message_id=row["message_id"],
+                run_id=row["run_id"],
+                sender_id=row["sender_id"],
+                recipient_id=row["recipient_id"],
+                message_type=row["message_type"],
+                content=row["content"],
+                related_claim_ids=json.loads(row["related_claim_ids_json"]),
+                delivery_status=row["agg_status"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in message_rows
+        ]
+        verdicts = [
+            ReviewVerdict(
+                verdict_id=row["verdict_id"],
+                run_id=row["run_id"],
+                claim_id=row["claim_id"],
+                claim_version=int(row["claim_version"]),
+                reviewer_id=row["reviewer_id"],
+                decision=ReviewDecision(row["decision"]),
+                rationale=row["rationale"],
+                blocking_issues=json.loads(row["blocking_issues_json"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in verdict_rows
+        ]
         events = [
             ExecutionEvent(
                 event_id=row["event_id"],
@@ -605,17 +1619,23 @@ class Database:
             model=run_row["model"],
             config=config,
             result=result,
+            plan=plan,
+            agents=agents,
+            tasks=tasks,
+            task_transitions=[dict(row) for row in transition_rows],
+            claims=claims,
+            evidence=evidence,
+            messages=messages,
+            review_verdicts=verdicts,
             events=events,
             usage_records=[dict(row) for row in usage_rows],
             budget_reservations=[dict(row) for row in res_rows],
             created_at=datetime.fromisoformat(run_row["created_at"]),
             completed_at=(
-                datetime.fromisoformat(run_row["completed_at"])
-                if run_row["completed_at"]
-                else None
+                datetime.fromisoformat(run_row["completed_at"]) if run_row["completed_at"] else None
             ),
         )
 
     async def get_run_trace(self, run_id: str) -> RunTrace | None:
-        """Fetch full run trace, events, usage records, and budget reservations."""
+        """Fetch full run trace without requiring any model provider."""
         return await asyncio.to_thread(self._get_run_trace_sync, run_id)

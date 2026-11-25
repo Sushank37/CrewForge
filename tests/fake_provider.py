@@ -10,9 +10,7 @@ from pydantic import BaseModel, ValidationError
 
 from crewforge.providers.base import (
     ModelProvider,
-    ProviderError,
     ProviderResponseError,
-    ProviderTimeoutError,
     StructuredGenerationResult,
     TextGenerationResult,
     execute_with_retry,
@@ -37,6 +35,7 @@ class FakeProvider(ModelProvider):
         delay_seconds: float = 0.0,
         input_tokens: int = 42,
         output_tokens: int = 24,
+        usage_reported: bool = True,
     ) -> None:
         self._provider_name = provider_name
         self._model_name = model_name
@@ -47,6 +46,7 @@ class FakeProvider(ModelProvider):
         self._delay_seconds = delay_seconds
         self._input_tokens = input_tokens
         self._output_tokens = output_tokens
+        self._usage_reported = usage_reported
         self.calls: list[dict[str, Any]] = []
 
     @property
@@ -69,8 +69,10 @@ class FakeProvider(ModelProvider):
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> TextGenerationResult:
         timeout = timeout_seconds or self._timeout_seconds
+        retries_cap = self._max_retries if max_retries is None else max_retries
         self.calls.append({"mode": "text", "prompt": prompt, "system_prompt": system_prompt})
 
         async def _call() -> str:
@@ -88,7 +90,7 @@ class FakeProvider(ModelProvider):
             provider=self.provider_name,
             model=self.model_name,
             timeout_seconds=timeout,
-            max_retries=self._max_retries,
+            max_retries=retries_cap,
             base_backoff_seconds=0.01,
         )
         return TextGenerationResult(
@@ -96,12 +98,15 @@ class FakeProvider(ModelProvider):
             model=self.model_name,
             text=text,
             usage=UsageMetrics(
-                input_tokens=self._input_tokens,
-                output_tokens=self._output_tokens,
-                total_tokens=self._input_tokens + self._output_tokens,
+                input_tokens=self._input_tokens if self._usage_reported else 0,
+                output_tokens=self._output_tokens if self._usage_reported else 0,
+                total_tokens=(
+                    (self._input_tokens + self._output_tokens) if self._usage_reported else 0
+                ),
                 model_calls=1,
                 retries=retries,
                 latency_ms=latency_ms,
+                usage_reported=self._usage_reported,
             ),
         )
 
@@ -114,8 +119,10 @@ class FakeProvider(ModelProvider):
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> StructuredGenerationResult[T]:
         timeout = timeout_seconds or self._timeout_seconds
+        retries_cap = self._max_retries if max_retries is None else max_retries
         self.calls.append(
             {
                 "mode": "structured",
@@ -140,19 +147,14 @@ class FakeProvider(ModelProvider):
                 "confidence_notes": "Deterministic test output.",
             }
 
-        try:
-            raw_or_obj, retries, latency_ms = await execute_with_retry(
-                _call,
-                provider=self.provider_name,
-                model=self.model_name,
-                timeout_seconds=timeout,
-                max_retries=self._max_retries,
-                base_backoff_seconds=0.01,
-            )
-        except ProviderTimeoutError:
-            raise
-        except ProviderError:
-            raise
+        raw_or_obj, retries, latency_ms = await execute_with_retry(
+            _call,
+            provider=self.provider_name,
+            model=self.model_name,
+            timeout_seconds=timeout,
+            max_retries=retries_cap,
+            base_backoff_seconds=0.01,
+        )
 
         if isinstance(raw_or_obj, response_model):
             parsed = raw_or_obj
@@ -188,11 +190,14 @@ class FakeProvider(ModelProvider):
             raw_text=raw_text,
             parsed=parsed,
             usage=UsageMetrics(
-                input_tokens=self._input_tokens,
-                output_tokens=self._output_tokens,
-                total_tokens=self._input_tokens + self._output_tokens,
+                input_tokens=self._input_tokens if self._usage_reported else 0,
+                output_tokens=self._output_tokens if self._usage_reported else 0,
+                total_tokens=(
+                    (self._input_tokens + self._output_tokens) if self._usage_reported else 0
+                ),
                 model_calls=1,
                 retries=retries,
                 latency_ms=latency_ms,
+                usage_reported=self._usage_reported,
             ),
         )

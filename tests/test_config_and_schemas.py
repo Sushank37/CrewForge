@@ -38,6 +38,11 @@ def test_settings_defaults_and_placeholder_key_stripping(monkeypatch: pytest.Mon
     assert settings.max_cumulative_cost_usd == pytest.approx(1.00)
     assert settings.max_model_calls_per_run == 16
     assert settings.max_concurrency == 3
+    assert settings.effective_max_concurrency == 1
+    assert settings.max_retries == 0
+
+    cloud_settings = CrewForgeSettings(_env_file=None, provider=ProviderType.OPENAI)
+    assert cloud_settings.effective_max_concurrency == 3
 
 
 def test_settings_pricing_json_and_cost_cap_validation(monkeypatch: pytest.MonkeyPatch) -> None:
