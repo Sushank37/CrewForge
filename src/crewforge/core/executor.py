@@ -98,6 +98,7 @@ class ModelExecutor:
                 system_prompt=system_prompt,
                 response_model=response_model,
                 max_output_tokens=bounded_out,
+                allocation_category=self._settings.budget_allocation_category.value,
             )
             await self._db.append_event(
                 ExecutionEvent(
@@ -335,6 +336,7 @@ class ModelExecutor:
                 prompt_text=prompt,
                 system_prompt=system_prompt,
                 max_output_tokens=bounded_out,
+                allocation_category=self._settings.budget_allocation_category.value,
             )
             attempt_start = time.perf_counter()
             acquired = False

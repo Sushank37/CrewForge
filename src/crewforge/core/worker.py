@@ -101,10 +101,14 @@ class SpecialistWorker:
                     )
 
         dependency_text_blob = "\n".join(text for _, text in dependency_findings)
-        inbound_messages = await self._bus.read_inbox(
-            run_id=run_id,
-            recipient_id=agent.agent_id,
-            mark_delivered=True,
+        inbound_messages = (
+            await self._bus.read_inbox(
+                run_id=run_id,
+                recipient_id=agent.agent_id,
+                mark_delivered=True,
+            )
+            if self._executor._settings.enable_peer_messaging
+            else []
         )
         agent_labels, peer_directory = self._build_agent_labels(plan)
 
@@ -166,12 +170,16 @@ class SpecialistWorker:
             evidence_proposals=output.evidence_proposals,
             claim_proposals=output.claims,
         )
-        sent_messages = await self._bus.dispatch_instructions(
-            run_id=run_id,
-            sender_id=agent.agent_id,
-            instructions=output.outgoing_messages,
-            agents=plan.agents,
-            created_claim_ids=[c.claim_id for c in persisted_claims],
+        sent_messages = (
+            await self._bus.dispatch_instructions(
+                run_id=run_id,
+                sender_id=agent.agent_id,
+                instructions=output.outgoing_messages,
+                agents=plan.agents,
+                created_claim_ids=[c.claim_id for c in persisted_claims],
+            )
+            if self._executor._settings.enable_peer_messaging
+            else []
         )
 
         return WorkerExecutionOutcome(

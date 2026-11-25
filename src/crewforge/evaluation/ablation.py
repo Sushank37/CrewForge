@@ -16,6 +16,7 @@ class AblationConfig(BaseModel):
     enable_independent_review: bool = True
     enable_targeted_repair: bool = True
     enable_peer_messaging: bool = True
+    confound_notes: str = ""
 
     @classmethod
     def from_variant(cls, variant: AblationVariant | str) -> AblationConfig:
@@ -30,6 +31,7 @@ class AblationConfig(BaseModel):
                 enable_independent_review=True,
                 enable_targeted_repair=True,
                 enable_peer_messaging=True,
+                confound_notes="None (production reference configuration).",
             )
         if var == AblationVariant.NO_REVIEWER:
             return cls(
@@ -38,6 +40,12 @@ class AblationConfig(BaseModel):
                 enable_independent_review=False,
                 enable_targeted_repair=False,  # Cannot repair without review verdicts
                 enable_peer_messaging=True,
+                confound_notes=(
+                    "EXPERIMENTAL CONFOUND: Disabling independent review prevents claims from "
+                    "reaching SUPPORTED status; Honesty Gate remains active and will withhold "
+                    "unreviewed factual claims from verified release rather than falsely "
+                    "labeling them as verified."
+                ),
             )
         if var == AblationVariant.NO_REPAIR:
             return cls(
@@ -46,6 +54,10 @@ class AblationConfig(BaseModel):
                 enable_independent_review=True,
                 enable_targeted_repair=False,
                 enable_peer_messaging=True,
+                confound_notes=(
+                    "EXPERIMENTAL CONFOUND: Disabling targeted repair leaves rejected claims "
+                    "unrevised, reducing released coverage when initial worker claims are flawed."
+                ),
             )
         if var == AblationVariant.NO_PEER_MESSAGES:
             return cls(
@@ -54,14 +66,20 @@ class AblationConfig(BaseModel):
                 enable_independent_review=True,
                 enable_targeted_repair=True,
                 enable_peer_messaging=False,
+                confound_notes=(
+                    "Disables both inter-specialist message delivery and follow-up rounds."
+                ),
             )
         raise ValueError(f"Unknown ablation variant: {variant}")
 
     def apply_to_settings(self, settings: CrewForgeSettings) -> CrewForgeSettings:
-        """Derive runtime settings reflecting the ablation constraints."""
+        """Derive runtime settings reflecting the real evaluation-only ablation switches."""
         copied = settings.model_copy()
+        copied.enable_independent_review = self.enable_independent_review
+        copied.enable_targeted_repair = self.enable_targeted_repair
+        copied.enable_peer_messaging = self.enable_peer_messaging
         if not self.enable_peer_messaging:
             copied.max_communication_rounds = 0
-        if not self.enable_targeted_repair:
+        if not self.enable_targeted_repair or not self.enable_independent_review:
             copied.max_revision_rounds = 0
         return copied

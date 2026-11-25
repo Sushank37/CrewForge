@@ -9,17 +9,14 @@ CrewForge is a model-agnostic, self-assembling multi-agent intelligence network 
   - Enforces the hackathon-mandated $4.00 emergency protected reserve (from $6.10 total OpenAI balance, leaving $2.10 total spendable ceiling) and category caps (`phase5_same_model` max $0.75, `david_vs_goliath` max $1.10).
   - Conservative unknown-outcome billing and immediate atomic reservations (`BEGIN IMMEDIATE`) ensure strict compliance.
 - **Reproducible Blind Benchmark & Scoring Harness (`evaluation/`, `benchmarks/`):**
-  - Seed-based cryptographic A/B blinding (`anonymize.py`) strips orchestrator tags (`[clm_...]`, `[evd_...]`) so evaluators judge without structural tells.
-  - Normalized 100-point rubric with an explicit negative penalty (-0 to -20) for unsupported assertions or ungrounded empirical claims.
-  - Deterministic objective verification for numerical values (with percentage vs percentage-point distinction), logical constraints, and missing-information identification.
-  - Ablation matrix support (`full`, `no_reviewer`, `no_repair`, `no_peer_messages`).
-- **True Iterative Compute-Matched Baseline (`core/baseline.py`):**
-  - Upgraded `BaselineRunner` features an iterative single-agent critique and refinement loop (up to 3 rounds) with deterministic arithmetic tool parity, stopping early when no defects remain.
-- **Claim-Locked Honesty Gate & Strict Epistemic Boundaries (`core/honesty_gate.py`):**
-  - Default final answers render verified factual text directly from exact approved ledger `Claim` versions.
-  - Strict category boundaries: unsupported factual claims cannot be laundered under `recommendations` or `conditional_conclusions`; recommendations require supported material premises; auxiliary fields reject unverified numbers and rejected claim echoes.
+  - Cryptographically random per-experiment blinding seed (`secrets.token_hex(32)`) persisted separately in `blind_key.json`; strips multi-claim tags, run IDs, model names, and CrewForge verification metadata from `confidence_notes` while preserving assumptions, missing info, and full reference documents.
+  - Separates deterministic diagnostics from independent semantic grading using the standardized 100-point rubric (`30/25/20/15/10` with `-5` per unsupported material assertion, max `-20`, floor `0`). Ungraded runs report `pending independent grading`.
+  - Immutable experiment fingerprints isolate cached runs by manifest, prompt, document hashes, git commit, provider, model, baseline mode, ablation variant, and runtime limits.
+  - Real evaluation-only ablation switches (`full`, `no_reviewer`, `no_repair`, `no_peer_messages`) and asymmetric David (`ollama/qwen3:4b`) vs. Goliath (`openai/gpt-6.2-astra`) configuration.
+- **Budget-Matched Iterative Baseline (`core/baseline.py`):**
+  - Configurable call and output-token allowances (`baseline_max_calls`, `baseline_max_output_tokens`) with up to 3 self-critique rounds, full reference-document access, verified tool incorporation, and honest reporting of unused compute.
 - **Safe Portable Demo Trace Export (`core/demo_trace.py`):**
-  - Exports complete historical run traces with credentials sanitized and system errors redacted for public replay.
+  - Defaults `include_prompt=False`, recursively sanitizes credentials/headers/nested prompt leaks, includes evidence provenance, and preserves actual historical timestamps and outcomes.
 - **Small-Model Profile & Deterministic Arithmetic Parity:**
   - Compact profile for Apple Silicon M1 (concurrency 1, max 2 workers, max 3 tasks, ~4096 context).
   - Parity arithmetic tool resolving variables to exact prompt/evidence spans with AST literal verification.

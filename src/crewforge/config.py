@@ -117,7 +117,15 @@ class CrewForgeSettings(BaseSettings):
     retrieval_max_bytes: int = Field(default=262144, ge=1024, le=2_097_152)
     reference_documents: list[str] = Field(default_factory=list)
     baseline_compute_matched: bool = False
+    baseline_max_calls: int | None = Field(default=None, ge=1, le=20)
+    baseline_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
+    baseline_max_refinement_rounds: int = Field(default=3, ge=0, le=5)
     enable_deterministic_synthesis_fast_path: bool = True
+
+    # Evaluation-only stage switches (must remain True in production)
+    enable_independent_review: bool = True
+    enable_targeted_repair: bool = True
+    enable_peer_messaging: bool = True
 
     request_timeout_seconds: float = Field(default=60.0, gt=0.0)
     run_deadline_seconds: float = Field(default=300.0, gt=0.0)
@@ -146,6 +154,7 @@ class CrewForgeSettings(BaseSettings):
     max_cumulative_cost_usd: float = Field(default=1.00, ge=0.0)
 
     budget_authority_path: Path = Path(".crewforge/budget_authority.db")
+    budget_allocation_category: BudgetAllocationCategory = BudgetAllocationCategory.GENERAL
     protected_reserve_usd: float = Field(default=4.00, ge=0.0)
     total_budget_ceiling_usd: float = Field(default=6.10, ge=0.0)
     phase5_same_model_budget_cap_usd: float = Field(default=0.75, ge=0.0)

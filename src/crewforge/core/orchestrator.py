@@ -306,17 +306,33 @@ class NetworkRunner:
                 run_deadline_monotonic=run_deadline_monotonic,
             )
 
-            (
-                followup_uncertainties,
-                msg_deadline,
-                msg_budget,
-            ) = await self._run_communication_followups(
-                run_id=resolved_run_id,
-                original_prompt=cleaned_prompt,
-                plan=plan,
-                tasks_by_id=sched_outcome.tasks_by_id,  # type: ignore[arg-type]
-                run_deadline_monotonic=run_deadline_monotonic,
-            )
+            stages_executed: list[str] = ["planner", "dag_workers"]
+            if self._settings.enable_peer_messaging:
+                (
+                    followup_uncertainties,
+                    msg_deadline,
+                    msg_budget,
+                ) = await self._run_communication_followups(
+                    run_id=resolved_run_id,
+                    original_prompt=cleaned_prompt,
+                    plan=plan,
+                    tasks_by_id=sched_outcome.tasks_by_id,  # type: ignore[arg-type]
+                    run_deadline_monotonic=run_deadline_monotonic,
+                )
+                stages_executed.append("peer_messaging")
+            else:
+                followup_uncertainties = []
+                msg_deadline = False
+                msg_budget = False
+                await self._db.append_event(
+                    ExecutionEvent(
+                        run_id=resolved_run_id,
+                        event_type="ablation_stage_disabled",
+                        actor="orchestrator",
+                        message="Peer messaging and follow-up stage disabled by ablation config.",
+                        payload={"stage": "peer_messaging"},
+                    )
+                )
 
             if self._review_hook is not None:
                 await self._review_hook.after_workers(
@@ -333,21 +349,56 @@ class NetworkRunner:
                 self._graph.validate_graph(all_claims_pre_review, run_id=resolved_run_id)
 
             # Independent adversarial review & targeted dispute resolution.
-            review_outcome = await self._reviewer.review_claims(
-                run_id=resolved_run_id,
-                original_prompt=cleaned_prompt,
-                plan=plan,
-                run_deadline_monotonic=run_deadline_monotonic,
-            )
-            if review_outcome.blocking_claims:
-                await self._repair.resolve_disputes(
+            if self._settings.enable_independent_review:
+                review_outcome = await self._reviewer.review_claims(
                     run_id=resolved_run_id,
                     original_prompt=cleaned_prompt,
                     plan=plan,
-                    blocking_claims=review_outcome.blocking_claims,
-                    verdicts=review_outcome.verdicts,
                     run_deadline_monotonic=run_deadline_monotonic,
                 )
+                stages_executed.append("independent_review")
+                if review_outcome.blocking_claims:
+                    if self._settings.enable_targeted_repair:
+                        await self._repair.resolve_disputes(
+                            run_id=resolved_run_id,
+                            original_prompt=cleaned_prompt,
+                            plan=plan,
+                            blocking_claims=review_outcome.blocking_claims,
+                            verdicts=review_outcome.verdicts,
+                            run_deadline_monotonic=run_deadline_monotonic,
+                        )
+                        stages_executed.append("targeted_repair")
+                    else:
+                        await self._db.append_event(
+                            ExecutionEvent(
+                                run_id=resolved_run_id,
+                                event_type="ablation_stage_disabled",
+                                actor="orchestrator",
+                                message="Targeted repair stage disabled by ablation config.",
+                                payload={"stage": "targeted_repair"},
+                            )
+                        )
+            else:
+                await self._db.append_event(
+                    ExecutionEvent(
+                        run_id=resolved_run_id,
+                        event_type="ablation_stage_disabled",
+                        actor="orchestrator",
+                        message="Independent review stage disabled by ablation config.",
+                        payload={"stage": "independent_review"},
+                    )
+                )
+
+            stages_executed.append("honesty_gate_and_synthesis")
+            await self._db.append_event(
+                ExecutionEvent(
+                    run_id=resolved_run_id,
+                    event_type="stages_executed_summary",
+                    actor="orchestrator",
+                    message=f"Stages executed: {', '.join(stages_executed)}",
+                    payload={"stages_executed": stages_executed},
+                )
+            )
 
             trace_snapshot = await self._db.get_run_trace(resolved_run_id)
             assert trace_snapshot is not None

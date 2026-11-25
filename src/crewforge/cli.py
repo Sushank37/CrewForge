@@ -225,6 +225,56 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_parser.add_argument("--host", default="127.0.0.1")
     mcp_parser.add_argument("--port", type=int, default=8000)
 
+    demo_parser = subparsers.add_parser(
+        "export-demo",
+        help="Export a sanitized historical demonstration trace JSON.",
+    )
+    demo_parser.add_argument("run_id", help="Persisted run ID to export.")
+    demo_parser.add_argument("--output", required=True, help="Output JSON path.")
+    demo_parser.add_argument("--db-path", default=None, help="Optional SQLite DB path override.")
+    demo_parser.add_argument(
+        "--include-prompt",
+        action="store_true",
+        help="Include original prompt text (redacted by default).",
+    )
+
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help="Benchmark manifest validation, execution, blind export, and grading.",
+    )
+    eval_sub = eval_parser.add_subparsers(dest="eval_command", required=True)
+
+    val_p = eval_sub.add_parser("validate-manifest", help="Validate external/local manifest.")
+    val_p.add_argument("--manifest", required=True, help="Path to manifest JSON.")
+
+    run_p = eval_sub.add_parser("run", help="Execute benchmark manifest without rubrics.")
+    run_p.add_argument("--manifest", required=True, help="Path to manifest JSON.")
+    run_p.add_argument("--output-dir", default="benchmarks/results", help="Output directory.")
+    run_p.add_argument(
+        "--mode",
+        choices=["baseline_vs_network", "compute_matched_vs_network", "ablation"],
+        default="baseline_vs_network",
+    )
+    run_p.add_argument(
+        "--ablation-variant",
+        choices=["full", "no_reviewer", "no_repair", "no_peer_messages"],
+        default="full",
+    )
+    run_p.add_argument("--david-vs-goliath", action="store_true")
+    run_p.add_argument("--baseline-max-calls", type=int, default=None)
+    run_p.add_argument("--baseline-max-output-tokens", type=int, default=None)
+    run_p.add_argument("--resume", dest="resume", action="store_true", default=True)
+    run_p.add_argument("--no-resume", dest="resume", action="store_false")
+
+    grade_p = eval_sub.add_parser(
+        "grade", help="Import human grades, unblind via blind_key.json, and generate final report."
+    )
+    grade_p.add_argument("--results", required=True, help="Path to experiment_results.json.")
+    grade_p.add_argument("--grades", required=True, help="Path to human grades JSON.")
+    grade_p.add_argument("--blind-key", required=True, help="Path to private blind_key.json.")
+    grade_p.add_argument("--rubrics", required=True, help="Path to private rubrics JSON.")
+    grade_p.add_argument("--output-dir", required=True, help="Output directory for final report.")
+
     return parser
 
 
@@ -283,6 +333,161 @@ def main(argv: list[str] | None = None) -> int:
             settings=settings,
         )
         return 0
+    if args.command == "export-demo":
+        from crewforge.core.demo_trace import export_demo_trace
+
+        db_target = args.db_path or settings.effective_db_path
+        db = Database(db_target)
+
+        async def _export() -> None:
+            await db.initialize()
+            try:
+                await export_demo_trace(
+                    db,
+                    args.run_id,
+                    args.output,
+                    include_prompt=args.include_prompt,
+                )
+            finally:
+                await db.close()
+
+        asyncio.run(_export())
+        print(json.dumps({"exported": True, "run_id": args.run_id, "output": args.output}))
+        return 0
+    if args.command == "eval":
+        return _run_eval_cmd(args, settings=settings)
+    return 1
+
+
+def _run_eval_cmd(args: argparse.Namespace, *, settings: CrewForgeSettings) -> int:
+    from pathlib import Path
+
+    from crewforge.config import BudgetAllocationCategory
+    from crewforge.evaluation.contracts import EvaluationRubric, ExperimentResult
+    from crewforge.evaluation.reporting import (
+        export_experiment_results_csv,
+        export_experiment_results_json,
+        generate_markdown_report,
+    )
+    from crewforge.evaluation.runner import (
+        BenchmarkRunner,
+        build_david_vs_goliath_settings,
+        load_and_validate_manifest,
+    )
+    from crewforge.evaluation.scoring import (
+        compute_evaluation_score,
+        import_human_grades_from_file,
+    )
+
+    if args.eval_command == "validate-manifest":
+        manifest, m_dir = load_and_validate_manifest(args.manifest)
+        print(
+            json.dumps(
+                {
+                    "valid": True,
+                    "manifest_id": manifest.manifest_id,
+                    "item_count": len(manifest.items),
+                    "manifest_dir": str(m_dir),
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.eval_command == "run":
+        manifest, m_dir = load_and_validate_manifest(args.manifest)
+        if args.david_vs_goliath:
+            base_cfg, net_cfg = build_david_vs_goliath_settings(settings)
+        else:
+            cat = (
+                BudgetAllocationCategory.PHASE5_SAME_MODEL
+                if settings.provider == ProviderType.OPENAI
+                else settings.budget_allocation_category
+            )
+            base_updates: dict[str, Any] = {"budget_allocation_category": cat}
+            if args.baseline_max_calls is not None:
+                base_updates["baseline_max_calls"] = args.baseline_max_calls
+            if args.baseline_max_output_tokens is not None:
+                base_updates["baseline_max_output_tokens"] = args.baseline_max_output_tokens
+            base_cfg = settings.model_copy(update=base_updates)
+            net_cfg = settings.model_copy(update={"budget_allocation_category": cat})
+
+        runner = BenchmarkRunner(
+            settings=settings,
+            baseline_settings=base_cfg,
+            network_settings=net_cfg,
+            output_dir=args.output_dir,
+        )
+        results, _ = asyncio.run(
+            runner.evaluate_manifest(
+                manifest,
+                rubrics=None,
+                manifest_dir=m_dir,
+                mode=args.mode,
+                ablation_variant=args.ablation_variant,
+                resume=args.resume,
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "completed_cases": len(results),
+                    "output_dir": args.output_dir,
+                    "grading_status": "pending_independent_grading",
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.eval_command == "grade":
+        raw_results = json.loads(Path(args.results).read_text(encoding="utf-8"))
+        results = [ExperimentResult.model_validate(r) for r in raw_results]
+        raw_rubrics = json.loads(Path(args.rubrics).read_text(encoding="utf-8"))
+        if isinstance(raw_rubrics, dict) and "rubrics" in raw_rubrics:
+            raw_rubrics = raw_rubrics["rubrics"]
+        rubrics_map = {r["prompt_id"]: EvaluationRubric.model_validate(r) for r in raw_rubrics}
+        grades = import_human_grades_from_file(args.grades, args.blind_key)
+
+        for exp in results:
+            rubric = rubrics_map.get(exp.prompt_id)
+            if rubric is None:
+                continue
+            b_grade = grades.get((exp.prompt_id, "baseline"))
+            n_grade = grades.get((exp.prompt_id, "network"))
+            exp.baseline_score = compute_evaluation_score(
+                rubric=rubric,
+                system_label="baseline",
+                answer_text=exp.baseline_result.answer,
+                assumptions=exp.baseline_result.assumptions,
+                missing_information=exp.baseline_result.missing_information,
+                confidence_notes=exp.baseline_result.confidence_notes,
+                human_grade=b_grade,
+            )
+            exp.network_score = compute_evaluation_score(
+                rubric=rubric,
+                system_label="network",
+                answer_text=exp.network_result.answer,
+                assumptions=exp.network_result.assumptions,
+                missing_information=exp.network_result.missing_information,
+                confidence_notes=exp.network_result.confidence_notes,
+                human_grade=n_grade,
+            )
+            if (
+                exp.baseline_score.grading_status == "graded"
+                and exp.network_score.grading_status == "graded"
+            ):
+                exp.grading_status = "graded"
+
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        export_experiment_results_json(results, out_dir / "final_results.json")
+        export_experiment_results_csv(results, out_dir / "final_results.csv")
+        md = generate_markdown_report(results, title="CrewForge Final Graded Evaluation Report")
+        (out_dir / "final_report.md").write_text(md, encoding="utf-8")
+        print(json.dumps({"graded_report": str(out_dir / "final_report.md")}, indent=2))
+        return 0
+
     return 1
 
 

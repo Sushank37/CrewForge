@@ -132,27 +132,54 @@ class EvaluationRubric(BaseModel):
 
 
 class ObjectiveCheckResult(BaseModel):
-    """Result of one deterministic assertion."""
+    """Result of one deterministic diagnostic assertion."""
 
     check_name: str
     passed: bool
     score: float
     max_score: float
     details: str = ""
+    status: Literal["passed", "failed", "ambiguous_manual_review", "diagnostic_only"] = "passed"
+    diagnostic_only: bool = False
+    needs_manual_review: bool = False
+    candidate_matches: list[str] = Field(default_factory=list)
 
 
-class EvaluationScore(BaseModel):
-    """Full 100-point evaluation score for one answer."""
+class HumanGradeInput(BaseModel):
+    """Validated independent human/external rubric grade for one answer."""
 
-    prompt_id: str
-    system_label: str
+    prompt_id: str = Field(min_length=1)
+    answer_label: Literal["A", "B"] | None = None
+    system_label: Literal["baseline", "network"] | None = None
     factual_correctness: float = Field(ge=0.0, le=30.0)
     requirement_coverage: float = Field(ge=0.0, le=25.0)
     evidence_grounding: float = Field(ge=0.0, le=20.0)
     internal_consistency: float = Field(ge=0.0, le=15.0)
     usefulness_and_uncertainty: float = Field(ge=0.0, le=10.0)
-    unsupported_assertion_penalty: float = Field(ge=0.0, le=20.0)
-    total_score: float = Field(ge=0.0, le=100.0)
+    unsupported_material_assertion_count: int = Field(default=0, ge=0)
+    evaluator_id: str = Field(min_length=1)
+    grading_method: str = Field(default="human_blind_rubric", min_length=1)
+    evaluator_notes: str = ""
+
+
+class EvaluationScore(BaseModel):
+    """Full 100-point evaluation score for one answer (requires independent grading)."""
+
+    prompt_id: str
+    system_label: str
+    factual_correctness: float | None = Field(default=None, ge=0.0, le=30.0)
+    requirement_coverage: float | None = Field(default=None, ge=0.0, le=25.0)
+    evidence_grounding: float | None = Field(default=None, ge=0.0, le=20.0)
+    internal_consistency: float | None = Field(default=None, ge=0.0, le=15.0)
+    usefulness_and_uncertainty: float | None = Field(default=None, ge=0.0, le=10.0)
+    unsupported_material_assertion_count: int = Field(default=0, ge=0)
+    unsupported_assertion_penalty: float | None = Field(default=None, ge=0.0, le=20.0)
+    total_score: float | None = Field(default=None, ge=0.0, le=100.0)
+
+    grading_status: Literal["pending_independent_grading", "graded"] = "pending_independent_grading"
+    evaluator_id: str | None = None
+    grading_method: str = "pending"
+    graded_at: str | None = None
 
     objective_score: float = 0.0
     objective_max_score: float = 0.0
@@ -178,6 +205,7 @@ class BlindEvaluationItem(BaseModel):
     domain: PromptDomain
     prompt: str
     reference_documents: list[str] = Field(default_factory=list)
+    reference_document_contents: dict[str, str] = Field(default_factory=dict)
     answer_a: BlindAnswer
     answer_b: BlindAnswer
 
@@ -193,6 +221,15 @@ class BlindKey(BaseModel):
     salt: str
 
 
+class BlindKeyFile(BaseModel):
+    """Private unblinding manifest containing the private random seed."""
+
+    experiment_fingerprint: str = ""
+    blinding_seed: str
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    keys: list[BlindKey] = Field(default_factory=list)
+
+
 class EvaluatorPacket(BaseModel):
     """Complete blind evaluation packet exported for human or independent evaluation."""
 
@@ -201,17 +238,64 @@ class EvaluatorPacket(BaseModel):
     items: list[BlindEvaluationItem] = Field(default_factory=list)
 
 
+class ExperimentFingerprint(BaseModel):
+    """Immutable experiment configuration fingerprint for reproducible caching."""
+
+    manifest_hash: str
+    prompt_hash: str
+    reference_document_hashes: dict[str, str] = Field(default_factory=dict)
+    engine_commit_sha: str
+    provider_identity: str
+    configured_model: str
+    reasoning_effort: str | None = None
+    tool_configuration: dict[str, Any] = Field(default_factory=dict)
+    baseline_mode: str
+    ablation_variant: str
+    runtime_limits: dict[str, Any] = Field(default_factory=dict)
+    fingerprint_id: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.fingerprint_id:
+            import json
+
+            canonical = json.dumps(
+                self.model_dump(exclude={"fingerprint_id"}),
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            self.fingerprint_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+class CachedRunRecord(BaseModel):
+    """Isolated persisted run record tied to an immutable experiment fingerprint."""
+
+    experiment_fingerprint: str
+    fingerprint_details: ExperimentFingerprint
+    prompt_id: str
+    system_label: str
+    result: RunResult
+
+
 class ExperimentResult(BaseModel):
     """One completed benchmark comparison between baseline and network."""
 
     prompt_id: str
     domain: PromptDomain
+    experiment_fingerprint: str = ""
     baseline_run_id: str
     network_run_id: str
+    baseline_provider: str = ""
+    baseline_model: str = ""
+    network_provider: str = ""
+    network_model: str = ""
+    baseline_mode: str = "standard"
+    ablation_variant: str = "full"
+    stages_executed: list[str] = Field(default_factory=list)
     baseline_result: RunResult
     network_result: RunResult
     baseline_score: EvaluationScore | None = None
     network_score: EvaluationScore | None = None
+    grading_status: Literal["pending_independent_grading", "graded"] = "pending_independent_grading"
     latency_difference_ms: float = 0.0
     cost_difference_usd: float = 0.0
     git_commit_sha: str = ""

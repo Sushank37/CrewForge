@@ -1,112 +1,111 @@
-# CrewForge Benchmark Evaluation & Freeze Specification
+# CrewForge Benchmark Evaluation & Integrity Specification
 
-## 1. Evaluation Methodology
+## 1. Evaluation Methodology & Integrity Guarantees
 
-CrewForge is evaluated on a rigorous, reproducible, double-blind protocol designed to answer the central competitive hypothesis:
-> **Does CrewForge's dynamic agent network produce more correct, complete, and evidence-grounded answers than a competitive single agent, both within the same model class and in an asymmetric small-model network versus frontier baseline contest?**
+CrewForge is evaluated under a reproducible, double-blind protocol designed to test whether CrewForge's dynamic multi-agent network produces more correct, complete, and evidence-grounded answers than a competitive single agent—both within the same model class and in an asymmetric small-model network (`qwen3:4b`) versus frontier baseline (`gpt-6.2-astra`) contest.
 
-### Evaluation Integrity Principles
-1. **Zero Contamination**: The system architecture, prompts, and tool rules were engineered using development pilot problems only. Held-out benchmark evaluation templates (`held_out_manifest_template.json`) remain strictly uncalibrated.
-2. **Reproducible A/B Blinding**: System outputs are cryptographically anonymized using seed-based hashing (`src/crewforge/evaluation/anonymize.py`). Internal orchestrator tags (such as `[clm_...]` and `[evd_...]`) are stripped from release prose so evaluators cannot identify the network from structural metadata.
-3. **Deterministic Objective Verification**: Exact numerical quantities (accounting for percentage vs percentage-point distinctions), logical consistency checks, and missing-information identification are validated programmatically alongside subjective rubric scoring.
-4. **Baseline Fairness**: The baseline is never artificially crippled. It receives identical prompt context, document attachments, and the exact same deterministic arithmetic tool. In compute-matched mode, the baseline is equipped with an iterative self-critique and refinement loop (up to 3 rounds) stopping only when no defects remain.
+### Integrity Principles
+1. **Zero Contamination:** Engineering and diagnostics use development pilot cases only. Private held-out manifests and grading keys remain external and are never loaded during answer generation.
+2. **Separation of Answer Generation & Grading:** `crewforge eval run` generates answers and blinded packets **without** requiring or loading `EvaluationRubric`s or private grading keys.
+3. **Deterministic Diagnostics vs. Semantic Grading:** Objective checks report exact-value diagnostics, unit/clause associations, and contradiction candidates, but **never** fabricate a 100-point semantic grade. Ungraded runs remain `pending independent grading` until validated human grades are imported.
+4. **Private Random Blinding:** Each experiment generates a cryptographically random 256-bit seed (`secrets.token_hex(32)`), persisted solely in `blind_key.json` and excluded from `evaluator_packet.json` / `evaluator_packet.md`.
+5. **Immutable Experiment Fingerprinting:** Every cached run is isolated under `runs/<experiment_fingerprint>/` (hashing manifest, prompt, reference documents, git commit, provider, model, reasoning effort, tools, baseline mode, ablation variant, and runtime limits). Mismatched cached records are rejected.
 
 ---
 
-## 2. 100-Point Evaluation Rubric
+## 2. Standardized 100-Point Evaluation Rubric
 
-Every evaluated run is scored against a normalized 100-point rubric with an explicit negative penalty for fabricated or ungrounded assertions:
+Every evaluated answer is scored against the approved 100-point rubric:
 
-| Dimension | Points | Description |
-|---|---|---|
-| **Factual & Numerical Correctness** | 30 | Exact numerical accuracy matching deterministic calculation and empirical document facts. |
-| **Internal Consistency & Logic** | 15 | Deductive validity, valid premise-to-conclusion lineage, absence of contradiction. |
-| **Completeness & Requirement Coverage** | 15 | Complete coverage of all sub-requirements and prompt constraints. |
-| **Precision & Evidence Grounding** | 15 | Statements tied to verifiable source text or explicit mathematical derivations. |
-| **Epistemic Calibration & Missing Info** | 15 | Accurate identification of uncertainties, unstated assumptions, and missing data without guessing. |
-| **Structural Clarity & Formatting** | 10 | Coherent organization, legible breakdown of premises and conditional conclusions. |
+| Dimension | Max Points | Description |
+| --- | --- | --- |
+| **Factual & Numerical Correctness** | 30 | Exact numerical accuracy matching deterministic calculation and empirical facts. |
+| **Requirement Coverage** | 25 | Complete coverage of all prompt sub-questions, constraints, and deliverables. |
+| **Evidence & Grounding** | 20 | Assertions accurately grounded in supplied source documents or explicit derivations. |
+| **Internal Consistency** | 15 | Deductive validity, sound premise-to-conclusion lineage, absence of contradiction. |
+| **Usefulness & Uncertainty Handling** | 10 | Actionable clarity, explicit assumptions, and honest identification of missing information. |
 | **TOTAL BASE SCORE** | **100** | |
-| **Unsupported Assertion Penalty** | **-0 to -20** | **Severe deduction** for ungrounded numbers, hallucinated empirical facts, or causal overclaiming. |
+| **Unsupported Assertion Penalty** | **-0 to -20** | **5 points deducted per distinct unsupported material assertion** (capped at 20). |
 
-The final score is:
-$$\text{Score} = \max(0, \text{Base Score} - \text{Unsupported Assertion Penalty})$$
-
----
-
-## 3. David vs Goliath Evaluation Setup
-
-CrewForge supports asymmetric model comparisons where an open-weight local model coordinates to compete against a larger proprietary frontier model:
-
-- **Network (David)**:
-  - **Model**: `qwen3:4b` running locally via Ollama.
-  - **Configuration**: Compact small-model profile (`concurrency=1`, `max_workers=2`, `max_tasks=3`, `max_revision_rounds=1`, context window ~4096 tokens).
-  - **Mechanism**: Self-assembling specialization, DAG scheduling, peer messaging, adversarial independent review, and deterministic arithmetic validation.
-- **Baseline (Goliath)**:
-  - **Model**: `gpt-6-luna` (or `gpt-6.2-astra` frontier class) via OpenAI Responses API.
-  - **Configuration**: Direct single-agent baseline with deterministic arithmetic tool access.
-- **Budget Protection**: Both modes are strictly governed by the persistent `UnifiedBudgetAuthority` (`.crewforge/budget_authority.db`), enforcing the $4.00 emergency protected reserve and hard allocation caps.
+$$\text{Final Score} = \max\left(0, \text{Base Score} - \min(20, 5 \times \text{Unsupported Material Assertions})\right)$$
 
 ---
 
-## 4. Ablation Suite Design
+## 3. David vs. Goliath Configuration
 
-To prove which components drive accuracy gains, CrewForge provides 4 reproducible ablation variants (`src/crewforge/evaluation/ablation.py`):
+| Role | System | Provider | Model | Pricing (Input / Output per 1M) | Per-Run Ceiling | Category Cap |
+| --- | --- | --- | --- | --- | --- | --- |
+| **David** | Multi-Agent Network | `ollama` | `qwen3:4b` | Local ($0.00) | $0.00 | — |
+| **Goliath** | Single-Agent Baseline | `openai` | `gpt-6.2-astra` | $8.00 / $40.00 (short-context) | $0.20 | $1.10 |
 
-1. `full`: Complete multi-agent network (dynamic DAG, peer messaging, adversarial review, targeted repair, Honesty Gate).
-2. `no_reviewer`: Network with specialist execution and synthesis, but zero independent adversarial reviewers (tests the impact of verification).
-3. `no_repair`: Network with adversarial reviewers identifying rejections, but disabling worker revision (tests whether targeted claim repair improves correctness vs merely pruning bad claims).
-4. `no_peer_messages`: Network with independent reviewers and repair, but disabling peer communication between specialist workers (tests whether inter-agent collaboration improves consistency).
-
----
-
-## 5. Known Engineering Limitations
-
-1. **Hardware Memory Contention (MacBook Air M1, 8GB RAM)**:
-   - When running local Ollama inference (`qwen3:4b`), RAM pressure can cause token-generation slowdowns.
-   - CrewForge's small-model execution profile mitigates this by restricting worker concurrency to 1, bounding workers to 2, and setting max tasks to 3.
-2. **DNS Rebinding Limitation**:
-   - The local document and HTTP fetcher strictly prohibits RFC 1918 private IP addresses, loopback, link-local, and cloud metadata IPs (`169.254.169.254`).
-   - Standard domain names resolving to external IPs are verified before connect. However, true DNS rebinding defense in long-lived socket connections requires continuous pin-to-IP enforcement at the transport layer. For hackathon submission, SSRF checks are executed prior to all fetches.
+- All David agents strictly use `qwen3:4b` (`small_model_profile=True`, `concurrency=1`, `max_workers=2`, `max_tasks=3`, `ollama_num_ctx=4096`). No stronger model is permitted inside David.
+- Goliath runs exclusively via single-agent `BaselineRunner` with `DeterministicArithmeticTool` and identical supplied reference documents—no multi-agent delegation.
+- Actual `returned_model` identities are recorded; if a model cannot be accessed, the run is recorded as `failed`/`unavailable` with zero silent model substitution.
 
 ---
 
-## 6. Step-by-Step Judge & Evaluator Instructions
+## 4. Compute-Budget Comparison Fairness
 
-### A. Run Full Offline Test Suite (Zero Cost)
-```bash
-# Verify code formatting and linting
-.venv/bin/ruff format --check .
-.venv/bin/ruff check .
+When running `--mode compute_matched_vs_network`:
+- `BaselineRunner` accepts configurable `--baseline-max-calls` and `--baseline-max-output-tokens` allowances.
+- Iterative self-critique rounds (up to 3) receive the same permitted reference documents and incorporate newly requested `DeterministicArithmeticTool` results before finalizing.
+- Actual calls, tokens, latency, cost, and **unused compute** (`unused_calls`, `unused_output_tokens`) are recorded honestly.
+- When actual consumption differs from the network, the comparison is described as **budget-matched** rather than exactly compute-matched.
 
-# Run full test suite (50 tests passing)
-.venv/bin/pytest -v
-```
+---
 
-### B. Inspect Budget Authority Status
-```bash
-.venv/bin/crewforge budget
-```
-Confirms cumulative spending, remaining spendable allocation, and the protected reserve ($4.00).
+## 5. Genuine Ablation Suite & Experimental Confounds
 
-### C. Export a Safe Demo Trace
-```bash
-# Export historical replay trace without leaking API keys
-.venv/bin/python -c "
-import asyncio
-from crewforge.storage.database import Database
-from crewforge.core.demo_trace import export_demo_trace
-db = Database('.crewforge/crewforge.db')
-asyncio.run(export_demo_trace(db, 'run_17a4f645e9ba', 'demo_trace.json'))
-print('Exported demo trace successfully.')
-"
-```
+1. `full`: Production configuration (peer messaging, independent review, targeted repair, Honesty Gate).
+2. `no_reviewer`: Disables `ReviewerPool` completely (0 reviewer model calls). **Experimental Confound:** Because claims cannot reach `SUPPORTED` status without independent review, the active Honesty Gate withholds unreviewed factual claims from verified release rather than falsely labeling them as verified.
+3. `no_repair`: Retains `ReviewerPool` but disables `TargetedRepairEngine` (0 revision calls). **Experimental Confound:** Rejected claims remain unrevised, reducing released coverage when initial worker claims are flawed.
+4. `no_peer_messages`: Disables inter-specialist message reading/dispatch and follow-up rounds (0 peer messages delivered).
 
-### D. Generate Blind Evaluation Packets
-```bash
-.venv/bin/python -c "
-from crewforge.evaluation.runner import EvaluationHarness
-# Generates blind evaluation packets with cryptographic A/B blinding
-print('Evaluation harness ready.')
-"
-```
-Evaluators review `packet.md` without knowing which answer was generated by the single agent or multi-agent network, score against the rubric, and re-attach keys using `anonymize_pair` key files.
+---
+
+## 6. Budget Protection & Future Finale Profile
+
+- Canonical `UnifiedBudgetAuthority` (`.crewforge/budget_authority.db`) tracks all historical and benchmark spending ($0.0255164 committed across 55 unique calls).
+- The **$4.00 emergency protected reserve** cannot be touched by development or Phase 5 benchmarks (`phase5_same_model` cap $0.75, `david_vs_goliath` cap $1.10).
+- **Future Explicitly Authorized Finale Profile:** To use the reserved $4.00 allocation during the live hackathon finale without weakening development protection, an operator must explicitly pass a dedicated finale profile (setting `CREWFORGE_ALLOW_PAID_RUNS=true`, `CREWFORGE_PROTECTED_RESERVE_USD=0.0`, and `CREWFORGE_BUDGET_ALLOCATION_CATEGORY=finale` in an isolated finale environment) after Phase 5 evaluation is complete. This profile is **not** activated in code or `.env`.
+
+---
+
+## 7. Exact Runnable Evaluation Commands
+
+1. **Validate an external manifest (resolving relative docs & SHA-256 hashes):**
+   ```bash
+   .venv/bin/crewforge eval validate-manifest --manifest /path/to/held_out_manifest.json
+   ```
+2. **Run same-model benchmark without loading answer rubrics:**
+   ```bash
+   .venv/bin/crewforge eval run --manifest /path/to/held_out_manifest.json --output-dir benchmarks/results/same_model --mode baseline_vs_network --no-resume
+   ```
+3. **Resume the same experiment safely:**
+   ```bash
+   .venv/bin/crewforge eval run --manifest /path/to/held_out_manifest.json --output-dir benchmarks/results/same_model --mode baseline_vs_network --resume
+   ```
+4. **Execute compute-budget comparison subset:**
+   ```bash
+   .venv/bin/crewforge eval run --manifest /path/to/held_out_manifest.json --output-dir benchmarks/results/budget_matched --mode compute_matched_vs_network --baseline-max-calls 6 --baseline-max-output-tokens 4096
+   ```
+5. **Execute asymmetric David (`ollama/qwen3:4b`) vs. Goliath (`openai/gpt-6.2-astra`) comparison:**
+   ```bash
+   .venv/bin/crewforge eval run --manifest /path/to/held_out_manifest.json --output-dir benchmarks/results/david_vs_goliath --david-vs-goliath
+   ```
+6. **Execute predetermined ablation subset (e.g., `no_reviewer`, `no_repair`, `no_peer_messages`):**
+   ```bash
+   .venv/bin/crewforge eval run --manifest /path/to/held_out_manifest.json --output-dir benchmarks/results/ablation_no_reviewer --mode ablation --ablation-variant no_reviewer
+   ```
+7. **Export blinded evaluator packets:**
+   Automatically written during `eval run` to `<output-dir>/evaluator_packet.json` and `<output-dir>/evaluator_packet.md` (with `blind_key.json` persisted separately).
+8. **Import completed human grades, unblind, and generate final report:**
+   ```bash
+   .venv/bin/crewforge eval grade --results benchmarks/results/same_model/experiment_results.json --grades /path/to/human_grades.json --blind-key benchmarks/results/same_model/blind_key.json --rubrics /path/to/private_rubrics.json --output-dir benchmarks/results/same_model/graded
+   ```
+9. **View unblinded final report:**
+   Inspect `benchmarks/results/same_model/graded/final_report.md` and `final_results.csv`.
+10. **Export genuine historical demonstration trace (prompt redacted by default):**
+    ```bash
+    .venv/bin/crewforge export-demo run_17a4f645e9ba --output benchmarks/demo_trace_run_17a4f645e9ba.json
+    ```
