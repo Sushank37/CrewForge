@@ -2,28 +2,27 @@
 
 CrewForge is a model-agnostic, self-assembling multi-agent intelligence network exposed through the Model Context Protocol (MCP), built by **Team Git Commit** for the **SEED Hackathon 2026 — Chain of Command** challenge.
 
-## Implemented Functionality (Phases 1–4)
+## Implemented Functionality (Phases 1–5 Engine Freeze)
 
-- **Budget-Safe `ModelExecutor`, Cloud Guard & Shared MCP Execution:**
-  - Single shared `asyncio.Semaphore` with deadline-bounded acquisition enforces configured concurrency (`1` local Ollama default, `3` cloud OpenAI) across concurrent MCP `solve` / `baseline` tool runs.
-  - Explicit `CREWFORGE_ALLOW_PAID_RUNS=false` fail-closed authorization guard blocks paid API execution unless authorized; paid cloud runs automatically persist to `CREWFORGE_CLOUD_DB_PATH` (`.crewforge/cloud_dev.db`), require non-empty pricing in `CREWFORGE_PRICING_JSON`, reserve every attempt atomically (`BEGIN IMMEDIATE`), and record actual `returned_model` identities.
-- **Claim-Locked Honesty Gate & Anti-Laundering (`core/honesty_gate.py`):**
-  - Default final answers render verified factual text directly from exact approved ledger `Claim` versions — forbidding Lead paraphrases, negation reversals, unreferenced factual prose, or laundering through `conditional_conclusions`, `recommendations`, `assumptions`, `missing_information`, `unresolved_issues`, `confidence_notes`, or raw task error messages on both full and partial paths.
-  - Rejected claim statements stay preserved in `trace.claims` and are never echoed unnecessarily in rendered answers.
-- **Exact Arithmetic Provenance Lineage (`tools/arithmetic.py`):**
-  - `DeterministicArithmeticTool` resolves every variable to an exact target (`up_1..up_N` prompt spans, `doc_1..doc_N` verified evidence excerpts, current `SUPPORTED` claim versions, prior grounded `ToolExecutionRecord`s, or explicit `const:` / `assumption:` references) — rejecting swapped variables, fabricated targets, unrelated sentence numbers, ungrounded inline AST constants, unit mismatches, and stale claim versions.
-- **Strict Reviewer Verdict Validation (`core/reviewer.py`):**
-  - Enforces at most one verdict per `(claim_id, claim_version, reviewer_id, review_dimension)` in a review round, strips cross-claim evidence refs, keeps skipped/missing dimensions explicitly incomplete (`UNRESOLVED`), triggers disputes on conflicts, and rechecks fresh DB premise currency before approval.
-- **Honest Requirement Coverage (`VerificationSummary`):**
-  - Tracks `req_1..req_K` linkage separately across `answered`, `partially_answered`, `unresolved`, and `missing`, and exposes distinct `execution_completed`, `release_checks_executed`, `content_released_safely`, `coverage_methodology`, and `independent_grade` (`None` internally).
-- **External Retrieval Foundation (`core/retrieval.py`):**
-  - `LocalDocumentRetriever` ingests operator-supplied UTF-8 documents (`--doc` / `CREWFORGE_REFERENCE_DOCUMENTS`) into immutable verified `Evidence` with SHA-256 `content_hash`, UTC `retrieved_at`, and character-offset `source_location` for both Baseline and Network.
-  - `AllowlistedHttpRetriever` (disabled by default via `CREWFORGE_ENABLE_HTTP_RETRIEVAL=false`) enforces HTTPS-only explicit host allowlists, public-IP SSRF/DNS-rebinding checks, `follow_redirects=False`, response size/type limits, and credential isolation. No open-web search backend exists in Phase 4.
-- **Provider Portability (`openai`, `openai_compatible`, `ollama`):**
-  - Explicit `CREWFORGE_OPENAI_REASONING_EFFORT` support (`none`, `low`, `medium`, `high`, `xhigh`, `max`) omits incompatible `temperature` on reasoning models (`gpt-6-luna`); `openai_compatible` uses operator-supplied `CREWFORGE_OPENAI_BASE_URL` via Chat Completions with fail-closed pricing. (Anthropic/Gemini protocols are not implemented.)
-- **Adaptive Execution & Strong Fair Baselines:**
-  - Concise claim/requirement aliases (`c1`, `up_1`, `req_1`), bounded claims/worker, selective follow-ups, and a Gate-protected deterministic synthesis fast path (`CREWFORGE_ENABLE_DETERMINISTIC_SYNTHESIS_FAST_PATH=true`) skip redundant synthesis calls when all requirements are covered cleanly.
-  - Upgraded `BaselineRunner` supports deterministic arithmetic parity, equal document ingestion (`--doc`), and optional `--compute-matched` single-agent self-check refinement without spawning specialists or reviewers.
+- **Unified Persistent Budget Authority & Reserve Protection (`core/budget.py`):**
+  - Standalone canonical ledger (`.crewforge/budget_authority.db`) reconciles historical spending from `.crewforge/crewforge.db` and `.crewforge/cloud_dev.db` without double-counting ($0.025516 committed across pilot development).
+  - Enforces the hackathon-mandated $4.00 emergency protected reserve (from $6.10 total OpenAI balance, leaving $2.10 total spendable ceiling) and category caps (`phase5_same_model` max $0.75, `david_vs_goliath` max $1.10).
+  - Conservative unknown-outcome billing and immediate atomic reservations (`BEGIN IMMEDIATE`) ensure strict compliance.
+- **Reproducible Blind Benchmark & Scoring Harness (`evaluation/`, `benchmarks/`):**
+  - Seed-based cryptographic A/B blinding (`anonymize.py`) strips orchestrator tags (`[clm_...]`, `[evd_...]`) so evaluators judge without structural tells.
+  - Normalized 100-point rubric with an explicit negative penalty (-0 to -20) for unsupported assertions or ungrounded empirical claims.
+  - Deterministic objective verification for numerical values (with percentage vs percentage-point distinction), logical constraints, and missing-information identification.
+  - Ablation matrix support (`full`, `no_reviewer`, `no_repair`, `no_peer_messages`).
+- **True Iterative Compute-Matched Baseline (`core/baseline.py`):**
+  - Upgraded `BaselineRunner` features an iterative single-agent critique and refinement loop (up to 3 rounds) with deterministic arithmetic tool parity, stopping early when no defects remain.
+- **Claim-Locked Honesty Gate & Strict Epistemic Boundaries (`core/honesty_gate.py`):**
+  - Default final answers render verified factual text directly from exact approved ledger `Claim` versions.
+  - Strict category boundaries: unsupported factual claims cannot be laundered under `recommendations` or `conditional_conclusions`; recommendations require supported material premises; auxiliary fields reject unverified numbers and rejected claim echoes.
+- **Safe Portable Demo Trace Export (`core/demo_trace.py`):**
+  - Exports complete historical run traces with credentials sanitized and system errors redacted for public replay.
+- **Small-Model Profile & Deterministic Arithmetic Parity:**
+  - Compact profile for Apple Silicon M1 (concurrency 1, max 2 workers, max 3 tasks, ~4096 context).
+  - Parity arithmetic tool resolving variables to exact prompt/evidence spans with AST literal verification.
 - **MCP Server (`FastMCP`) & CLI:** Exposes `solve(prompt)`, `baseline(prompt)`, and `trace(run_id)` over `stdio` (`stderr`-only logging) and localhost `streamable-http`.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md) for full details.

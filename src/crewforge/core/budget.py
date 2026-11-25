@@ -8,9 +8,14 @@ spending limits in your cloud provider dashboard as well.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import sqlite3
+import threading
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -44,7 +49,425 @@ class BudgetReservation(BaseModel):
     estimated_input_tokens: int = Field(ge=0)
     max_output_tokens: int = Field(ge=1)
     call_units: int = Field(default=1, ge=1)
+    allocation_category: str = Field(default="general")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class UnifiedBudgetAuthority:
+    """Canonical cross-database persistent budget authority and spend guard."""
+
+    _instances: dict[str, UnifiedBudgetAuthority] = {}
+    _lock = threading.Lock()
+
+    def __init__(
+        self,
+        authority_path: str | Path | None = None,
+        settings: CrewForgeSettings | None = None,
+    ) -> None:
+        self._settings = settings or CrewForgeSettings()
+        raw_path = authority_path or self._settings.budget_authority_path
+        self.authority_path = Path(raw_path)
+        self._db_lock = threading.Lock()
+        self._initialize_sync()
+
+    @classmethod
+    def get_instance(
+        cls,
+        settings: CrewForgeSettings | None = None,
+        authority_path: str | Path | None = None,
+    ) -> UnifiedBudgetAuthority:
+        cfg = settings or CrewForgeSettings()
+        path_str = str(authority_path or cfg.budget_authority_path)
+        with cls._lock:
+            if path_str not in cls._instances:
+                cls._instances[path_str] = cls(authority_path=path_str, settings=cfg)
+            return cls._instances[path_str]
+
+    def _initialize_sync(self) -> None:
+        with self._db_lock:
+            if str(self.authority_path) != ":memory:":
+                self.authority_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self.authority_path))
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS canonical_budget_ledger (
+                    reservation_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reserved_cost_usd REAL NOT NULL,
+                    actual_cost_usd REAL,
+                    reserved_calls INTEGER NOT NULL DEFAULT 1,
+                    retries INTEGER NOT NULL DEFAULT 0,
+                    allocation_category TEXT NOT NULL DEFAULT 'general',
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_canonical_budget_status
+                ON canonical_budget_ledger(status, provider, allocation_category);
+                """
+            )
+            # Reconcile historical reservations from existing trace databases
+            # without double-counting.
+            candidate_dbs = [
+                Path(".crewforge/crewforge.db"),
+                Path(".crewforge/cloud_dev.db"),
+            ]
+            for c_path in candidate_dbs:
+                if c_path.exists() and str(c_path.resolve()) != str(self.authority_path.resolve()):
+                    try:
+                        src_conn = sqlite3.connect(str(c_path))
+                        src_conn.row_factory = sqlite3.Row
+                        tbl_exists = src_conn.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='budget_reservations'"
+                        ).fetchone()
+                        if tbl_exists:
+                            rows = src_conn.execute(
+                                """
+                                SELECT reservation_id, run_id, provider, model, reserved_cost_usd,
+                                       actual_cost_usd, reserved_calls, retries, status, notes,
+                                       created_at, updated_at
+                                FROM budget_reservations
+                                """
+                            ).fetchall()
+                            for r in rows:
+                                conn.execute(
+                                    """
+                                    INSERT INTO canonical_budget_ledger (
+                                        reservation_id, run_id, provider, model, status,
+                                        reserved_cost_usd, actual_cost_usd, reserved_calls,
+                                        retries, allocation_category, notes, created_at, updated_at
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'phase4_pilots', ?, ?, ?)
+                                    ON CONFLICT(reservation_id) DO UPDATE SET
+                                        actual_cost_usd = COALESCE(
+                                            excluded.actual_cost_usd,
+                                            canonical_budget_ledger.actual_cost_usd
+                                        ),
+                                        status = excluded.status,
+                                        updated_at = excluded.updated_at
+                                    """,
+                                    (
+                                        r["reservation_id"],
+                                        r["run_id"],
+                                        r["provider"],
+                                        r["model"],
+                                        r["status"],
+                                        float(r["reserved_cost_usd"]),
+                                        float(r["actual_cost_usd"])
+                                        if r["actual_cost_usd"] is not None
+                                        else None,
+                                        int(r["reserved_calls"]),
+                                        int(r["retries"]),
+                                        r["notes"],
+                                        r["created_at"],
+                                        r["updated_at"],
+                                    ),
+                                )
+                        src_conn.close()
+                    except Exception:
+                        pass
+            conn.commit()
+            conn.close()
+
+    def reserve_sync(
+        self,
+        *,
+        reservation_id: str,
+        run_id: str,
+        provider: str,
+        model: str,
+        is_paid_provider: bool,
+        estimated_cost_usd: float,
+        call_units: int = 1,
+        allocation_category: str = "general",
+    ) -> None:
+        """Atomically enforce protected reserve and allocation caps in canonical ledger."""
+        now = datetime.now(UTC).isoformat()
+        with self._db_lock:
+            conn = sqlite3.connect(str(self.authority_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                if is_paid_provider:
+                    # 1. Global protected reserve check ($6.10 - $4.00 = $2.10 spendable ceiling)
+                    max_spendable = max(
+                        0.0,
+                        self._settings.total_budget_ceiling_usd
+                        - self._settings.protected_reserve_usd,
+                    )
+                    cum_row = conn.execute(
+                        """
+                        SELECT COALESCE(SUM(
+                            CASE
+                                WHEN status = 'reserved' THEN reserved_cost_usd
+                                WHEN status IN ('reconciled', 'unknown')
+                                    THEN COALESCE(actual_cost_usd, reserved_cost_usd)
+                                ELSE 0.0
+                            END
+                        ), 0.0) AS total_committed
+                        FROM canonical_budget_ledger
+                        WHERE provider != 'ollama'
+                        """
+                    ).fetchone()
+                    total_committed = float(cum_row["total_committed"]) if cum_row else 0.0
+
+                    if total_committed + estimated_cost_usd > max_spendable + 1e-12:
+                        res_usd = self._settings.protected_reserve_usd
+                        commit_val = total_committed + estimated_cost_usd
+                        raise BudgetConstraintError(
+                            "Protected global reserve violation: commitment "
+                            f"${commit_val:.6f} would exceed allowable spend "
+                            f"${max_spendable:.2f} (leaving less than ${res_usd:.2f} reserve)."
+                        )
+
+                    # 2. Allocation category caps
+                    if allocation_category == "phase5_same_model":
+                        cat_row = conn.execute(
+                            """
+                            SELECT COALESCE(SUM(
+                                CASE
+                                    WHEN status = 'reserved' THEN reserved_cost_usd
+                                    WHEN status IN ('reconciled', 'unknown')
+                                        THEN COALESCE(actual_cost_usd, reserved_cost_usd)
+                                    ELSE 0.0
+                                END
+                            ), 0.0) AS cat_committed
+                            FROM canonical_budget_ledger
+                            WHERE allocation_category = 'phase5_same_model' AND provider != 'ollama'
+                            """
+                        ).fetchone()
+                        cat_committed = float(cat_row["cat_committed"]) if cat_row else 0.0
+                        if (
+                            cat_committed + estimated_cost_usd
+                            > self._settings.phase5_same_model_budget_cap_usd + 1e-12
+                        ):
+                            raise BudgetConstraintError(
+                                f"Phase 5 same-model benchmarking allocation cap exceeded: "
+                                f"${cat_committed:.6f} + ${estimated_cost_usd:.6f} > "
+                                f"${self._settings.phase5_same_model_budget_cap_usd:.2f}."
+                            )
+                    elif allocation_category == "david_vs_goliath":
+                        cat_row = conn.execute(
+                            """
+                            SELECT COALESCE(SUM(
+                                CASE
+                                    WHEN status = 'reserved' THEN reserved_cost_usd
+                                    WHEN status IN ('reconciled', 'unknown')
+                                        THEN COALESCE(actual_cost_usd, reserved_cost_usd)
+                                    ELSE 0.0
+                                END
+                            ), 0.0) AS cat_committed
+                            FROM canonical_budget_ledger
+                            WHERE allocation_category = 'david_vs_goliath' AND provider != 'ollama'
+                            """
+                        ).fetchone()
+                        cat_committed = float(cat_row["cat_committed"]) if cat_row else 0.0
+                        if (
+                            cat_committed + estimated_cost_usd
+                            > self._settings.david_vs_goliath_budget_cap_usd + 1e-12
+                        ):
+                            raise BudgetConstraintError(
+                                f"David vs Goliath allocation cap exceeded: "
+                                f"${cat_committed:.6f} + ${estimated_cost_usd:.6f} > "
+                                f"${self._settings.david_vs_goliath_budget_cap_usd:.2f}."
+                            )
+
+                conn.execute(
+                    """
+                    INSERT INTO canonical_budget_ledger (
+                        reservation_id, run_id, provider, model, status,
+                        reserved_cost_usd, actual_cost_usd, reserved_calls,
+                        retries, allocation_category, notes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'reserved', ?, NULL, ?, 0, ?, NULL, ?, ?)
+                    ON CONFLICT(reservation_id) DO UPDATE SET
+                        reserved_cost_usd = excluded.reserved_cost_usd,
+                        reserved_calls = excluded.reserved_calls,
+                        allocation_category = excluded.allocation_category,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        reservation_id,
+                        run_id,
+                        provider,
+                        model,
+                        estimated_cost_usd,
+                        call_units,
+                        allocation_category,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def reconcile_sync(
+        self,
+        *,
+        reservation_id: str,
+        status: str,
+        actual_cost_usd: float | None,
+        retries: int = 0,
+        notes: str | None = None,
+    ) -> None:
+        """Update reservation outcome atomically in the canonical ledger."""
+        now = datetime.now(UTC).isoformat()
+        with self._db_lock:
+            conn = sqlite3.connect(str(self.authority_path))
+            try:
+                conn.execute(
+                    """
+                    UPDATE canonical_budget_ledger
+                    SET status = ?, actual_cost_usd = ?, retries = ?, notes = ?, updated_at = ?
+                    WHERE reservation_id = ?
+                    """,
+                    (status, actual_cost_usd, retries, notes, now, reservation_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_summary_sync(self) -> dict[str, Any]:
+        """Compute canonical spending totals, reserve health, and category breakdown."""
+        with self._db_lock:
+            conn = sqlite3.connect(str(self.authority_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                totals = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(
+                            CASE
+                                WHEN status = 'reserved' THEN reserved_cost_usd
+                                WHEN status IN ('reconciled', 'unknown')
+                                    THEN COALESCE(actual_cost_usd, reserved_cost_usd)
+                                ELSE 0.0
+                            END
+                        ), 0.0) AS committed_cost,
+                        COALESCE(SUM(
+                            CASE WHEN status = 'reconciled'
+                                THEN COALESCE(actual_cost_usd, 0.0)
+                                ELSE 0.0
+                            END
+                        ), 0.0) AS reconciled_cost,
+                        COALESCE(SUM(
+                            CASE WHEN status = 'unknown'
+                                THEN COALESCE(actual_cost_usd, reserved_cost_usd)
+                                ELSE 0.0
+                            END
+                        ), 0.0) AS unknown_cost,
+                        COALESCE(SUM(reserved_calls), 0) AS total_calls,
+                        COUNT(*) AS total_records
+                    FROM canonical_budget_ledger
+                    WHERE provider != 'ollama'
+                    """
+                ).fetchone()
+
+                cat_rows = conn.execute(
+                    """
+                    SELECT
+                        allocation_category,
+                        COUNT(*) AS cnt,
+                        COALESCE(SUM(
+                            CASE
+                                WHEN status = 'reserved' THEN reserved_cost_usd
+                                WHEN status IN ('reconciled', 'unknown')
+                                    THEN COALESCE(actual_cost_usd, reserved_cost_usd)
+                                ELSE 0.0
+                            END
+                        ), 0.0) AS committed
+                    FROM canonical_budget_ledger
+                    WHERE provider != 'ollama'
+                    GROUP BY allocation_category
+                    """
+                ).fetchall()
+
+                category_spending = {
+                    r["allocation_category"]: round(float(r["committed"]), 6) for r in cat_rows
+                }
+
+                committed = float(totals["committed_cost"]) if totals else 0.0
+                reconciled = float(totals["reconciled_cost"]) if totals else 0.0
+                unknown = float(totals["unknown_cost"]) if totals else 0.0
+                calls = int(totals["total_calls"]) if totals else 0
+                records = int(totals["total_records"]) if totals else 0
+
+                max_spendable = max(
+                    0.0,
+                    self._settings.total_budget_ceiling_usd - self._settings.protected_reserve_usd,
+                )
+                spendable_remaining = max(0.0, max_spendable - committed)
+                protected_reserve = self._settings.protected_reserve_usd
+
+                return {
+                    "authority_db": str(self.authority_path),
+                    "total_budget_ceiling_usd": self._settings.total_budget_ceiling_usd,
+                    "protected_reserve_usd": protected_reserve,
+                    "max_spendable_usd": max_spendable,
+                    "cumulative_committed_cost_usd": round(committed, 6),
+                    "cumulative_reconciled_cost_usd": round(reconciled, 6),
+                    "cumulative_unknown_cost_usd": round(unknown, 6),
+                    "spendable_remaining_usd": round(spendable_remaining, 6),
+                    "cumulative_dispatched_calls": calls,
+                    "canonical_ledger_records": records,
+                    "category_spending": category_spending,
+                }
+            finally:
+                conn.close()
+
+    async def reserve(
+        self,
+        *,
+        reservation_id: str,
+        run_id: str,
+        provider: str,
+        model: str,
+        is_paid_provider: bool,
+        estimated_cost_usd: float,
+        call_units: int = 1,
+        allocation_category: str = "general",
+    ) -> None:
+        await asyncio.to_thread(
+            self.reserve_sync,
+            reservation_id=reservation_id,
+            run_id=run_id,
+            provider=provider,
+            model=model,
+            is_paid_provider=is_paid_provider,
+            estimated_cost_usd=estimated_cost_usd,
+            call_units=call_units,
+            allocation_category=allocation_category,
+        )
+
+    async def reconcile(
+        self,
+        *,
+        reservation_id: str,
+        status: str,
+        actual_cost_usd: float | None,
+        retries: int = 0,
+        notes: str | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self.reconcile_sync,
+            reservation_id=reservation_id,
+            status=status,
+            actual_cost_usd=actual_cost_usd,
+            retries=retries,
+            notes=notes,
+        )
+
+    async def get_summary(self) -> dict[str, Any]:
+        return await asyncio.to_thread(self.get_summary_sync)
 
 
 def estimate_token_count(text: str) -> int:
@@ -69,12 +492,14 @@ class BudgetManager:
         database: Database,
         settings: CrewForgeSettings,
         pricing_overrides: dict[str, ModelPricing] | None = None,
+        authority: UnifiedBudgetAuthority | None = None,
     ) -> None:
         self._db = database
         self._settings = settings
         self._pricing: dict[str, ModelPricing] = dict(settings.pricing_json)
         if pricing_overrides:
             self._pricing.update(pricing_overrides)
+        self._authority = authority or UnifiedBudgetAuthority.get_instance(settings=settings)
 
     def get_pricing(self, model: str) -> ModelPricing | None:
         """Return configured pricing for a model if available."""
@@ -147,6 +572,7 @@ class BudgetManager:
         response_schema_json: str | None = None,
         max_output_tokens: int | None = None,
         call_units: int = 1,
+        allocation_category: str = "general",
     ) -> BudgetReservation:
         """Atomically check run/cumulative caps and persist a single-attempt reservation."""
         if is_paid_provider and not self._settings.allow_paid_runs:
@@ -182,8 +608,26 @@ class BudgetManager:
             estimated_input_tokens=estimated_input,
             max_output_tokens=max_out,
             call_units=call_units,
+            allocation_category=allocation_category,
         )
 
+        # 1. Authority-level check across all trace databases and protected reserve
+        if is_paid_provider:
+            try:
+                await self._authority.reserve(
+                    reservation_id=reservation.reservation_id,
+                    run_id=run_id,
+                    provider=provider,
+                    model=model,
+                    is_paid_provider=True,
+                    estimated_cost_usd=reserved_cost,
+                    call_units=call_units,
+                    allocation_category=allocation_category,
+                )
+            except BudgetConstraintError as exc:
+                raise BudgetExceededError(str(exc)) from exc
+
+        # 2. Local trace-level reservation
         try:
             await self._db.reserve_budget(
                 reservation_id=reservation.reservation_id,
@@ -197,6 +641,13 @@ class BudgetManager:
                 call_units=call_units,
             )
         except BudgetConstraintError as exc:
+            if is_paid_provider:
+                await self._authority.reconcile(
+                    reservation_id=reservation.reservation_id,
+                    status="released",
+                    actual_cost_usd=0.0,
+                    notes="Rejected by run-local budget caps.",
+                )
             raise BudgetExceededError(str(exc)) from exc
 
         return reservation
@@ -249,6 +700,14 @@ class BudgetManager:
             outcome=outcome,
             notes=notes,
         )
+        if reservation.is_paid_provider:
+            await self._authority.reconcile(
+                reservation_id=reservation.reservation_id,
+                status=status,
+                actual_cost_usd=actual_cost,
+                retries=reconciled_usage.retries,
+                notes=notes,
+            )
         return reconciled_usage
 
     async def reconcile_failure(
@@ -294,7 +753,18 @@ class BudgetManager:
             outcome=outcome,
             notes=safe_reason,
         )
+        if reservation.is_paid_provider:
+            await self._authority.reconcile(
+                reservation_id=reservation.reservation_id,
+                status=status,
+                actual_cost_usd=actual_cost,
+                retries=retries,
+                notes=safe_reason,
+            )
 
     async def get_summary(self, run_id: str | None = None) -> dict[str, object]:
         """Return persistent budget summary for a run and cumulatively."""
-        return await self._db.get_budget_summary(run_id=run_id)
+        local_sum = await self._db.get_budget_summary(run_id=run_id)
+        auth_sum = await self._authority.get_summary()
+        local_sum["unified_authority"] = auth_sum
+        return local_sum

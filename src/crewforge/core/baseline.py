@@ -8,7 +8,7 @@ import time
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from crewforge.config import CrewForgeSettings, ProviderType, sanitize_error_message
 from crewforge.core.budget import BudgetError, BudgetExceededError, BudgetManager
@@ -39,6 +39,44 @@ BASELINE_SYSTEM_PROMPT = (
     "4. Ground factual statements strictly in the user prompt and any provided reference "
     "documents; identify genuine missing information directly without excessive abstention."
 )
+
+
+class BaselineCritiqueOutput(BaseModel):
+    """Single-agent iterative critique of its own draft answer."""
+
+    unanswered_requirements: list[str] = Field(
+        default_factory=list,
+        description="Requirements from user request not yet fully addressed.",
+    )
+    arithmetic_issues: list[str] = Field(
+        default_factory=list,
+        description="Calculations needing re-evaluation or verification.",
+    )
+    missing_context_or_assumptions: list[str] = Field(
+        default_factory=list,
+        description="Gaps in stated assumptions or missing context.",
+    )
+    is_fully_satisfied: bool = Field(
+        default=False,
+        description="True iff the answer thoroughly and accurately satisfies all requirements.",
+    )
+    computations: list[ArithmeticRequest] = Field(
+        default_factory=list,
+        description="Additional arithmetic operations needed to resolve issues.",
+    )
+    refined_answer: str = Field(
+        min_length=1, description="Refined answer incorporating self-checks."
+    )
+    missing_information: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    confidence_notes: str | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_answer(cls, data: object) -> object:
+        if isinstance(data, dict) and not data.get("refined_answer") and data.get("answer"):
+            data["refined_answer"] = data["answer"]
+        return data
 
 
 class BaselineModelOutput(BaseModel):
@@ -226,31 +264,89 @@ class BaselineRunner:
                     last_returned_model = followup_res.returned_model or last_returned_model
 
             if resolved_compute_matched:
-                tools_blob = (
-                    json.dumps(tool_summaries, ensure_ascii=False, indent=2)
-                    if tool_summaries
-                    else "None."
-                )
-                critique_prompt = (
-                    f"Original user request:\n{cleaned_prompt}\n\n"
-                    f"Your current response:\n{parsed.model_dump_json(indent=2)}\n\n"
-                    f"Deterministic tool results verified so far:\n{tools_blob}\n\n"
-                    "Perform a single-agent self-check across every user requirement, verify all "
-                    "numbers and missing-context gaps, fix any internal contradiction, and return "
-                    "the refined final structured response (keep needs_tool_followup=false)."
-                )
-                critique_res = await self._executor.execute_structured(
-                    run_id=resolved_run_id,
-                    actor="baseline",
-                    operation="baseline",
-                    prompt=critique_prompt,
-                    response_model=BaselineModelOutput,
-                    system_prompt=BASELINE_SYSTEM_PROMPT,
-                    max_output_tokens=self._settings.max_output_tokens,
-                    timeout_seconds=self._settings.request_timeout_seconds,
-                )
-                parsed = critique_res.parsed
-                last_returned_model = critique_res.returned_model or last_returned_model
+                max_refinement_rounds = 3
+                for round_idx in range(1, max_refinement_rounds + 1):
+                    tools_blob = (
+                        json.dumps(tool_summaries, ensure_ascii=False, indent=2)
+                        if tool_summaries
+                        else "None."
+                    )
+                    assumptions_blob = json.dumps(parsed.assumptions, ensure_ascii=False)
+                    missing_blob = json.dumps(parsed.missing_information, ensure_ascii=False)
+                    critique_prompt = (
+                        f"Original user request:\n{cleaned_prompt}\n\n"
+                        f"Your current draft answer:\n{parsed.answer}\n\n"
+                        f"Current assumptions:\n{assumptions_blob}\n\n"
+                        f"Current missing information:\n{missing_blob}\n\n"
+                        f"Deterministic tool results verified so far:\n{tools_blob}\n\n"
+                        f"Critique Round {round_idx} of {max_refinement_rounds}:\n"
+                        "Perform an iterative single-agent critique of your own answer. "
+                        "Check for unanswered sub-questions, calculation mistakes, "
+                        "ungrounded numbers, or unstated assumptions. "
+                        "If additional calculations are needed, list them in `computations`. "
+                        "If the answer is completely solid and covers all requirements, "
+                        "set `is_fully_satisfied=true`. "
+                        "Provide your refined answer in `refined_answer`."
+                    )
+                    critique_res = await self._executor.execute_structured(
+                        run_id=resolved_run_id,
+                        actor="baseline",
+                        operation="baseline",
+                        prompt=critique_prompt,
+                        response_model=BaselineCritiqueOutput,
+                        system_prompt=BASELINE_SYSTEM_PROMPT,
+                        max_output_tokens=self._settings.max_output_tokens,
+                        timeout_seconds=self._settings.request_timeout_seconds,
+                    )
+                    critique_out: BaselineCritiqueOutput = critique_res.parsed
+                    last_returned_model = critique_res.returned_model or last_returned_model
+
+                    # Evaluate any new arithmetic requests emitted in critique
+                    for req in critique_out.computations:
+                        rec = await self._arithmetic.execute(
+                            run_id=resolved_run_id,
+                            actor="baseline",
+                            request=req,
+                            catalog=catalog,
+                        )
+                        tool_summaries.append(tool_record_to_dict(rec))
+
+                    parsed = BaselineModelOutput(
+                        answer=critique_out.refined_answer,
+                        missing_information=critique_out.missing_information
+                        or parsed.missing_information,
+                        assumptions=critique_out.assumptions or parsed.assumptions,
+                        confidence_notes=critique_out.confidence_notes or parsed.confidence_notes,
+                        computations=[],
+                        needs_tool_followup=False,
+                    )
+
+                    await self._db.append_event(
+                        ExecutionEvent(
+                            run_id=resolved_run_id,
+                            event_type="compute_matched_iteration",
+                            actor="baseline",
+                            message=(
+                                f"Refinement iteration {round_idx}/{max_refinement_rounds} done."
+                            ),
+                            payload={
+                                "round": round_idx,
+                                "is_fully_satisfied": critique_out.is_fully_satisfied,
+                                "unanswered_requirements": critique_out.unanswered_requirements,
+                                "arithmetic_issues": critique_out.arithmetic_issues,
+                            },
+                        )
+                    )
+
+                    has_defects = bool(
+                        critique_out.unanswered_requirements
+                        or critique_out.arithmetic_issues
+                        or critique_out.computations
+                    )
+                    if (
+                        critique_out.is_fully_satisfied or not has_defects
+                    ) and not critique_out.computations:
+                        break
 
             total_latency_ms = (time.perf_counter() - start_perf) * 1000.0
             aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)

@@ -205,6 +205,7 @@ class HonestyGate:
             cver: int,
             *,
             require_supported: bool,
+            expected_segment_type: str | None = None,
         ) -> tuple[Claim | None, str | None]:
             if (cid, cver) not in claims_by_key:
                 return None, f"Unknown or cross-run claim reference '{cid}' v{cver}."
@@ -218,20 +219,84 @@ class HonestyGate:
                 return None, f"Claim '{cid}' v{cver} is stale pending re-review."
             if latest.status == ClaimStatus.REJECTED:
                 return None, f"Claim '{cid}' v{cver} was rejected."
+
             for pref in latest.premise_refs:
                 p_latest = latest_by_id.get(pref.claim_id)
                 if (
                     p_latest is None
                     or p_latest.version != pref.claim_version
                     or p_latest.status in {ClaimStatus.REJECTED, ClaimStatus.STALE}
-                    or (
-                        p_latest.is_material
-                        and require_supported
-                        and p_latest.status != ClaimStatus.SUPPORTED
-                    )
                 ):
                     return None, (
                         f"Claim '{cid}' depends on unverified/stale premise '{pref.claim_id}'."
+                    )
+                if (
+                    p_latest.is_material
+                    and require_supported
+                    and p_latest.status != ClaimStatus.SUPPORTED
+                ):
+                    return None, (
+                        f"Claim '{cid}' depends on unsupported material premise '{pref.claim_id}'."
+                    )
+                if (
+                    expected_segment_type == "recommendation"
+                    and p_latest.is_material
+                    and p_latest.status != ClaimStatus.SUPPORTED
+                ):
+                    return None, (
+                        f"Recommendation '{cid}' depends on unsupported "
+                        f"material premise '{pref.claim_id}'."
+                    )
+
+            if expected_segment_type == "recommendation":
+                if (
+                    latest.category != ClaimCategory.RECOMMENDATION
+                    and latest.status != ClaimStatus.SUPPORTED
+                ):
+                    return (
+                        None,
+                        f"Unsupported factual claim '{cid}' cannot be released "
+                        "under recommendations.",
+                    )
+                if latest.category == ClaimCategory.RECOMMENDATION:
+                    rec_nums = extract_numbers_from_text(latest.statement)
+                    extra_rec_nums = [n for n in rec_nums if n not in allowed_numbers]
+                    if extra_rec_nums:
+                        return (
+                            None,
+                            f"Recommendation '{cid}' contains unverified "
+                            f"number(s): {extra_rec_nums[:2]}.",
+                        )
+                    c_verdicts = verdicts_by_key.get((cid, cver), [])
+                    if any(
+                        v.decision in {ReviewDecision.REJECT, ReviewDecision.NEEDS_REVISION}
+                        for v in c_verdicts
+                    ):
+                        return None, f"Recommendation '{cid}' v{cver} was rejected in review."
+
+            if expected_segment_type == "conditional_conclusion":
+                factual_cats = {
+                    ClaimCategory.GIVEN_FACT,
+                    ClaimCategory.COMPUTATION,
+                    ClaimCategory.EXTERNAL_FACT,
+                }
+                if (
+                    latest.category in factual_cats
+                    and latest.status != ClaimStatus.SUPPORTED
+                    and not latest.assumptions
+                ):
+                    return (
+                        None,
+                        f"Unverified factual claim '{cid}' cannot be released "
+                        "without explicit conditional assumptions.",
+                    )
+                cond_nums = extract_numbers_from_text(latest.statement)
+                extra_cond_nums = [n for n in cond_nums if n not in allowed_numbers]
+                if extra_cond_nums:
+                    return (
+                        None,
+                        f"Conditional conclusion '{cid}' contains unverified "
+                        f"number(s): {extra_cond_nums[:2]}.",
                     )
 
             if require_supported:
@@ -350,6 +415,7 @@ class HonestyGate:
                     ref.claim_id,
                     ref.claim_version,
                     require_supported=False,
+                    expected_segment_type="conditional_conclusion",
                 )
                 if err is not None:
                     seg_error = err
@@ -395,6 +461,7 @@ class HonestyGate:
                     ref.claim_id,
                     ref.claim_version,
                     require_supported=False,
+                    expected_segment_type="recommendation",
                 )
                 if err is not None:
                     seg_error = err
@@ -637,7 +704,9 @@ class HonestyGate:
             lines = ["**Conditional / Qualified Statements:**"]
             for seg, claims in approved_conditional:
                 refs = ", ".join(f"{c.claim_id}@v{c.version} ({c.status.value})" for c in claims)
-                lines.append(f"- {seg.text} [{refs}]")
+                cond_assumps = [a for c in claims for a in c.assumptions if a]
+                assump_suffix = f" (assumes: {', '.join(cond_assumps)})" if cond_assumps else ""
+                lines.append(f"- {seg.text}{assump_suffix} [{refs}]")
             sections.append("\n".join(lines))
 
         if approved_recommendations:

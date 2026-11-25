@@ -133,6 +133,7 @@ class SpecialistWorker:
             agent_labels=agent_labels,
             peer_directory=peer_directory,
             provenance_lines=prov_catalog.prompt_summary_lines(),
+            user_requirements=plan.user_requirements,
         )
 
         response = await self._executor.execute_structured(

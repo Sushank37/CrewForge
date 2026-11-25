@@ -166,6 +166,7 @@ def build_provenance_catalog(
         catalog.prompt_clauses.append(target)
         catalog.targets_by_key[alias] = target
 
+    doc_source_texts: dict[str, list[str]] = {}
     for idx, evd in enumerate(verified_evidence or [], start=1):
         doc_alias = f"doc_{idx}"
         is_ok = bool(evd.verified_in_input)
@@ -180,8 +181,25 @@ def build_provenance_catalog(
         )
         catalog.targets_by_key[evd.evidence_id] = target
         catalog.targets_by_key[doc_alias] = target
-        if evd.source_ref and evd.source_ref not in catalog.targets_by_key:
-            catalog.targets_by_key[evd.source_ref] = target
+        if evd.source_ref:
+            if evd.source_ref not in catalog.targets_by_key:
+                catalog.targets_by_key[evd.source_ref] = target
+            doc_source_texts.setdefault(evd.source_ref, []).append(evd.excerpt)
+
+    # If any document has multiple chunks, build an aggregate target under source_ref and doc_1
+    for source_ref, excerpts in doc_source_texts.items():
+        if len(excerpts) > 1:
+            full_text = "\n\n".join(excerpts)
+            agg_target = ProvenanceTarget(
+                alias=source_ref,
+                kind="verified_evidence",
+                target_id=source_ref,
+                text=full_text,
+                is_trusted=True,
+            )
+            catalog.targets_by_key[source_ref] = agg_target
+            if "doc_1" in catalog.targets_by_key and len(doc_source_texts) == 1:
+                catalog.targets_by_key["doc_1"] = agg_target
 
     # Compute latest version per claim_id to detect stale claim versions immediately.
     latest_ver_by_id: dict[str, int] = {}
@@ -853,6 +871,7 @@ class DeterministicArithmeticTool:
                 if lit not in {Decimal(0), Decimal(1)}
                 and not (lit == Decimal(100) and is_percent_expr)
                 and format_decimal(lit) not in request.input_provenance_refs
+                and not any(_decimals_match(lit, v) for v in parsed_vars.values())
             ]
             has_ungrounded_literals = bool(ungrounded_literals)
 

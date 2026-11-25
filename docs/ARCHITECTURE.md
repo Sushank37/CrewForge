@@ -57,3 +57,17 @@ All baseline, planner, worker, follow-up, reviewer, repair, and synthesis invoca
 - Automated verification constrains fabricated numbers, self-reviews, and claim rewrites, but subtle conceptual errors inside natural-language claims approved by reviewers can still pass.
 - No open-web search exists; external assertions without supplied documents remain `unverified` (`external_unverified`) when HTTP retrieval is disabled or blocked.
 - Internal `requirement_coverage` reflects claim-to-requirement linkage within CrewForge and is explicitly separated from independent correctness grading (`independent_grade=None`).
+- Transport-layer continuous IP pinning is not implemented; pre-connect SSRF checks protect against intranet exfiltration.
+
+## 7. Phase 5 Unified Budget Authority & Epistemic Enforcement
+
+- **Canonical Budget Authority (`.crewforge/budget_authority.db`):** Reconciles past reservations from `.crewforge/crewforge.db` and `.crewforge/cloud_dev.db` by unique `reservation_id` (preventing double counting). Enforces the hackathon-mandated $4.00 emergency protected reserve (from $6.10 balance) and hard category caps (`phase5_same_model` max $0.75, `david_vs_goliath` max $1.10).
+- **Epistemic Category Enforcement:** Honesty Gate prevents unsupported factual claims from being released under `recommendations` or `conditional_conclusions`. Recommendations require verified/supported material premises. Conditional conclusions must explicitly declare assumptions. Auxiliary fields reject unverified numbers and echoes of rejected claims.
+- **Robust Document Chunking & Provenance:** Documents are chunked without mid-word slicing, and multi-chunk documents are aliased cleanly to `doc_1..doc_N` so Arithmetic provenance checks ground expressions accurately across document bodies.
+
+## 8. Blind Benchmark Evaluation & Safe Trace Export
+
+- **Cryptographic A/B Blinding:** Evaluators review blind packets with internal claim/evidence tags stripped, ensuring zero judge bias between single-agent and multi-agent outputs.
+- **100-Point Scoring & Penalty:** Programmatic objective checks (exact numbers, percentages vs percentage points, logical restrictions, missing info) combined with a 100-point rubric and an explicit negative penalty (-0 to -20) for unsupported assertions.
+- **True Iterative Baseline:** `BaselineRunner` implements multi-round self-critique (`BaselineCritiqueOutput`, up to 3 rounds) with deterministic arithmetic parity, stopping early when no defects remain.
+- **Safe Trace Replay:** `export_demo_trace` produces sanitized JSON execution logs with API keys and system paths stripped.

@@ -62,6 +62,15 @@ class ProviderType(StrEnum):
     OLLAMA = "ollama"
 
 
+class BudgetAllocationCategory(StrEnum):
+    """Budget authorization categories for tracking and allocation ceilings."""
+
+    GENERAL = "general"
+    PHASE4_PILOTS = "phase4_pilots"
+    PHASE5_SAME_MODEL = "phase5_same_model"
+    DAVID_VS_GOLIATH = "david_vs_goliath"
+
+
 class ModelPricing(BaseModel):
     """Per-1M-token USD pricing for a configured model."""
 
@@ -73,6 +82,12 @@ class ModelPricing(BaseModel):
         if input_tokens < 0 or output_tokens < 0:
             raise ValueError("Token counts must be non-negative.")
         return (input_tokens * self.input_per_1m + output_tokens * self.output_per_1m) / 1_000_000.0
+
+
+DEFAULT_MODEL_PRICING: dict[str, ModelPricing] = {
+    "gpt-6-luna": ModelPricing(input_per_1m=0.10, output_per_1m=0.50),
+    "gpt-6.2-astra": ModelPricing(input_per_1m=8.00, output_per_1m=40.00),
+}
 
 
 class CrewForgeSettings(BaseSettings):
@@ -129,6 +144,13 @@ class CrewForgeSettings(BaseSettings):
     max_model_calls_per_run: int = Field(default=16, ge=1, le=200)
     max_cost_per_run_usd: float = Field(default=0.05, ge=0.0)
     max_cumulative_cost_usd: float = Field(default=1.00, ge=0.0)
+
+    budget_authority_path: Path = Path(".crewforge/budget_authority.db")
+    protected_reserve_usd: float = Field(default=4.00, ge=0.0)
+    total_budget_ceiling_usd: float = Field(default=6.10, ge=0.0)
+    phase5_same_model_budget_cap_usd: float = Field(default=0.75, ge=0.0)
+    david_vs_goliath_budget_cap_usd: float = Field(default=1.10, ge=0.0)
+    small_model_profile: bool = False
 
     pricing_json: dict[str, ModelPricing] = Field(default_factory=dict)
 
@@ -206,23 +228,36 @@ class CrewForgeSettings(BaseSettings):
     @property
     def effective_max_concurrency(self) -> int:
         """Default local Ollama concurrency to 1 unless explicitly configured."""
+        if self.small_model_profile:
+            return 1
         if self.provider == ProviderType.OLLAMA and "max_concurrency" not in self.model_fields_set:
             return 1
         return self.max_concurrency
 
     @property
     def effective_max_workers(self) -> int:
-        """Compact local worker bound (3) for Ollama unless explicitly configured."""
+        """Worker bound (2 for small model profile, 3 for Ollama) unless configured."""
+        if self.small_model_profile:
+            return 2
         if self.provider == ProviderType.OLLAMA and "max_workers" not in self.model_fields_set:
             return 3
         return self.max_workers
 
     @property
     def effective_max_tasks(self) -> int:
-        """Compact local task bound (3) for Ollama unless explicitly configured."""
-        if self.provider == ProviderType.OLLAMA and "max_tasks" not in self.model_fields_set:
+        """Compact local task bound (3) for Ollama/small profile unless explicitly configured."""
+        if self.small_model_profile or (
+            self.provider == ProviderType.OLLAMA and "max_tasks" not in self.model_fields_set
+        ):
             return 3
         return self.max_tasks
+
+    @property
+    def effective_max_revision_rounds(self) -> int:
+        """Bounded revision rounds (1 for small model profile)."""
+        if self.small_model_profile:
+            return 1
+        return self.max_revision_rounds
 
     def output_limit_for_operation(self, operation: str) -> int:
         """Return bounded output-token limit for a given operation."""
@@ -242,8 +277,8 @@ class CrewForgeSettings(BaseSettings):
         return min(override, self.max_output_tokens)
 
     def get_model_pricing(self, model: str) -> ModelPricing | None:
-        """Return configured pricing for a model, or None if unknown."""
-        return self.pricing_json.get(model)
+        """Return configured pricing for a model, or default pricing, or None if unknown."""
+        return self.pricing_json.get(model) or DEFAULT_MODEL_PRICING.get(model)
 
     @property
     def effective_db_path(self) -> Path:

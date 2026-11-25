@@ -1,0 +1,171 @@
+{
+  "dev_fin_01": {
+    "prompt_id": "dev_fin_01",
+    "domain": "financial",
+    "factual_correctness_max": 30.0,
+    "requirement_coverage_max": 25.0,
+    "evidence_grounding_max": 20.0,
+    "internal_consistency_max": 15.0,
+    "usefulness_and_uncertainty_max": 10.0,
+    "max_unsupported_assertion_penalty": 20.0,
+    "numerical_checks": [
+      {
+        "variable_name": "simple_payback_period",
+        "expected_value": 24.0,
+        "tolerance": 0.01,
+        "is_percentage": false,
+        "is_percentage_points": false,
+        "expected_units": "months",
+        "points": 15.0,
+        "description": "Simple payback period of 24 months (120,000 / 5,000)."
+      },
+      {
+        "variable_name": "monthly_net_cash_flow",
+        "expected_value": 5000.0,
+        "tolerance": 0.01,
+        "is_percentage": false,
+        "is_percentage_points": false,
+        "expected_units": "",
+        "points": 10.0,
+        "description": "Monthly net cash flow of 5,000 (10,000 - 5,000)."
+      }
+    ],
+    "logical_checks": [
+      {
+        "check_id": "attractiveness_nuance",
+        "description": "Clarifies that positive cash flow alone does not establish overall investment attractiveness.",
+        "required_phrases": ["does not", "alone"],
+        "forbidden_phrases": ["guarantees attractiveness", "proves it is attractive alone"],
+        "required_assumptions_or_conditions": ["constant"],
+        "points": 15.0
+      }
+    ],
+    "missing_info_checks": [
+      {
+        "check_id": "investment_horizons_and_risks",
+        "description": "Identifies missing useful life, required rate of return, or opportunity cost.",
+        "required_missing_concepts": ["useful life", "return"],
+        "points": 10.0
+      }
+    ]
+  },
+  "dev_swe_01": {
+    "prompt_id": "dev_swe_01",
+    "domain": "incident_response",
+    "factual_correctness_max": 30.0,
+    "requirement_coverage_max": 25.0,
+    "evidence_grounding_max": 20.0,
+    "internal_consistency_max": 15.0,
+    "usefulness_and_uncertainty_max": 10.0,
+    "max_unsupported_assertion_penalty": 20.0,
+    "numerical_checks": [],
+    "logical_checks": [
+      {
+        "check_id": "incident_triage_structure",
+        "description": "Structured triage prioritizing blast radius containment before disruptive actions.",
+        "required_phrases": ["mitigation", "trade-off"],
+        "forbidden_phrases": ["100% guarantee", "always restart immediately"],
+        "required_assumptions_or_conditions": [],
+        "points": 20.0
+      }
+    ],
+    "missing_info_checks": [
+      {
+        "check_id": "observability_context",
+        "description": "Identifies missing database engine, topology, baseline metrics, or telemetry.",
+        "required_missing_concepts": ["engine", "telemetry"],
+        "points": 10.0
+      }
+    ]
+  },
+  "dev_sci_01": {
+    "prompt_id": "dev_sci_01",
+    "domain": "causation",
+    "factual_correctness_max": 30.0,
+    "requirement_coverage_max": 25.0,
+    "evidence_grounding_max": 20.0,
+    "internal_consistency_max": 15.0,
+    "usefulness_and_uncertainty_max": 10.0,
+    "max_unsupported_assertion_penalty": 20.0,
+    "numerical_checks": [
+      {
+        "variable_name": "percentage_point_increase",
+        "expected_value": 15.0,
+        "tolerance": 0.01,
+        "is_percentage": false,
+        "is_percentage_points": true,
+        "expected_units": "",
+        "points": 15.0,
+        "description": "Percentage-point increase of 15 (75 - 60)."
+      },
+      {
+        "variable_name": "relative_percentage_increase",
+        "expected_value": 25.0,
+        "tolerance": 0.01,
+        "is_percentage": true,
+        "is_percentage_points": false,
+        "expected_units": "%",
+        "points": 15.0,
+        "description": "Relative percentage increase of 25% ((75 - 60) / 60)."
+      }
+    ],
+    "logical_checks": [
+      {
+        "check_id": "causation_not_established",
+        "description": "Concludes that pass rate change alone does not prove program caused the improvement.",
+        "required_phrases": ["does not prove", "causation"],
+        "forbidden_phrases": ["proves the program caused", "proves causation", "guarantees causation"],
+        "required_assumptions_or_conditions": [],
+        "points": 20.0
+      }
+    ],
+    "missing_info_checks": [
+      {
+        "check_id": "counterfactual_evidence",
+        "description": "Identifies needed evidence such as control group, random assignment, or pre-existing trends.",
+        "required_missing_concepts": ["control", "confounding"],
+        "points": 10.0
+      }
+    ]
+  },
+  "dev_doc_01": {
+    "prompt_id": "dev_doc_01",
+    "domain": "document_grounded",
+    "factual_correctness_max": 30.0,
+    "requirement_coverage_max": 25.0,
+    "evidence_grounding_max": 20.0,
+    "internal_consistency_max": 15.0,
+    "usefulness_and_uncertainty_max": 10.0,
+    "max_unsupported_assertion_penalty": 20.0,
+    "numerical_checks": [
+      {
+        "variable_name": "peak_checkout_qps",
+        "expected_value": 1200.0,
+        "tolerance": 0.01,
+        "is_percentage": false,
+        "is_percentage_points": false,
+        "expected_units": "QPS",
+        "points": 15.0,
+        "description": "Peak checkout QPS of 1,200 (3,000 * 40%)."
+      }
+    ],
+    "logical_checks": [
+      {
+        "check_id": "no_sla_guarantee",
+        "description": "Determines that cross-region failover does not guarantee SLA compliance due to unbenchmarked replication lag.",
+        "required_phrases": ["does not", "lag"],
+        "forbidden_phrases": ["guarantees sla compliance", "guarantees compliance"],
+        "required_assumptions_or_conditions": [],
+        "points": 20.0
+      }
+    ],
+    "missing_info_checks": [
+      {
+        "check_id": "replication_and_sla_thresholds",
+        "description": "Identifies missing benchmark data above 500 writes/sec and SLA latency thresholds.",
+        "required_missing_concepts": ["benchmark", "threshold"],
+        "points": 10.0
+      }
+    ]
+  }
+}

@@ -54,37 +54,138 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _chunk_document(doc: ReferenceDocument, max_chunk_chars: int = 500) -> list[dict[str, Any]]:
-    """Split a reference document into immutable excerpt chunks with exact offsets."""
-    text = doc.content
-    paragraphs = [m for m in re.finditer(r"[^\n]+(?:\n(?![ \t]*\n)[^\n]+)*", text)]
+def _chunk_document(doc: ReferenceDocument, max_chunk_chars: int = 2000) -> list[dict[str, Any]]:
+    """Split a reference document into immutable excerpt chunks preserving word boundaries.
+
+    Documents under max_chunk_chars are kept whole to preserve complete context.
+    Longer documents are chunked along paragraph or sentence boundaries, never slicing words.
+    """
+    text = doc.content.strip()
+    if not text:
+        return []
+    if len(text) <= max_chunk_chars:
+        return [
+            {
+                "doc_id": doc.doc_id,
+                "title": doc.title,
+                "source_ref": doc.source_ref,
+                "excerpt": text,
+                "source_location": f"{doc.source_ref}#chars:0-{len(text)}",
+                "content_hash": _sha256_text(text),
+                "retrieved_at": doc.retrieved_at,
+                "reliability": doc.reliability,
+            }
+        ]
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if not paragraphs:
-        paragraphs = [m for m in [re.search(r".+", text, re.DOTALL)] if m is not None]
+        paragraphs = [text]
 
     chunks: list[dict[str, Any]] = []
-    for match in paragraphs:
-        para = match.group(0).strip()
-        if not para:
-            continue
-        base_start = match.start()
-        for offset in range(0, len(para), max_chunk_chars):
-            piece = para[offset : offset + max_chunk_chars].strip()
-            if not piece:
-                continue
-            start = base_start + offset
-            end = start + len(piece)
+    current_para_group: list[str] = []
+    current_chars = 0
+    start_offset = 0
+
+    for para in paragraphs:
+        if len(para) > max_chunk_chars:
+            if current_para_group:
+                combined = "\n\n".join(current_para_group)
+                loc = f"{doc.source_ref}#chars:{start_offset}-{start_offset + len(combined)}"
+                chunks.append(
+                    {
+                        "doc_id": doc.doc_id,
+                        "title": doc.title,
+                        "source_ref": doc.source_ref,
+                        "excerpt": combined,
+                        "source_location": loc,
+                        "content_hash": _sha256_text(combined),
+                        "retrieved_at": doc.retrieved_at,
+                        "reliability": doc.reliability,
+                    }
+                )
+                start_offset += len(combined) + 2
+                current_para_group = []
+                current_chars = 0
+
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            sent_group: list[str] = []
+            sent_chars = 0
+            for sent in sentences:
+                if sent_chars + len(sent) > max_chunk_chars and sent_group:
+                    sent_combined = " ".join(sent_group)
+                    loc = (
+                        f"{doc.source_ref}#chars:{start_offset}-{start_offset + len(sent_combined)}"
+                    )
+                    chunks.append(
+                        {
+                            "doc_id": doc.doc_id,
+                            "title": doc.title,
+                            "source_ref": doc.source_ref,
+                            "excerpt": sent_combined,
+                            "source_location": loc,
+                            "content_hash": _sha256_text(sent_combined),
+                            "retrieved_at": doc.retrieved_at,
+                            "reliability": doc.reliability,
+                        }
+                    )
+                    start_offset += len(sent_combined) + 1
+                    sent_group = []
+                    sent_chars = 0
+                sent_group.append(sent)
+                sent_chars += len(sent) + 1
+            if sent_group:
+                sent_combined = " ".join(sent_group)
+                loc = f"{doc.source_ref}#chars:{start_offset}-{start_offset + len(sent_combined)}"
+                chunks.append(
+                    {
+                        "doc_id": doc.doc_id,
+                        "title": doc.title,
+                        "source_ref": doc.source_ref,
+                        "excerpt": sent_combined,
+                        "source_location": loc,
+                        "content_hash": _sha256_text(sent_combined),
+                        "retrieved_at": doc.retrieved_at,
+                        "reliability": doc.reliability,
+                    }
+                )
+                start_offset += len(sent_combined) + 2
+        elif current_chars + len(para) > max_chunk_chars:
+            combined = "\n\n".join(current_para_group)
+            loc = f"{doc.source_ref}#chars:{start_offset}-{start_offset + len(combined)}"
             chunks.append(
                 {
                     "doc_id": doc.doc_id,
                     "title": doc.title,
                     "source_ref": doc.source_ref,
-                    "excerpt": piece,
-                    "source_location": f"{doc.source_ref}#chars:{start}-{end}",
-                    "content_hash": _sha256_text(piece),
+                    "excerpt": combined,
+                    "source_location": loc,
+                    "content_hash": _sha256_text(combined),
                     "retrieved_at": doc.retrieved_at,
                     "reliability": doc.reliability,
                 }
             )
+            start_offset += len(combined) + 2
+            current_para_group = [para]
+            current_chars = len(para)
+        else:
+            current_para_group.append(para)
+            current_chars += len(para) + 2
+
+    if current_para_group:
+        combined = "\n\n".join(current_para_group)
+        loc = f"{doc.source_ref}#chars:{start_offset}-{start_offset + len(combined)}"
+        chunks.append(
+            {
+                "doc_id": doc.doc_id,
+                "title": doc.title,
+                "source_ref": doc.source_ref,
+                "excerpt": combined,
+                "source_location": loc,
+                "content_hash": _sha256_text(combined),
+                "retrieved_at": doc.retrieved_at,
+                "reliability": doc.reliability,
+            }
+        )
     return chunks
 
 
@@ -237,7 +338,13 @@ def validate_allowlisted_https_url(
     allowed_hosts: list[str],
     resolver: Any | None = None,
 ) -> tuple[bool, str | None]:
-    """Validate destination scheme, exact host allowlist, and non-private DNS resolution."""
+    """Validate destination scheme, exact host allowlist, and non-private DNS resolution.
+
+    Limitations: An initial DNS resolution before opening an HTTP connection verifies current
+    public IP allocation, but does not completely eliminate time-of-check-to-time-of-use DNS
+    rebinding without socket-level IP binding. For this reason, HTTP retrieval remains disabled
+    by default (enable_http_retrieval=False) and fails closed for untrusted destinations.
+    """
     parsed = urlparse(url.strip())
     if parsed.scheme.lower() != "https":
         return False, "Only HTTPS URLs are permitted for external retrieval."

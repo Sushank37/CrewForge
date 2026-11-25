@@ -28,7 +28,16 @@
 - [x] **External Retrieval Foundation & Provider Portability:** `LocalDocumentRetriever` + allowlisted SSRF-protected `AllowlistedHttpRetriever` (disabled by default); strict OpenAI schemas, `reasoning.effort`, `returned_model`, `openai_compatible` adapter
 - [x] **Cloud Guard, Deterministic Fast Path & `gpt-6-luna` Pilots:** `CREWFORGE_ALLOW_PAID_RUNS=false` default, `.crewforge/cloud_dev.db`, fast-path synthesis, strong & `--compute-matched` baselines, MCP smoke test + 4 matched cloud pilots
 
+## Phase 5 — Competitive Evaluation & Engine Freeze (Completed November 25, 2026)
+
+- [x] **Focused Stabilization:** Honesty Gate category enforcement, premise-chain requirement on recommendations, assumption requirement on conditional conclusions, auxiliary field unverified number/echo detection, document chunking & multi-chunk provenance catalog fix.
+- [x] **Unified Persistent Budget Authority:** Canonical `.crewforge/budget_authority.db` reconciling pilot expenditures ($0.025516 committed across 55 unique calls), enforcing $4.00 emergency protected reserve, and hard allocation caps (`phase5_same_model` max $0.75, `david_vs_goliath` max $1.10).
+- [x] **Reproducible Blind Benchmark Harness:** `src/crewforge/evaluation/` contracts, programmatic objective checks (exact numbers, units, percentage points, logical restrictions, missing info), cryptographic A/B blinding, 100-point rubric with unsupported assertion penalty (-0 to -20), multi-format reporting (JSON, JSONL, CSV, Markdown).
+- [x] **True Iterative Compute-Matched Baseline:** Multi-round self-critique loop (`BaselineCritiqueOutput`, up to 3 rounds) with deterministic arithmetic parity, stopping early when no defects remain.
+- [x] **Small-Model Profile & Portable Demo Trace:** Concurrency 1, max 2 workers, max 3 tasks for Apple Silicon M1; sanitized export in `crewforge.core.demo_trace`.
+- [x] **Engine Freeze & Offline Verification:** 50/50 tests passing (including live HTTP MCP localhost roundtrip), zero ruff errors, and zero paid API expenditure during freeze.
+
 ## Final Dashboard, Replay & Live Submission Prep (November 26–December 1, 2026)
 
 - [ ] **Visual Dashboard & Trace Replay:** Built strictly on persisted SQLite traces without burning live API balance
-- [ ] **Live Finale Rehearsal & Submission Package:** Utilizing the preserved \$6.07 OpenAI balance prior to December 1, 2026
+- [ ] **Live Finale Rehearsal & Submission Package:** Utilizing the preserved \$4.00+ OpenAI balance prior to December 1, 2026

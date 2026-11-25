@@ -10,7 +10,7 @@ from typing import Any
 
 from crewforge.config import CrewForgeSettings, ProviderType, configure_logging
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
-from crewforge.core.budget import BudgetManager
+from crewforge.core.budget import BudgetManager, UnifiedBudgetAuthority
 from crewforge.core.orchestrator import NetworkRunner
 from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
 from crewforge.mcp_server import run_mcp_server
@@ -127,10 +127,14 @@ async def _run_budget_cmd(*, settings: CrewForgeSettings) -> int:
     await db.initialize()
     try:
         summary: dict[str, Any] = await db.get_budget_summary()
+        authority = UnifiedBudgetAuthority.get_instance(settings=settings)
+        auth_summary = await authority.get_summary()
+        summary["unified_authority"] = auth_summary
     finally:
         await db.close()
     summary["db_path"] = str(settings.effective_db_path)
     summary["allow_paid_runs"] = settings.allow_paid_runs
+    summary["protected_reserve_usd"] = settings.protected_reserve_usd
     summary["max_cost_per_run_usd"] = settings.max_cost_per_run_usd
     summary["max_cumulative_cost_usd"] = settings.max_cumulative_cost_usd
     summary["max_model_calls_per_run"] = settings.max_model_calls_per_run

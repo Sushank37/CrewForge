@@ -60,8 +60,14 @@ def build_worker_user_prompt(
     agent_labels: dict[str, str],
     peer_directory: list[str],
     provenance_lines: list[str] | None = None,
+    user_requirements: list[str] | None = None,
 ) -> str:
     """Assemble bounded task context for a specialist without dumping full transcripts."""
+    reqs_block = (
+        "\n".join(f"- [req_{idx}] {r}" for idx, r in enumerate(user_requirements or [], start=1))
+        if user_requirements
+        else "- None specified."
+    )
     criteria = acceptance_criteria or task.acceptance_criteria
     criteria_block = "\n".join(f"- {c}" for c in criteria) if criteria else "- None specified."
     deliverables_block = (
@@ -88,6 +94,7 @@ def build_worker_user_prompt(
 
     return (
         f"Original user request:\n{original_prompt}\n\n"
+        f"Target user requirements to address (tag in requirement_refs):\n{reqs_block}\n\n"
         f"Trusted provenance catalog (use aliases in input_provenance_refs):\n{prov_block}\n\n"
         f"Assigned task ({task.task_ref or task.task_id}): {task.title}\n"
         f"Task description:\n{task.description}\n\n"

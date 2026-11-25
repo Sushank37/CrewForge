@@ -1,0 +1,46 @@
+{
+  "manifest_id": "crewforge_dev_manifest_v1",
+  "name": "CrewForge Development Benchmark Dataset (4 Pilot Cases)",
+  "description": "Standard development prompts used for system calibration and architectural testing. These cases are strictly development cases and are excluded from held-out evaluation scoring.",
+  "version": "1.0",
+  "items": [
+    {
+      "prompt_id": "dev_fin_01",
+      "title": "Simple Payback Period and Investment Attractiveness",
+      "domain": "financial",
+      "difficulty": "medium",
+      "prompt": "A company has an initial investment of ₹120,000, monthly revenue of ₹10,000, and monthly operating expenses of ₹5,000. Assuming constant cash flows and ignoring taxes and discounting, calculate the simple payback period. Explain whether positive monthly cash flow alone makes this an attractive investment, and identify important missing information.",
+      "reference_documents": [],
+      "tags": ["finance", "arithmetic", "qualitative_reasoning"]
+    },
+    {
+      "prompt_id": "dev_swe_01",
+      "title": "Single-Region Database Latency Spike Incident Response",
+      "domain": "incident_response",
+      "difficulty": "medium",
+      "prompt": "Design an incident response plan for a sudden 10x database latency spike on a single-region web service, noting key trade-offs and missing context.",
+      "reference_documents": [],
+      "tags": ["software_engineering", "incident_response", "tradeoffs"]
+    },
+    {
+      "prompt_id": "dev_sci_01",
+      "title": "Pass Rate Improvement and Causal Inference",
+      "domain": "causation",
+      "difficulty": "medium",
+      "prompt": "A school claims that its new teaching program improved the pass rate from 60% to 75%. Calculate the percentage-point increase and relative percentage increase. Determine whether the information proves the program caused the improvement, and identify what evidence would be needed to establish causation.",
+      "reference_documents": [],
+      "tags": ["causation", "statistics", "arithmetic"]
+    },
+    {
+      "prompt_id": "dev_doc_01",
+      "title": "Service Quota and Regional Failover Policy Verification",
+      "domain": "document_grounded",
+      "difficulty": "hard",
+      "prompt": "Using the attached service quota and failover policy document, calculate peak checkout QPS and the required minimum total provisioned read QPS to stay within the 80% utilization cap. Determine whether automatic cross-region failover guarantees SLA compliance during sustained heavy write bursts, and identify missing information.",
+      "reference_documents": [
+        "benchmarks/fixtures/pilot_d_cloud_sla_policy.md"
+      ],
+      "tags": ["document_grounded", "capacity_planning", "sla"]
+    }
+  ]
+}

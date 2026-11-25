@@ -1,0 +1,188 @@
+{
+  "manifest_id": "crewforge_held_out_template_v1",
+  "name": "CrewForge Held-Out Evaluation Manifest (20 Cross-Domain Cases Template)",
+  "description": "Operator-controlled held-out evaluation manifest schema covering 5 domains (4 cases each). Final prompts and scoring rubrics are supplied or approved independently by the technical architect/operator before execution.",
+  "version": "1.0",
+  "items": [
+    {
+      "prompt_id": "fin_01",
+      "title": "Quantitative Finance & Capital Budgeting",
+      "domain": "financial",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT FIN-01]",
+      "reference_documents": [],
+      "tags": ["financial", "held_out"]
+    },
+    {
+      "prompt_id": "fin_02",
+      "title": "Cost Allocation & Marginal Breakeven Analysis",
+      "domain": "financial",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT FIN-02]",
+      "reference_documents": [],
+      "tags": ["financial", "held_out"]
+    },
+    {
+      "prompt_id": "fin_03",
+      "title": "Multi-Year Depreciation & Amortization Schedule",
+      "domain": "financial",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT FIN-03]",
+      "reference_documents": [],
+      "tags": ["financial", "held_out"]
+    },
+    {
+      "prompt_id": "fin_04",
+      "title": "Bond Yield & Duration Sensitivity",
+      "domain": "financial",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT FIN-04]",
+      "reference_documents": [],
+      "tags": ["financial", "held_out"]
+    },
+    {
+      "prompt_id": "swe_01",
+      "title": "Distributed Deadlock and Lock Contention Triaging",
+      "domain": "incident_response",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT SWE-01]",
+      "reference_documents": [],
+      "tags": ["software_engineering", "held_out"]
+    },
+    {
+      "prompt_id": "swe_02",
+      "title": "Cache Stampede & Thundering Herd Mitigation",
+      "domain": "incident_response",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT SWE-02]",
+      "reference_documents": [],
+      "tags": ["software_engineering", "held_out"]
+    },
+    {
+      "prompt_id": "swe_03",
+      "title": "Cross-AZ Network Partition & Split-Brain Analysis",
+      "domain": "incident_response",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT SWE-03]",
+      "reference_documents": [],
+      "tags": ["software_engineering", "held_out"]
+    },
+    {
+      "prompt_id": "swe_04",
+      "title": "Event-Driven Consumer Backpressure Cascading Failure",
+      "domain": "incident_response",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT SWE-04]",
+      "reference_documents": [],
+      "tags": ["software_engineering", "held_out"]
+    },
+    {
+      "prompt_id": "sci_01",
+      "title": "Confounding in Observational Epidemiology",
+      "domain": "causation",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT SCI-01]",
+      "reference_documents": [],
+      "tags": ["causation", "held_out"]
+    },
+    {
+      "prompt_id": "sci_02",
+      "title": "Simpson's Paradox in Stratified Trials",
+      "domain": "causation",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT SCI-02]",
+      "reference_documents": [],
+      "tags": ["causation", "held_out"]
+    },
+    {
+      "prompt_id": "sci_03",
+      "title": "Instrumental Variables & Endogeneity Bounds",
+      "domain": "causation",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT SCI-03]",
+      "reference_documents": [],
+      "tags": ["causation", "held_out"]
+    },
+    {
+      "prompt_id": "sci_04",
+      "title": "Regression Discontinuity Threshold Verification",
+      "domain": "causation",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT SCI-04]",
+      "reference_documents": [],
+      "tags": ["causation", "held_out"]
+    },
+    {
+      "prompt_id": "doc_01",
+      "title": "Vendor SLA Penalties & Service Credits Calculation",
+      "domain": "document_grounded",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT DOC-01]",
+      "reference_documents": ["benchmarks/fixtures/held_out_doc_01.md"],
+      "tags": ["document_grounded", "held_out"]
+    },
+    {
+      "prompt_id": "doc_02",
+      "title": "Multi-Tenant Isolation & Compliance Audit Policy",
+      "domain": "document_grounded",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT DOC-02]",
+      "reference_documents": ["benchmarks/fixtures/held_out_doc_02.md"],
+      "tags": ["document_grounded", "held_out"]
+    },
+    {
+      "prompt_id": "doc_03",
+      "title": "Data Retention & Cross-Border Sovereign Quota",
+      "domain": "document_grounded",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT DOC-03]",
+      "reference_documents": ["benchmarks/fixtures/held_out_doc_03.md"],
+      "tags": ["document_grounded", "held_out"]
+    },
+    {
+      "prompt_id": "doc_04",
+      "title": "Zero-Trust Network Access Rate Limit Rules",
+      "domain": "document_grounded",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT DOC-04]",
+      "reference_documents": ["benchmarks/fixtures/held_out_doc_04.md"],
+      "tags": ["document_grounded", "held_out"]
+    },
+    {
+      "prompt_id": "str_01",
+      "title": "Production Capacity Scheduling under Shift Constraints",
+      "domain": "strategic_planning",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT STR-01]",
+      "reference_documents": [],
+      "tags": ["strategic_planning", "held_out"]
+    },
+    {
+      "prompt_id": "str_02",
+      "title": "Supply Chain Safety-Stock Buffer Sizing",
+      "domain": "strategic_planning",
+      "difficulty": "medium",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT STR-02]",
+      "reference_documents": [],
+      "tags": ["strategic_planning", "held_out"]
+    },
+    {
+      "prompt_id": "str_03",
+      "title": "Data Center Power Envelope & Rack Placement Optimization",
+      "domain": "strategic_planning",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT STR-03]",
+      "reference_documents": [],
+      "tags": ["strategic_planning", "held_out"]
+    },
+    {
+      "prompt_id": "str_04",
+      "title": "Cloud Migration Phasing under Dependency Invariants",
+      "domain": "strategic_planning",
+      "difficulty": "hard",
+      "prompt": "[OPERATOR SUPPLIED HELD-OUT PROMPT STR-04]",
+      "reference_documents": [],
+      "tags": ["strategic_planning", "held_out"]
+    }
+  ]
+}
