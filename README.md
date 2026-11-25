@@ -2,28 +2,29 @@
 
 CrewForge is a model-agnostic, self-assembling multi-agent intelligence network exposed through the Model Context Protocol (MCP), built by **Team Git Commit** for the **SEED Hackathon 2026 — Chain of Command** challenge.
 
-## Implemented Functionality (Phase 1, Phase 2 & Phase 3)
+## Implemented Functionality (Phases 1–4)
 
-- **Budget-Safe `ModelExecutor` & Shared MCP Execution:**
-  - Single shared `asyncio.Semaphore` with deadline-bounded acquisition enforcing configured concurrency across baseline, planning, specialists, follow-ups, reviewers, targeted repairs, and synthesis (shared cleanly across concurrent MCP `solve` / `baseline` tool calls).
-  - Every individual attempt acquires its own atomic pre-call SQLite `BEGIN IMMEDIATE` reservation and reconciles exactly once; hidden SDK/provider retries remain disabled when invoked through `ModelExecutor`.
-  - Dispatched attempts count toward `max_model_calls_per_run` even when released as known-unbilled; unknown billing outcomes conservatively retain reserved cost.
-  - Pre-call input token estimation incorporates system prompts, task context, and serialized structured-output JSON schemas; credentials and raw provider errors are sanitized before persistence.
-- **Dynamic Lead Planner (`LeadPlanner`) & DAG Scheduler (`DAGScheduler`):** Decomposes arbitrary prompts into a validated `ExecutionPlan` with prompt-specific specialist roles and acyclic dependencies (`effective_max_workers=3`, `effective_max_tasks=3` for local Ollama), executes independent branches concurrently, enforces deadline/call-budget reservations (`optional_stage_skipped`), and transitions failed dependents cleanly to `blocked`.
-- **Claim Contracts, Provenance & Safe Arithmetic Tool (`DeterministicArithmeticTool`):**
-  - Explicit `ClaimCategory` (`given_fact`, `external_factual_assertion`, `computation`, `logical_inference`, `assumption`, `recommendation`, `uncertainty`) and separate `VerificationStatus` (`provenance_verified`, `computationally_verified`, `independently_reviewed_inference`, `unsupported`, `contradicted`, `stale_pending_review`).
-  - Safe `Decimal` + allowlisted AST calculator (`src/crewforge/tools/arithmetic.py`, no `eval`/`exec`) persists immutable `tool_executions` records, checks numeric/provenance input grounding, and supports fair baseline tool parity (`BaselineRunner`).
-  - Deterministic provenance verification (`evidence_verifier.py`) checks verbatim quotation, numeric consistency, and surrounding negation polarity for `user_prompt` / `dependency_finding` excerpts while keeping unretrieved `external_unverified` citations as `unverified` (`UnavailableExternalRetriever`).
-- **Independent Adversarial Review (`ReviewerPool`), `ClaimDependencyGraph` & `TargetedRepairEngine`:**
-  - Enforces strict author/reviewer separation (`reviewer_id != author_agent_id`) in code and SQLite, running deterministic prechecks plus compact/separate model review; omitted verdicts deterministically mark claims `unresolved`.
-  - Blocking objections are routed back via `MessageBus` to the originating specialist for explicit `(claim_id, expected_version)` targeted revision (never positional replacement), preserving rejected prior versions, transitively marking downstream dependents `stale`, and re-reviewing revised claims.
-- **Evidence-Constrained `LeadSynthesizer` & Deterministic `HonestyGate`:** Consumes Lead inbox messages (`consumed` only after model invocation), requires versioned claim citations on released assertions, blocks rejected/stale/unreviewed claims and unverified new factual text on both full and partial release paths, and persists `honesty_gate_decisions` + `VerificationSummary`.
+- **Budget-Safe `ModelExecutor`, Cloud Guard & Shared MCP Execution:**
+  - Single shared `asyncio.Semaphore` with deadline-bounded acquisition enforces configured concurrency (`1` local Ollama default, `3` cloud OpenAI) across concurrent MCP `solve` / `baseline` tool runs.
+  - Explicit `CREWFORGE_ALLOW_PAID_RUNS=false` fail-closed authorization guard blocks paid API execution unless authorized; paid cloud runs automatically persist to `CREWFORGE_CLOUD_DB_PATH` (`.crewforge/cloud_dev.db`), require non-empty pricing in `CREWFORGE_PRICING_JSON`, reserve every attempt atomically (`BEGIN IMMEDIATE`), and record actual `returned_model` identities.
+- **Claim-Locked Honesty Gate & Anti-Laundering (`core/honesty_gate.py`):**
+  - Default final answers render verified factual text directly from exact approved ledger `Claim` versions — forbidding Lead paraphrases, negation reversals, unreferenced factual prose, or laundering through `conditional_conclusions`, `recommendations`, `assumptions`, `missing_information`, `unresolved_issues`, `confidence_notes`, or raw task error messages on both full and partial paths.
+  - Rejected claim statements stay preserved in `trace.claims` and are never echoed unnecessarily in rendered answers.
+- **Exact Arithmetic Provenance Lineage (`tools/arithmetic.py`):**
+  - `DeterministicArithmeticTool` resolves every variable to an exact target (`up_1..up_N` prompt spans, `doc_1..doc_N` verified evidence excerpts, current `SUPPORTED` claim versions, prior grounded `ToolExecutionRecord`s, or explicit `const:` / `assumption:` references) — rejecting swapped variables, fabricated targets, unrelated sentence numbers, ungrounded inline AST constants, unit mismatches, and stale claim versions.
+- **Strict Reviewer Verdict Validation (`core/reviewer.py`):**
+  - Enforces at most one verdict per `(claim_id, claim_version, reviewer_id, review_dimension)` in a review round, strips cross-claim evidence refs, keeps skipped/missing dimensions explicitly incomplete (`UNRESOLVED`), triggers disputes on conflicts, and rechecks fresh DB premise currency before approval.
+- **Honest Requirement Coverage (`VerificationSummary`):**
+  - Tracks `req_1..req_K` linkage separately across `answered`, `partially_answered`, `unresolved`, and `missing`, and exposes distinct `execution_completed`, `release_checks_executed`, `content_released_safely`, `coverage_methodology`, and `independent_grade` (`None` internally).
+- **External Retrieval Foundation (`core/retrieval.py`):**
+  - `LocalDocumentRetriever` ingests operator-supplied UTF-8 documents (`--doc` / `CREWFORGE_REFERENCE_DOCUMENTS`) into immutable verified `Evidence` with SHA-256 `content_hash`, UTC `retrieved_at`, and character-offset `source_location` for both Baseline and Network.
+  - `AllowlistedHttpRetriever` (disabled by default via `CREWFORGE_ENABLE_HTTP_RETRIEVAL=false`) enforces HTTPS-only explicit host allowlists, public-IP SSRF/DNS-rebinding checks, `follow_redirects=False`, response size/type limits, and credential isolation. No open-web search backend exists in Phase 4.
+- **Provider Portability (`openai`, `openai_compatible`, `ollama`):**
+  - Explicit `CREWFORGE_OPENAI_REASONING_EFFORT` support (`none`, `low`, `medium`, `high`, `xhigh`, `max`) omits incompatible `temperature` on reasoning models (`gpt-6-luna`); `openai_compatible` uses operator-supplied `CREWFORGE_OPENAI_BASE_URL` via Chat Completions with fail-closed pricing. (Anthropic/Gemini protocols are not implemented.)
+- **Adaptive Execution & Strong Fair Baselines:**
+  - Concise claim/requirement aliases (`c1`, `up_1`, `req_1`), bounded claims/worker, selective follow-ups, and a Gate-protected deterministic synthesis fast path (`CREWFORGE_ENABLE_DETERMINISTIC_SYNTHESIS_FAST_PATH=true`) skip redundant synthesis calls when all requirements are covered cleanly.
+  - Upgraded `BaselineRunner` supports deterministic arithmetic parity, equal document ingestion (`--doc`), and optional `--compute-matched` single-agent self-check refinement without spawning specialists or reviewers.
 - **MCP Server (`FastMCP`) & CLI:** Exposes `solve(prompt)`, `baseline(prompt)`, and `trace(run_id)` over `stdio` (`stderr`-only logging) and localhost `streamable-http`.
-
-### Planned / Remaining Before Final Submission
-
-- Optional external `EvidenceRetriever` backend if an authorized retrieval source is configured (internet fetching remains disabled by default via `UnavailableExternalRetriever`).
-- Final pre-submission David vs Goliath evaluation comparing the local `qwen3:4b` network against a stronger cloud baseline within the untouched \$6.10 OpenAI budget cap.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md) for full details.
 
@@ -55,9 +56,18 @@ cp .env.example .env
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `CREWFORGE_PROVIDER` | `ollama` | Active provider (`ollama` or `openai`) |
-| `CREWFORGE_MODEL` | `qwen3:4b` | Model identifier |
-| `CREWFORGE_OPENAI_API_KEY` | unset | OpenAI API key (also falls back to `OPENAI_API_KEY`) |
+| `CREWFORGE_PROVIDER` | `ollama` | Active provider (`ollama`, `openai`, or `openai_compatible`) |
+| `CREWFORGE_MODEL` | `qwen3:4b` | Model identifier (cloud pilot candidate: `gpt-6-luna`) |
+| `CREWFORGE_OPENAI_API_KEY` | unset | OpenAI API key (also falls back to `OPENAI_API_KEY`; never exposed in prompts/traces) |
+| `CREWFORGE_OPENAI_BASE_URL` | unset | Operator-controlled endpoint override / `openai_compatible` server URL |
+| `CREWFORGE_OPENAI_REASONING_EFFORT` | unset (`low` for pilots) | OpenAI reasoning effort (`none`, `low`, `medium`, `high`, `xhigh`, `max`) |
+| `CREWFORGE_ALLOW_PAID_RUNS` | `false` | Explicit fail-closed guard required to permit paid provider calls |
+| `CREWFORGE_ENABLE_HTTP_RETRIEVAL` | `false` | Optional allowlisted HTTPS retriever toggle (disabled by default) |
+| `CREWFORGE_ALLOWED_RETRIEVAL_HOSTS` | `[]` | Exact HTTPS host allowlist when HTTP retrieval is enabled |
+| `CREWFORGE_REFERENCE_DOCUMENTS` | `[]` | Optional list/paths of operator-supplied reference documents |
+| `CREWFORGE_BASELINE_COMPUTE_MATCHED` | `false` | Enables iterative single-agent self-check pass in `BaselineRunner` |
+| `CREWFORGE_ENABLE_DETERMINISTIC_SYNTHESIS_FAST_PATH` | `true` | Skips synthesis LLM call cleanly when Gate-approved claims cover requirements |
+| `CREWFORGE_CLOUD_DB_PATH` | `.crewforge/cloud_dev.db` | Persistent SQLite budget & trace DB used automatically for cloud runs |
 | `CREWFORGE_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Local Ollama endpoint |
 | `CREWFORGE_OLLAMA_NUM_CTX` | `4096` | Ollama context window (`options.num_ctx`) |
 | `CREWFORGE_OLLAMA_THINK` | unset (`false` in `.env.example`) | Optional top-level Ollama `think` parameter |
@@ -97,8 +107,8 @@ uv run crewforge smoke-test --provider ollama --model qwen3:4b --mode network
 ## Exact CLI Commands
 
 ```bash
-uv run crewforge solve "Your prompt here"
-uv run crewforge baseline "Your prompt here"
+uv run crewforge solve "Your prompt here" [--doc path/to/doc.md]
+uv run crewforge baseline "Your prompt here" [--doc path/to/doc.md] [--compute-matched]
 uv run crewforge trace <run_id>
 uv run crewforge budget
 ```

@@ -37,7 +37,7 @@ def create_mcp_server(
     resolved_settings = settings or CrewForgeSettings()
     configure_logging(resolved_settings.log_level)
 
-    resolved_db = database or Database(resolved_settings.db_path)
+    resolved_db = database or Database(resolved_settings.effective_db_path)
     owns_provider = provider is None
     resolved_provider: ModelProvider | None = provider
     shared_budget: BudgetManager | None = None

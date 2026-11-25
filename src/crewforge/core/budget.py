@@ -149,6 +149,11 @@ class BudgetManager:
         call_units: int = 1,
     ) -> BudgetReservation:
         """Atomically check run/cumulative caps and persist a single-attempt reservation."""
+        if is_paid_provider and not self._settings.allow_paid_runs:
+            raise BudgetError(
+                "Paid model execution is blocked by default. Set CREWFORGE_ALLOW_PAID_RUNS=true "
+                "explicitly to authorize paid API expenditure."
+            )
         max_out = max_output_tokens or self._settings.max_output_tokens
         schema_text = (
             response_schema_json

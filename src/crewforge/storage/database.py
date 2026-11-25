@@ -307,10 +307,16 @@ CREATE TABLE IF NOT EXISTS honesty_gate_decisions (
 );
 """
 
+_MIGRATION_V4_SQL = """
+-- Phase 4 column upgrades handled idempotently via _ensure_column in initialize_sync.
+SELECT 1;
+"""
+
 _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (1, "phase1_core_tables", _MIGRATION_V1_SQL),
     (2, "phase2_network_ledger_messaging", _MIGRATION_V2_SQL),
     (3, "phase3_verification_tools_and_gate", _MIGRATION_V3_SQL),
+    (4, "phase4_evidence_lineage_and_retrieval", _MIGRATION_V4_SQL),
 )
 
 
@@ -417,6 +423,29 @@ class Database:
                         "blocking_severity",
                         "TEXT NOT NULL DEFAULT 'none'",
                     )
+                if version == 4:
+                    _ensure_column(conn, "evidence", "content_hash", "TEXT")
+                    _ensure_column(conn, "evidence", "retrieved_at", "TEXT")
+                    _ensure_column(conn, "evidence", "source_location", "TEXT")
+                    _ensure_column(
+                        conn,
+                        "evidence",
+                        "retrieval_status",
+                        "TEXT NOT NULL DEFAULT 'not_applicable'",
+                    )
+                    _ensure_column(
+                        conn,
+                        "tool_executions",
+                        "provenance_details_json",
+                        "TEXT NOT NULL DEFAULT '{}'",
+                    )
+                    _ensure_column(
+                        conn,
+                        "tool_executions",
+                        "has_ungrounded_literals",
+                        "INTEGER NOT NULL DEFAULT 0",
+                    )
+                    _ensure_column(conn, "tool_executions", "formula_appropriate", "INTEGER")
                 conn.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                     (version, name, _utc_iso()),
@@ -1157,8 +1186,9 @@ class Database:
                 """
                 INSERT INTO evidence (
                     evidence_id, run_id, source_type, source_ref, excerpt,
-                    reliability, verified_in_input, task_id, created_by, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reliability, verified_in_input, content_hash, retrieved_at,
+                    source_location, retrieval_status, task_id, created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     evd.evidence_id,
@@ -1168,6 +1198,10 @@ class Database:
                     evd.excerpt,
                     evd.reliability.value,
                     1 if evd.verified_in_input else 0,
+                    evd.content_hash,
+                    evd.retrieved_at,
+                    evd.source_location,
+                    evd.retrieval_status,
                     evd.task_id,
                     evd.created_by,
                     evd.created_at.isoformat(),
@@ -1177,6 +1211,43 @@ class Database:
     async def insert_evidence(self, evd: Evidence) -> None:
         """Persist a provenance-checked evidence record."""
         await asyncio.to_thread(self._insert_evidence_sync, evd)
+
+    def _get_evidence_for_run_sync(self, run_id: str) -> list[Evidence]:
+        with self._lock:
+            conn = self._get_connection()
+            rows = conn.execute(
+                "SELECT * FROM evidence WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+        return [
+            Evidence(
+                evidence_id=row["evidence_id"],
+                run_id=row["run_id"],
+                source_type=row["source_type"],
+                source_ref=row["source_ref"],
+                excerpt=row["excerpt"],
+                reliability=EvidenceReliability(row["reliability"]),
+                verified_in_input=bool(row["verified_in_input"]),
+                content_hash=row["content_hash"] if "content_hash" in set(row.keys()) else None,
+                retrieved_at=row["retrieved_at"] if "retrieved_at" in set(row.keys()) else None,
+                source_location=(
+                    row["source_location"] if "source_location" in set(row.keys()) else None
+                ),
+                retrieval_status=(
+                    row["retrieval_status"]
+                    if "retrieval_status" in set(row.keys()) and row["retrieval_status"]
+                    else "not_applicable"
+                ),
+                task_id=row["task_id"],
+                created_by=row["created_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    async def get_evidence_for_run(self, run_id: str) -> list[Evidence]:
+        """Return all evidence records belonging to a run."""
+        return await asyncio.to_thread(self._get_evidence_for_run_sync, run_id)
 
     def _insert_claim_sync(self, claim: Claim) -> None:
         with self._transaction(immediate=True) as conn:
@@ -1385,10 +1456,11 @@ class Database:
                 """
                 INSERT INTO tool_executions (
                     tool_execution_id, run_id, tool_name, actor, task_id, expression,
-                    variables_json, input_provenance_refs_json, proposed_result, computed_result,
-                    units, assumptions_json, matches_proposed, inputs_grounded, success, error,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    variables_json, input_provenance_refs_json, provenance_details_json,
+                    proposed_result, computed_result, units, assumptions_json,
+                    matches_proposed, inputs_grounded, has_ungrounded_literals,
+                    formula_appropriate, success, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.tool_execution_id,
@@ -1399,6 +1471,7 @@ class Database:
                     record.expression,
                     json.dumps(record.variables, ensure_ascii=False),
                     json.dumps(record.input_provenance_refs, ensure_ascii=False),
+                    json.dumps(record.provenance_details, ensure_ascii=False),
                     record.proposed_result,
                     record.computed_result,
                     record.units,
@@ -1409,6 +1482,12 @@ class Database:
                         else (1 if record.matches_proposed else 0)
                     ),
                     1 if record.inputs_grounded else 0,
+                    1 if record.has_ungrounded_literals else 0,
+                    (
+                        None
+                        if record.formula_appropriate is None
+                        else (1 if record.formula_appropriate else 0)
+                    ),
                     1 if record.success else 0,
                     record.error,
                     record.created_at.isoformat(),
@@ -1702,7 +1781,9 @@ class Database:
 
     @staticmethod
     def _row_to_tool_execution(row: sqlite3.Row) -> ToolExecutionRecord:
+        keys = set(row.keys())
         matches_raw = row["matches_proposed"]
+        formula_raw = row["formula_appropriate"] if "formula_appropriate" in keys else None
         return ToolExecutionRecord(
             tool_execution_id=row["tool_execution_id"],
             run_id=row["run_id"],
@@ -1712,12 +1793,21 @@ class Database:
             expression=row["expression"],
             variables=json.loads(row["variables_json"]),
             input_provenance_refs=json.loads(row["input_provenance_refs_json"]),
+            provenance_details=(
+                json.loads(row["provenance_details_json"])
+                if "provenance_details_json" in keys and row["provenance_details_json"]
+                else {}
+            ),
             proposed_result=row["proposed_result"],
             computed_result=row["computed_result"],
             units=row["units"],
             assumptions=json.loads(row["assumptions_json"]),
             matches_proposed=None if matches_raw is None else bool(matches_raw),
             inputs_grounded=bool(row["inputs_grounded"]),
+            has_ungrounded_literals=(
+                bool(row["has_ungrounded_literals"]) if "has_ungrounded_literals" in keys else False
+            ),
+            formula_appropriate=None if formula_raw is None else bool(formula_raw),
             success=bool(row["success"]),
             error=row["error"],
             created_at=datetime.fromisoformat(row["created_at"]),
@@ -1945,6 +2035,16 @@ class Database:
                 excerpt=row["excerpt"],
                 reliability=EvidenceReliability(row["reliability"]),
                 verified_in_input=bool(row["verified_in_input"]),
+                content_hash=row["content_hash"] if "content_hash" in set(row.keys()) else None,
+                retrieved_at=row["retrieved_at"] if "retrieved_at" in set(row.keys()) else None,
+                source_location=(
+                    row["source_location"] if "source_location" in set(row.keys()) else None
+                ),
+                retrieval_status=(
+                    row["retrieval_status"]
+                    if "retrieval_status" in set(row.keys()) and row["retrieval_status"]
+                    else "not_applicable"
+                ),
                 task_id=row["task_id"],
                 created_by=row["created_by"],
                 created_at=datetime.fromisoformat(row["created_at"]),

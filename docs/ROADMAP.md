@@ -3,34 +3,32 @@
 **Challenge:** SEED Hackathon 2026 — Chain of Command (Team Git Commit)  
 **Target Working End-to-End Multi-Agent Engine:** November 27, 2026  
 **Final Submission Deadline:** December 1, 2026  
-**Remaining Cloud API Budget Cap:** \$6.10 total (zero paid expenditure incurred through Phase 3)
+**Remaining Cloud API Budget Balance:** ~\$6.07 of \$6.10 preserved for final demo (`\$0.0255` Phase 4 cloud dev expenditure inside `\$0.25` cap)
 
 ## Phase 1 — Engineering Foundation (Completed November 25, 2026)
 
 - [x] Workspace, Python 3.12 (`uv`), Ruff, and Pytest setup
-- [x] Typed Pydantic v2 contracts (`AgentSpec`, `TaskSpec`, `ExecutionPlan`, `Claim`, `Evidence`, `AgentMessage`, `ReviewVerdict`, `RunConfig`, `RunResult`, `UsageMetrics`, `ExecutionEvent`)
-- [x] Async `ModelProvider` abstraction (`OpenAIProvider` via Responses API, `OllamaProvider` via `/api/chat`)
-- [x] Persistent SQLite storage and `BudgetManager`
-- [x] Single-agent `BaselineRunner` and MCP server (`baseline`, `trace`)
+- [x] Typed Pydantic v2 contracts & provider abstractions (`OpenAIProvider`, `OllamaProvider`)
+- [x] Persistent SQLite ledger, `BudgetManager`, `BaselineRunner`, and MCP (`baseline`, `trace`)
 
 ## Phase 2 — Dynamic Multi-Agent Engine (Completed November 25, 2026)
 
-- [x] **`ModelExecutor` & Accounting Fixes:** Per-attempt atomic reservations, shared concurrency semaphore, released-call counting, schema-aware input estimation, conservative missing-usage handling, error/secret sanitization
-- [x] **SQLite Migrations & Ledger Persistence:** Schema v2 tables (`execution_plans`, `agents`, `tasks`, `task_transitions`, `evidence`, `claims`, `agent_messages`, `message_deliveries`, `review_verdicts`) with cross-run isolation and immutable claim versioning
-- [x] **Dynamic Lead Planner:** Domain-agnostic task & specialist generation, structural & cycle validation, single budgeted repair attempt
-- [x] **Dependency-Aware DAG Scheduler:** Concurrent `asyncio` execution, dependency failure propagation (`blocked`), run deadline enforcement, synthesis call reservation
-- [x] **Specialist Workers, `MessageBus`, & `LeadSynthesizer`:** Bounded task/follow-up contexts, peer message delivery & consumption tracking, provenance-checked evidence proposals, validated synthesis references, `solve(prompt)` MCP & CLI integration
-- [x] **Local `qwen3:4b` Smoke & Network Verification:** Offline suite + local Ollama execution verified ahead of November 27 target
+- [x] `ModelExecutor` atomic accounting, shared semaphore, schema-aware estimation, SQLite v2
+- [x] `LeadPlanner`, dependency-aware `DAGScheduler`, `SpecialistWorker`, `MessageBus`, `solve(prompt)`
 
 ## Phase 3 — Verification Engine, Targeted Repair & Honesty Gate (Completed November 25, 2026)
 
-- [x] **Phase 2 Defect Fixes:** ID/version-targeted follow-ups (replacing positional revision), Lead inbox consumption, versioned `premise_refs` dependency graph, and strict gate controls on both full and partial synthesis paths
-- [x] **Claim Contracts & SQLite Schema v3:** Added `ClaimCategory`, `VerificationStatus`, `ToolExecutionRecord`, `HonestyGateRecord`, `VerificationSummary`, `run_reviewers`, `tool_executions`, and `honesty_gate_decisions`
-- [x] **Deterministic Verification & Fair Baseline Parity:** Safe `Decimal` AST `DeterministicArithmeticTool` (available to both network specialists and `BaselineRunner`) and deterministic provenance/negation checker + `EvidenceRetriever` interface
-- [x] **Independent `ReviewerPool` & `TargetedRepairEngine`:** Author/reviewer independence enforcement, missing-verdict conservative `UNRESOLVED` handling, blocking objection routing over `MessageBus`, immutable `v+1` revisions, and transitive `ClaimDependencyGraph` stale invalidation
-- [x] **Enforceable `HonestyGate` & Compact Local Profile:** Verified release filtering, live localhost Streamable HTTP MCP roundtrip test, offline adversarial test suite, and local `qwen3:4b` evaluations (`Test A` payback/attractiveness vs baseline, `Test B` incident response, `Test C` pass-rate causation)
+- [x] Versioned claim categories/verification states, `DeterministicArithmeticTool`, `ReviewerPool`, `TargetedRepairEngine`, `ClaimDependencyGraph`, `HonestyGate`, and local `qwen3:4b` baselines
 
-## Final Evaluation & Submission Readiness (November 26–December 1, 2026)
+## Phase 4 — Release Hardening, Portability & Cloud Pilots (Completed November 25, 2026)
 
-- [ ] **David vs Goliath Cloud Comparison:** Authorized final benchmark comparing local `qwen3:4b` network runs against stronger single-agent cloud baselines within the untouched \$6.10 API cap
-- [ ] **Optional Retrieval Backend & Packaging Polish:** Optional external `EvidenceRetriever` integration and final submission package prior to December 1, 2026
+- [x] **Claim-Locked Release:** Eliminated lexical-overlap Gate bypasses; closed laundering across conditional, recommendation, assumption, missing-info, unresolved, and task-error fields
+- [x] **Resolvable Arithmetic Lineage:** Exact variable-to-target resolution (`up_k`, `doc_k`, `clm_k@vN`, `tlx_k`, `const:`, `assumption:`) rejecting swaps, fabricated refs, unrelated spans, stale refs, and ungrounded inline constants
+- [x] **Strict Reviewer Validation & Coverage Separation:** Unique `(claim, version, reviewer, dim)` verdicts, strict claim-evidence matching, fresh premise recheck, and separated `execution_completed`/`content_released_safely`/`requirement_coverage`
+- [x] **External Retrieval Foundation & Provider Portability:** `LocalDocumentRetriever` + allowlisted SSRF-protected `AllowlistedHttpRetriever` (disabled by default); strict OpenAI schemas, `reasoning.effort`, `returned_model`, `openai_compatible` adapter
+- [x] **Cloud Guard, Deterministic Fast Path & `gpt-6-luna` Pilots:** `CREWFORGE_ALLOW_PAID_RUNS=false` default, `.crewforge/cloud_dev.db`, fast-path synthesis, strong & `--compute-matched` baselines, MCP smoke test + 4 matched cloud pilots
+
+## Final Dashboard, Replay & Live Submission Prep (November 26–December 1, 2026)
+
+- [ ] **Visual Dashboard & Trace Replay:** Built strictly on persisted SQLite traces without burning live API balance
+- [ ] **Live Finale Rehearsal & Submission Package:** Utilizing the preserved \$6.07 OpenAI balance prior to December 1, 2026

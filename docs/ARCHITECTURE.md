@@ -1,37 +1,34 @@
 # CrewForge Architecture
 
-## 1. Phase 3 Runtime Architecture
+## 1. Phase 4 Runtime Architecture
 
 CrewForge exposes three MCP tools (`solve`, `baseline`, `trace`) and matching CLI commands backed by a transport-independent core engine and SQLite persistence layer. In MCP server mode, `solve` and `baseline` share one `ModelExecutor` instance so concurrent requests obey global concurrency and budget constraints:
 
 ```text
 MCP Client (stdio / localhost streamable-http)  or  CLI
        │
-       ├──► solve(prompt) ──► NetworkRunner (shared ModelExecutor)
-       │                         ├── LeadPlanner (ExecutionPlan + <=1 repair)
+       ├──► solve(prompt, docs) ──► NetworkRunner (shared ModelExecutor + CREWFORGE_ALLOW_PAID_RUNS)
+       │                         ├── LocalDocumentRetriever (shared operator corpus ingestion)
+       │                         ├── LeadPlanner (ExecutionPlan + <=1 repair, req_1..req_K IDs)
        │                         ├── DAGScheduler (asyncio DAG execution)
        │                         ├── SpecialistWorker + MessageBus + DeterministicArithmeticTool + ClaimLedger
-       │                         ├── Bounded Follow-up Round (<= max_communication_rounds)
-       │                         ├── ReviewerPool (deterministic prechecks + independent review)
+       │                         ├── Selective Follow-up Round (skipped immediately if zero unread msgs)
+       │                         ├── ReviewerPool (strict unique verdicts + alias resolution + premise recheck)
        │                         ├── TargetedRepairEngine + ClaimDependencyGraph (v+1 & stale cascade)
-       │                         └── LeadSynthesizer + HonestyGate (enforced on full & partial paths)
+       │                         └── LeadSynthesizer (deterministic fast path or synthesis) + Claim-Locked HonestyGate
        │
-       ├──► baseline(prompt) ──► BaselineRunner (with DeterministicArithmeticTool parity) ──► ModelExecutor
+       ├──► baseline(prompt, docs) ──► BaselineRunner (tool parity + optional --compute-matched) ──► ModelExecutor
        │
        └──► trace(run_id) ──► Database.get_run_trace(run_id)  [no model provider needed]
 ```
 
-## 2. `ModelExecutor` & Per-Attempt Budget Accounting
+## 2. `ModelExecutor`, Cloud Guard & Per-Attempt Accounting
 
 All baseline, planner, worker, follow-up, reviewer, repair, and synthesis invocations pass through `ModelExecutor`:
 
-- **Shared Concurrency Semaphore & Deadlines:** One `asyncio.Semaphore(settings.effective_max_concurrency)` is shared across the executor (`1` by default for local Ollama on 8 GB RAM; `3` for cloud). Semaphore acquisition is bounded by the remaining `run_deadline_monotonic` so queued tasks fail cleanly on timeout rather than hanging.
-- **Per-Attempt Atomic Reservations:** Each individual model attempt reserves budget in SQLite (`BEGIN IMMEDIATE`) *before* dispatch, estimating input tokens across system prompt, user/task prompt, and serialized Pydantic JSON response schema.
-- **Retry Ownership:** Provider/SDK retries are forced to `0` when called by `ModelExecutor`; any retry configured via `CREWFORGE_MAX_RETRIES` is orchestrated by `ModelExecutor` with its own fresh reservation.
-- **Exact-Once Reconciliation & Accounting:**
-  - Completed calls reconcile actual usage; if a paid provider omits usage (`usage_reported=False`), `BudgetManager` retains the full reserved cost (`status='unknown'`, `outcome='completed_unknown_usage'`) rather than recording `\$0.00`.
-  - Dispatched calls that fail with known-unbilled outcomes (`status='released'`) still count toward `max_model_calls_per_run`.
-  - Timeouts, cancellations, or ambiguous failures retain full reserved cost (`status='unknown'`).
+- **Paid-Run Guard & Cloud DB Isolation:** `CREWFORGE_ALLOW_PAID_RUNS` defaults to `false`; `BudgetManager.reserve_call` rejects paid provider calls before reservation unless explicitly enabled, fails closed without matching pricing in `CREWFORGE_PRICING_JSON`, and routes paid runs cleanly to `cloud_db_path` (`.crewforge/cloud_dev.db`) when using default local config.
+- **Portable Adapters & Parameter Gating:** `OpenAIProvider` supports Responses API strict JSON schemas (`ArithmeticVariableBinding` arrays instead of dynamic dictionaries) with `reasoning={"effort": ...}`, omits unsupported `temperature` on reasoning models (`gpt-6-luna`), captures actual `returned_model`, and supports explicit `openai_compatible` Chat Completions servers via operator-controlled `openai_base_url`. `OllamaProvider` enforces `num_ctx`, `think`, and captures returned model names.
+- **Shared Concurrency Semaphore & Deadlines:** One `asyncio.Semaphore(settings.effective_max_concurrency)` (`1` for Ollama, `3` for OpenAI) is shared across calls with deadline-bounded acquisition. Every attempt reserves input + schema + output budget atomically, counts unbilled released calls, and preserves reserved cost on unknown outcomes.
 
 ## 3. Dynamic Planning, Compact Local Limits & DAG Scheduling
 
@@ -46,17 +43,17 @@ All baseline, planner, worker, follow-up, reviewer, repair, and synthesis invoca
 - `LeadSynthesizer` explicitly reads and injects Lead inbox messages into synthesis context and marks them `consumed` only after the model call executes.
 - Follow-ups (`FollowUpOutput`) and targeted repairs (`RevisionOutput`) must address claims by explicit `(target_claim_id, expected_version)` with same-author and same-run enforcement — never by list position — preserving immutable prior claim versions (`v1`, `v2`, ...) in SQLite.
 
-## 5. Claim Taxonomy, Deterministic Tools, Review & Honesty Gate
+## 5. Claim-Locked Gate, Exact Lineage, Reviewer Deduplication & Retrieval
 
-- **Claim & Verification Separation:** Claims carry `ClaimCategory` (`given_fact`, `external_factual_assertion`, `computation`, `logical_inference`, `assumption`, `recommendation`, `uncertainty`), runtime `ClaimStatus` (`asserted`, `supported`, `rejected`, `unresolved`, `stale`), separate `VerificationStatus` (`provenance_verified`, `computationally_verified`, `independently_reviewed_inference`, `unsupported`, `contradicted`, `stale_pending_review`), and optional `confidence` (`0.0..1.0`).
-- **`DeterministicArithmeticTool` & Baseline Parity:** Evaluates `Decimal` (precision 28) expressions over a strict allowlisted AST (no `eval`/`exec`, bounded depth/nodes/magnitude/exponents), strips common numeric formatting (`$`, `₹`, `€`, `£`, `¥`, commas), checks numeric input grounding against user/dependency text, and records immutable `tool_executions` rows. `BaselineRunner` exposes matching deterministic `ArithmeticRequest` execution for fair comparison. Passing evaluation + input grounding still requires reviewer approval that the formula and units match the user's question.
-- **Evidence Provenance (`evidence_verifier.py`):** Validates `user_prompt` and `dependency_finding` excerpts for normalized substring match, numeric preservation, and surrounding negation omission; `UnavailableExternalRetriever` keeps external citations `unverified` (`external_unverified`) with no hidden internet fetches.
-- **Independent `ReviewerPool` & `ClaimDependencyGraph`:** Deterministic prechecks run first before budgeted reviewer model calls (`reviewer_combined` in compact mode, or separate `reviewer_evidence` / `reviewer_consistency`). Both code and SQLite forbid `reviewer_id == author_agent_id`, missing verdicts keep material claims `unresolved`, and `ClaimDependencyGraph` rejects self/cross-run/cyclic `premise_refs` while transitively invalidating downstream claims (`stale` / `stale_pending_review`) on upstream rejection or revision.
-- **Deterministic `HonestyGate`:** Audited across full and partial release paths, rejecting empty/unknown/cross-run/stale/rejected/ungrounded segment citations, unapproved `computation` or unretrieved `external_factual_assertion` claims, unverified numbers/factual text emitted by synthesis, and ungrounded `new_factual_assertions`, persisting `honesty_gate_decisions` and returning `VerificationSummary`.
-- **SQLite Schema Migrations:** Repeatable migrations track `v1` -> `v2` -> `v3`, adding `run_reviewers`, `tool_executions`, `honesty_gate_decisions`, and v3 columns on `claims` / `review_verdicts` without losing historical runs.
+- **Claim & Verification Separation:** Claims carry `ClaimCategory` (`given_fact`, `external_factual_assertion`, `computation`, `logical_inference`, `assumption`, `recommendation`, `uncertainty`), runtime `ClaimStatus`, separate `VerificationStatus`, and optional `confidence` (`0.0..1.0`).
+- **Exact Arithmetic Provenance Lineage (`DeterministicArithmeticTool`):** Evaluates bounded `Decimal` expressions over a strict AST allowlist and resolves every variable via `ProvenanceCatalog` to `up_k` prompt spans, `doc_k`/`evd_...` verified excerpts, current `SUPPORTED` claim versions, prior valid `tlx_...` records, or declared `const:`/`assumption:` markers — detecting variable-to-number swaps, fabricated targets, unrelated sentence matches, ungrounded AST literals, unit conflicts, and stale premise versions. `BaselineRunner` receives matching tools, documents, and optional single-agent `--compute-matched` self-check refinement.
+- **Evidence & External Retrieval (`retrieval.py`, `evidence_verifier.py`):** `LocalDocumentRetriever` ingests operator-supplied files/text into immutable `Evidence` with SHA-256 hashes, timestamps, and character offsets. `AllowlistedHttpRetriever` stays disabled by default and blocks non-HTTPS URLs, private/SSRF DNS resolutions, redirects, and credential forwarding. No open-web search engine exists in Phase 4.
+- **Strict Reviewer Deduplication (`ReviewerPool`):** Allows at most one verdict per `(claim_id, claim_version, reviewer_id, review_dimension)` per round, validates cited `evidence_refs` against the claim's own evidence, treats skipped/missing dimensions and conflicting verdicts as `UNRESOLVED`/`REJECTED`, and rechecks live premise currency before promoting any claim to `SUPPORTED`.
+- **Claim-Locked `HonestyGate` & Coverage Separation:** Renders approved facts verbatim from exact ledger claim versions, blocks paraphrases/negation reversals and laundering across all segment and auxiliary fields, and reports `requirement_coverage` via explicit `req_k` linkage alongside separate `execution_completed`, `release_checks_executed`, `content_released_safely`, and `independent_grade` fields. When requirements are fully covered without urgent Lead inbox items, `LeadSynthesizer` can execute the deterministic synthesis fast path (`synthesis_mode="deterministic_fast_path"`), still audited by the same `HonestyGate`.
+- **SQLite Schema Migrations (`v1` -> `v4`):** Schema v4 idempotently adds retrieval metadata (`content_hash`, `retrieved_at`, `source_location`, `retrieval_status`) and tool lineage columns (`provenance_details_json`, `has_ungrounded_literals`, `formula_appropriate`).
 
 ## 6. Known Limitations
 
-- Automated verification constrains fabricated numbers, self-reviews, and unreviewed releases, but semantic or conceptual errors in natural-language inferences can still pass if independent reviewers erroneously approve them.
-- `UnavailableExternalRetriever` leaves external empirical citations `unverified` until an authorized retrieval backend is integrated.
-- On 8 GB Apple Silicon running local `qwen3:4b`, multi-call verification runs typically take 5–7 minutes (`CREWFORGE_RUN_DEADLINE_SECONDS=480.0`) and may produce `partial` releases if a specialist hits token truncation or a claim fails post-repair re-review.
+- Automated verification constrains fabricated numbers, self-reviews, and claim rewrites, but subtle conceptual errors inside natural-language claims approved by reviewers can still pass.
+- No open-web search exists; external assertions without supplied documents remain `unverified` (`external_unverified`) when HTTP retrieval is disabled or blocked.
+- Internal `requirement_coverage` reflects claim-to-requirement linkage within CrewForge and is explicitly separated from independent correctness grading (`independent_grade=None`).

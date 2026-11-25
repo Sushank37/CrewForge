@@ -12,6 +12,7 @@ from crewforge.config import CrewForgeSettings, ProviderType, configure_logging
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
 from crewforge.core.budget import BudgetManager
 from crewforge.core.orchestrator import NetworkRunner
+from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
 from crewforge.mcp_server import run_mcp_server
 from crewforge.schemas import RunResult, RunStatus
 from crewforge.storage.database import Database
@@ -67,10 +68,15 @@ async def _run_mode_cmd(
     mode: str,
     settings: CrewForgeSettings,
     json_output: bool,
+    doc_paths: list[str] | None = None,
+    compute_matched: bool = False,
 ) -> int:
-    db = Database(settings.db_path)
+    db = Database(settings.effective_db_path)
     await db.initialize()
     provider = build_provider_from_settings(settings)
+    ref_docs: list[ReferenceDocument] | None = None
+    if doc_paths:
+        ref_docs = LocalDocumentRetriever.from_paths(doc_paths).documents
     try:
         budget = BudgetManager(db, settings)
         if mode == "network":
@@ -80,14 +86,19 @@ async def _run_mode_cmd(
                 budget_manager=budget,
                 settings=settings,
             )
+            result = await runner.run(prompt, reference_documents=ref_docs)
         else:
-            runner = BaselineRunner(
+            b_runner = BaselineRunner(
                 provider=provider,
                 database=db,
                 budget_manager=budget,
                 settings=settings,
             )
-        result = await runner.run(prompt)
+            result = await b_runner.run(
+                prompt,
+                reference_documents=ref_docs,
+                compute_matched=compute_matched or None,
+            )
     finally:
         await provider.aclose()
         await db.close()
@@ -97,7 +108,7 @@ async def _run_mode_cmd(
 
 
 async def _run_trace_cmd(run_id: str, *, settings: CrewForgeSettings) -> int:
-    db = Database(settings.db_path)
+    db = Database(settings.effective_db_path)
     await db.initialize()
     try:
         trace = await db.get_run_trace(run_id)
@@ -112,12 +123,14 @@ async def _run_trace_cmd(run_id: str, *, settings: CrewForgeSettings) -> int:
 
 
 async def _run_budget_cmd(*, settings: CrewForgeSettings) -> int:
-    db = Database(settings.db_path)
+    db = Database(settings.effective_db_path)
     await db.initialize()
     try:
         summary: dict[str, Any] = await db.get_budget_summary()
     finally:
         await db.close()
+    summary["db_path"] = str(settings.effective_db_path)
+    summary["allow_paid_runs"] = settings.allow_paid_runs
     summary["max_cost_per_run_usd"] = settings.max_cost_per_run_usd
     summary["max_cumulative_cost_usd"] = settings.max_cumulative_cost_usd
     summary["max_model_calls_per_run"] = settings.max_model_calls_per_run
@@ -138,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Solve a prompt with CrewForge's verified multi-agent network.",
     )
     solve_parser.add_argument("prompt", help="Prompt to solve.")
+    solve_parser.add_argument(
+        "--doc",
+        action="append",
+        default=[],
+        help="Operator-supplied UTF-8 reference document path (repeatable).",
+    )
     solve_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     baseline_parser = subparsers.add_parser(
@@ -145,6 +164,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execute a single-agent baseline run.",
     )
     baseline_parser.add_argument("prompt", help="Prompt to evaluate.")
+    baseline_parser.add_argument(
+        "--doc",
+        action="append",
+        default=[],
+        help="Operator-supplied UTF-8 reference document path (repeatable).",
+    )
+    baseline_parser.add_argument(
+        "--compute-matched",
+        action="store_true",
+        help="Enable iterative single-agent self-check refinement pass.",
+    )
     baseline_parser.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     trace_parser = subparsers.add_parser(
@@ -203,11 +233,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "solve":
         return asyncio.run(
-            _run_mode_cmd(args.prompt, mode="network", settings=settings, json_output=args.json)
+            _run_mode_cmd(
+                args.prompt,
+                mode="network",
+                settings=settings,
+                json_output=args.json,
+                doc_paths=args.doc,
+            )
         )
     if args.command == "baseline":
         return asyncio.run(
-            _run_mode_cmd(args.prompt, mode="baseline", settings=settings, json_output=args.json)
+            _run_mode_cmd(
+                args.prompt,
+                mode="baseline",
+                settings=settings,
+                json_output=args.json,
+                doc_paths=args.doc,
+                compute_matched=args.compute_matched,
+            )
         )
     if args.command == "trace":
         return asyncio.run(_run_trace_cmd(args.run_id, settings=settings))

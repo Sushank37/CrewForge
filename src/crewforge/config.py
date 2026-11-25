@@ -58,6 +58,7 @@ class ProviderType(StrEnum):
     """Supported production model providers."""
 
     OPENAI = "openai"
+    OPENAI_COMPATIBLE = "openai_compatible"
     OLLAMA = "ollama"
 
 
@@ -89,9 +90,19 @@ class CrewForgeSettings(BaseSettings):
 
     openai_api_key: SecretStr | None = None
     openai_base_url: str | None = None
+    openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] | None = None
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", min_length=1)
     ollama_num_ctx: int = Field(default=4096, ge=512, le=131072)
     ollama_think: bool | None = None
+
+    allow_paid_runs: bool = False
+    enable_http_retrieval: bool = False
+    allowed_retrieval_hosts: list[str] = Field(default_factory=list)
+    retrieval_timeout_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    retrieval_max_bytes: int = Field(default=262144, ge=1024, le=2_097_152)
+    reference_documents: list[str] = Field(default_factory=list)
+    baseline_compute_matched: bool = False
+    enable_deterministic_synthesis_fast_path: bool = True
 
     request_timeout_seconds: float = Field(default=60.0, gt=0.0)
     run_deadline_seconds: float = Field(default=300.0, gt=0.0)
@@ -122,6 +133,7 @@ class CrewForgeSettings(BaseSettings):
     pricing_json: dict[str, ModelPricing] = Field(default_factory=dict)
 
     db_path: Path = Path(".crewforge/crewforge.db")
+    cloud_db_path: Path = Path(".crewforge/cloud_dev.db")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     @field_validator("pricing_json", mode="before")
@@ -154,9 +166,13 @@ class CrewForgeSettings(BaseSettings):
             raise ValueError("ollama_base_url cannot be empty.")
         return cleaned
 
-    @field_validator("allowed_capabilities", mode="before")
+    @field_validator(
+        "allowed_capabilities", "allowed_retrieval_hosts", "reference_documents", mode="before"
+    )
     @classmethod
     def _parse_capabilities(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return []
         if isinstance(value, str):
             stripped = value.strip()
             if stripped.startswith("["):
@@ -165,7 +181,7 @@ class CrewForgeSettings(BaseSettings):
             return [part.strip() for part in stripped.split(",") if part.strip()]
         if isinstance(value, (list, tuple, set)):
             return [str(item).strip() for item in value if str(item).strip()]
-        raise ValueError("allowed_capabilities must be a list or comma-separated string.")
+        raise ValueError("Field must be a list or comma-separated string.")
 
     @model_validator(mode="after")
     def _validate_consistency_and_secrets(self) -> CrewForgeSettings:
@@ -229,6 +245,16 @@ class CrewForgeSettings(BaseSettings):
         """Return configured pricing for a model, or None if unknown."""
         return self.pricing_json.get(model)
 
+    @property
+    def effective_db_path(self) -> Path:
+        """Route paid cloud runs to cloud_db_path unless pointed to a custom DB path."""
+        default_local_db = Path(".crewforge/crewforge.db")
+        if self.provider in {ProviderType.OPENAI, ProviderType.OPENAI_COMPATIBLE} and (
+            "db_path" not in self.model_fields_set or self.db_path == default_local_db
+        ):
+            return self.cloud_db_path
+        return self.db_path
+
     def to_run_config(self) -> RunConfig:
         """Create an immutable RunConfig snapshot from current settings."""
         return RunConfig(
@@ -242,6 +268,11 @@ class CrewForgeSettings(BaseSettings):
             max_model_calls_per_run=self.max_model_calls_per_run,
             max_cost_per_run_usd=self.max_cost_per_run_usd,
             max_cumulative_cost_usd=self.max_cumulative_cost_usd,
+            reasoning_effort=(
+                self.openai_reasoning_effort
+                if self.provider in {ProviderType.OPENAI, ProviderType.OPENAI_COMPATIBLE}
+                else None
+            ),
         )
 
 

@@ -14,17 +14,17 @@ def build_worker_system_prompt(agent: AgentSpec) -> str:
         f"Allowed capabilities: [{caps}].\n\n"
         "Output rules:\n"
         "- Produce concise, accurate `findings` directly addressing your assigned task.\n"
-        "- Express key points as atomic `claims` with explicit `category` (`given_fact`, "
+        "- Emit at most 4 atomic `claims` with explicit `category` (`given_fact`, "
         "`external_factual_assertion`, `computation`, `logical_inference`, `assumption`, "
-        "`recommendation`, `uncertainty`) and `evidence_indices`.\n"
-        "- For `computation` claims, attach `computation` (`expression`, `variables`, "
-        "`input_provenance_refs`, `proposed_result`, `units`) with plain numeric values "
-        "(no currency symbols like ₹ or $) so the arithmetic tool verifies exact numbers.\n"
+        "`recommendation`, `uncertainty`), `evidence_indices`, and `requirement_refs` (`req_1`).\n"
+        "- For `computation` claims, attach `computation` (`expression`, `variable_bindings` with "
+        "`name`, `value`, `provenance_ref` mapped to `up_1`, `doc_1`, `clm_...`, `tlx_...`, "
+        "`const:...`, or `assumption:...`, plus `proposed_result` and `units`), plain numbers.\n"
         "- Only classify a claim as `external_factual_assertion` if it asserts outside facts "
         "not given in the prompt; use `logical_inference` or `recommendation` for analysis.\n"
         "- For derived `logical_inference` claims, link `premise_claim_ids` to upstream claims.\n"
-        "- Only cite `user_prompt` or `dependency_finding` excerpts that exist verbatim in input; "
-        "mark outside references as `external_unverified` and calculations as `calculation`.\n"
+        "- Only cite `user_prompt` or `dependency_finding` or `external_retrieved` excerpts that "
+        "exist verbatim in input/documents; mark unretrieved outside cites `external_unverified`.\n"
         "- Do not fabricate facts or emit hidden chain-of-thought; list `assumptions`, "
         "`uncertainties`, and `missing_information` explicitly.\n"
         "- Emit `outgoing_messages` only when a peer specialist or 'lead' genuinely needs "
@@ -59,6 +59,7 @@ def build_worker_user_prompt(
     inbound_messages: list[AgentMessage],
     agent_labels: dict[str, str],
     peer_directory: list[str],
+    provenance_lines: list[str] | None = None,
 ) -> str:
     """Assemble bounded task context for a specialist without dumping full transcripts."""
     criteria = acceptance_criteria or task.acceptance_criteria
@@ -81,11 +82,13 @@ def build_worker_user_prompt(
         if dependency_claims_summary
         else "None."
     )
+    prov_block = "\n".join(provenance_lines) if provenance_lines else "None."
     peers_block = ", ".join(peer_directory) if peer_directory else "lead"
     messages_block = _format_inbound_messages(inbound_messages, agent_labels)
 
     return (
         f"Original user request:\n{original_prompt}\n\n"
+        f"Trusted provenance catalog (use aliases in input_provenance_refs):\n{prov_block}\n\n"
         f"Assigned task ({task.task_ref or task.task_id}): {task.title}\n"
         f"Task description:\n{task.description}\n\n"
         f"Expected deliverables:\n{deliverables_block}\n\n"

@@ -81,6 +81,70 @@ def build_partial_synthesis_output(
     )
 
 
+def build_deterministic_fast_path_output(
+    *,
+    plan: ExecutionPlan,
+    claims: list[Claim],
+) -> SynthesisOutput | None:
+    """Build deterministic claim-locked SynthesisOutput when fast-path criteria are satisfied.
+
+    Returns None when model synthesis is needed (e.g., no supported claims or uncovered reqs).
+    """
+    supported = [c for c in claims if c.is_material and c.status == ClaimStatus.SUPPORTED]
+    if not supported:
+        return None
+
+    reqs = [r.strip() for r in plan.user_requirements if r.strip()]
+    covered_reqs: set[str] = set()
+    accepted: list[ReleaseSegment] = []
+    for claim in supported:
+        covered_reqs.update(claim.requirement_refs)
+        accepted.append(
+            ReleaseSegment(
+                segment_type="accepted_claim",
+                text=claim.statement,
+                claim_refs=[ClaimVersionRef(claim_id=claim.claim_id, claim_version=claim.version)],
+                requirement_ref=claim.requirement_refs[0] if claim.requirement_refs else None,
+                is_factual_assertion=True,
+            )
+        )
+
+    recommendations = [
+        ReleaseSegment(
+            segment_type="recommendation",
+            text=c.statement,
+            claim_refs=[ClaimVersionRef(claim_id=c.claim_id, claim_version=c.version)],
+            requirement_ref=c.requirement_refs[0] if c.requirement_refs else None,
+            is_factual_assertion=False,
+        )
+        for c in claims
+        if c.category == ClaimCategory.RECOMMENDATION and c.status != ClaimStatus.REJECTED
+    ]
+    for rec in recommendations:
+        if rec.requirement_ref:
+            covered_reqs.add(rec.requirement_ref)
+
+    all_covered = True
+    for idx, req_text in enumerate(reqs, start=1):
+        if req_text not in covered_reqs and f"req_{idx}" not in covered_reqs:
+            all_covered = False
+            break
+    if reqs and not all_covered:
+        return None
+
+    return SynthesisOutput(
+        user_requirements=list(plan.user_requirements),
+        accepted_segments=accepted,
+        conditional_conclusions=[],
+        recommendations=recommendations,
+        assumptions=list(plan.assumptions),
+        unresolved_issues=[],
+        missing_information=list(plan.missing_information),
+        new_factual_assertions=[],
+        referenced_claim_ids=[c.claim_id for c in supported],
+    )
+
+
 class LeadSynthesizer:
     """Synthesizes reviewed claims with Lead inbox consumption and Honesty Gate enforcement."""
 
@@ -111,9 +175,10 @@ class LeadSynthesizer:
         extra_missing: list[str],
         uncertainties: list[str],
         is_partial_run: bool,
+        allow_deterministic_fast_path: bool = False,
         run_deadline_monotonic: float | None = None,
-    ) -> HonestyGateResult:
-        """Consume Lead inbox, run Lead synthesis, and enforce deterministic Honesty Gate."""
+    ) -> tuple[HonestyGateResult, str]:
+        """Consume Lead inbox, synthesize (or use deterministic fast path), and run Gate."""
         completed_tasks = [t for t in tasks if t.status == TaskStatus.COMPLETED]
         incomplete_tasks = [t for t in tasks if t.status != TaskStatus.COMPLETED]
 
@@ -124,12 +189,60 @@ class LeadSynthesizer:
                 latest_by_id[claim.claim_id] = claim
         latest_claims = list(latest_by_id.values())
 
-        # Deliver Lead's inbox messages before building synthesis prompt.
+        # Deliver Lead's inbox messages before building synthesis prompt or checking fast path.
         lead_inbox = await self._bus.read_inbox(
             run_id=run_id,
             recipient_id="lead",
             mark_delivered=True,
         )
+        important_inbox = [
+            m for m in lead_inbox if m.message_type in {"question", "warning", "clarification"}
+        ]
+
+        if (
+            allow_deterministic_fast_path
+            and not is_partial_run
+            and not incomplete_tasks
+            and not important_inbox
+        ):
+            fast_output = build_deterministic_fast_path_output(plan=plan, claims=latest_claims)
+            if fast_output is not None:
+                if lead_inbox:
+                    await self._bus.mark_consumed(
+                        run_id=run_id,
+                        recipient_id="lead",
+                        messages=lead_inbox,
+                    )
+                await self._db.append_event(
+                    ExecutionEvent(
+                        run_id=run_id,
+                        event_type="synthesis_fast_path",
+                        actor="lead",
+                        message=(
+                            "Used deterministic claim-locked synthesis fast path without extra "
+                            "model call."
+                        ),
+                        payload={"lead_messages_consumed": len(lead_inbox)},
+                    )
+                )
+                gate_result = self._gate.evaluate(
+                    run_id=run_id,
+                    original_prompt=original_prompt,
+                    plan=plan,
+                    synthesis=fast_output,
+                    all_claims=all_claims,
+                    evidence_list=evidence_list,
+                    tool_executions=tool_executions,
+                    verdicts=verdicts,
+                    incomplete_tasks=incomplete_tasks,
+                    extra_assumptions=extra_assumptions,
+                    extra_missing=extra_missing,
+                    uncertainties=uncertainties,
+                    is_partial_run=is_partial_run,
+                )
+                assert gate_result.gate_record is not None
+                await self._gate.persist_decision(gate_result.gate_record)
+                return gate_result, "deterministic_fast_path"
 
         system_prompt = build_synthesis_system_prompt()
         user_prompt = build_synthesis_user_prompt(
@@ -186,7 +299,7 @@ class LeadSynthesizer:
         )
         assert gate_result.gate_record is not None
         await self._gate.persist_decision(gate_result.gate_record)
-        return gate_result
+        return gate_result, "model_synthesis"
 
     async def gate_partial_fallback(
         self,

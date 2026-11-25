@@ -170,6 +170,7 @@ class TextGenerationResult(BaseModel):
 
     provider: str
     model: str
+    returned_model: str | None = None
     text: str
     usage: UsageMetrics = Field(default_factory=UsageMetrics)
     raw_response_id: str | None = None
@@ -180,6 +181,7 @@ class StructuredGenerationResult[T: BaseModel](BaseModel):
 
     provider: str
     model: str
+    returned_model: str | None = None
     raw_text: str
     parsed: T
     usage: UsageMetrics = Field(default_factory=UsageMetrics)
@@ -203,6 +205,16 @@ class ModelProvider(ABC):
     @abstractmethod
     def is_paid_provider(self) -> bool:
         """Whether calls incur external metered monetary costs."""
+
+    @property
+    def supports_temperature(self) -> bool:
+        """Whether `temperature` parameter is supported by this provider/model configuration."""
+        return True
+
+    @property
+    def supports_reasoning_effort(self) -> bool:
+        """Whether `reasoning.effort` parameter is supported."""
+        return False
 
     @abstractmethod
     async def generate_text(

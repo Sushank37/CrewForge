@@ -11,14 +11,17 @@ def build_synthesis_system_prompt() -> str:
         "You are the Lead Synthesizer of CrewForge. Organize the final release strictly from "
         "reviewed claims, deterministic tool records, and completed task context.\n\n"
         "Release discipline rules:\n"
-        "- Populate `accepted_segments` ONLY with statements directly grounded in `supported` "
-        "claims, referencing exact `(claim_id, claim_version)` in `claim_refs`.\n"
-        "- Put qualified analyses in `conditional_conclusions`, actionable suggestions in "
-        "`recommendations`, and unverified/rejected/stale items in `unresolved_issues`.\n"
+        "- CLAIM-LOCKED RELEASE: copy the exact `statement` text verbatim from `supported` "
+        "claims (or set `text` empty) and provide exact `(claim_id, claim_version)` in "
+        "`claim_refs`. Any rewritten statement is rejected by the Honesty Gate.\n"
+        "- Put qualified `unresolved` ledger claims in `conditional_conclusions` (citing exact "
+        "`claim_refs` and verbatim text), reviewed `recommendation` ledger claims in "
+        "`recommendations` (with `claim_refs` and verbatim text), and gaps in "
+        "`unresolved_issues`.\n"
+        "- Set `requirement_ref` on segments using stable IDs (`req_1`, `req_2`, ...).\n"
         "- Never repeat a `rejected` or `stale` claim as fact.\n"
-        "- Do NOT introduce new unreviewed material factual assertions in `accepted_segments`; "
-        "if you notice an uncovered gap, put it in `unresolved_issues` or `missing_information` "
-        "(or list it in `new_factual_assertions` where it will remain flagged unverified).\n"
+        "- Do NOT introduce new unreviewed material factual assertions in any segment or "
+        "auxiliary field (`assumptions`, `missing_information`, `unresolved_issues`).\n"
         "- Incorporate any inbound messages from your Lead inbox."
     )
 
@@ -34,7 +37,10 @@ def build_synthesis_user_prompt(
     lead_inbox: list[AgentMessage],
 ) -> str:
     """Format bounded claims, tool results, Lead inbox, and tasks for synthesis."""
-    req_block = "\n".join(f"- {r}" for r in plan.user_requirements) or "- None."
+    req_block = (
+        "\n".join(f"- [req_{idx}] {r}" for idx, r in enumerate(plan.user_requirements, start=1))
+        or "- None."
+    )
     completed_block = (
         "\n".join(
             f"- [{t.task_ref or t.task_id}] {t.title}: {t.findings or 'No findings.'}"

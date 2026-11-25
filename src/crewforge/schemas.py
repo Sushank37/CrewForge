@@ -1,4 +1,4 @@
-"""Typed Pydantic v2 data contracts for CrewForge (Phases 1-3)."""
+"""Typed Pydantic v2 data contracts for CrewForge (Phases 1-4)."""
 
 from __future__ import annotations
 
@@ -104,6 +104,7 @@ class UsageMetrics(BaseModel):
     retries: int = Field(default=0, ge=0)
     latency_ms: float = Field(default=0.0, ge=0.0)
     usage_reported: bool = True
+    returned_model: str | None = None
 
     @model_validator(mode="after")
     def _normalize_and_validate_tokens(self) -> UsageMetrics:
@@ -197,6 +198,12 @@ class Evidence(BaseModel):
     excerpt: str = Field(min_length=1)
     reliability: EvidenceReliability = EvidenceReliability.UNVERIFIED
     verified_in_input: bool = False
+    content_hash: str | None = None
+    retrieved_at: str | None = None
+    source_location: str | None = None
+    retrieval_status: Literal["not_applicable", "ok", "unavailable", "blocked", "failed"] = (
+        "not_applicable"
+    )
     task_id: str | None = None
     created_by: str = Field(min_length=1)
     created_at: datetime = Field(default_factory=_utc_now)
@@ -213,12 +220,15 @@ class ToolExecutionRecord(BaseModel):
     expression: str = Field(min_length=1)
     variables: dict[str, str] = Field(default_factory=dict)
     input_provenance_refs: dict[str, str] = Field(default_factory=dict)
+    provenance_details: dict[str, dict[str, Any]] = Field(default_factory=dict)
     proposed_result: str | None = None
     computed_result: str | None = None
     units: str = ""
     assumptions: list[str] = Field(default_factory=list)
     matches_proposed: bool | None = None
     inputs_grounded: bool = False
+    has_ungrounded_literals: bool = False
+    formula_appropriate: bool | None = None
     success: bool = False
     error: str | None = None
     created_at: datetime = Field(default_factory=_utc_now)
@@ -282,8 +292,18 @@ class ReviewVerdict(BaseModel):
     created_at: datetime = Field(default_factory=_utc_now)
 
 
+class RequirementCoverageItem(BaseModel):
+    """Honest requirement-by-requirement linkage status."""
+
+    requirement_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    status: Literal["answered", "partially_answered", "unresolved", "missing"]
+    linked_claim_refs: list[ClaimVersionRef] = Field(default_factory=list)
+    rationale: str = ""
+
+
 class VerificationSummary(BaseModel):
-    """Quantitative verification & coverage metrics surfaced on RunResult."""
+    """Quantitative verification & honest coverage metrics surfaced on RunResult."""
 
     material_claim_count: int = Field(default=0, ge=0)
     supported_claim_count: int = Field(default=0, ge=0)
@@ -294,6 +314,16 @@ class VerificationSummary(BaseModel):
     evidence_types: dict[str, int] = Field(default_factory=dict)
     review_completeness: float | None = Field(default=None, ge=0.0, le=1.0)
     requirement_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    requirements_answered: int = Field(default=0, ge=0)
+    requirements_partial: int = Field(default=0, ge=0)
+    requirements_unresolved: int = Field(default=0, ge=0)
+    requirements_missing: int = Field(default=0, ge=0)
+    requirement_statuses: list[RequirementCoverageItem] = Field(default_factory=list)
+    execution_completed: bool = False
+    release_checks_executed: bool = True
+    content_released_safely: bool = False
+    coverage_methodology: str = "internal_claim_linkage_not_independent_grade"
+    independent_grade: float | None = Field(default=None, ge=0.0, le=1.0)
     honesty_gate_passed: bool = False
     honesty_gate_reasons: list[str] = Field(default_factory=list)
 
@@ -325,6 +355,7 @@ class RunConfig(BaseModel):
     max_model_calls_per_run: int = Field(ge=1)
     max_cost_per_run_usd: float = Field(ge=0.0)
     max_cumulative_cost_usd: float = Field(ge=0.0)
+    reasoning_effort: str | None = None
 
 
 class ExecutionEvent(BaseModel):
@@ -349,6 +380,7 @@ class RunResult(BaseModel):
     prompt: str = Field(min_length=1)
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
+    returned_model: str | None = None
     answer: str = ""
     missing_information: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -356,6 +388,8 @@ class RunResult(BaseModel):
     referenced_claim_ids: list[str] = Field(default_factory=list)
     specialist_roles: list[str] = Field(default_factory=list)
     incomplete_tasks: list[str] = Field(default_factory=list)
+    synthesis_mode: str | None = None
+    baseline_mode: str | None = None
     verification: VerificationSummary | None = None
     usage: UsageMetrics = Field(default_factory=UsageMetrics)
     latency_ms: float = Field(default=0.0, ge=0.0)
@@ -432,15 +466,56 @@ class PlannerOutput(BaseModel):
     missing_information: list[str] = Field(default_factory=list)
 
 
+class ArithmeticVariableBinding(BaseModel):
+    """Portable schema binding pairing a variable name, value, and provenance alias."""
+
+    name: str = Field(min_length=1)
+    value: str | int | float
+    provenance_ref: str = Field(default="")
+
+
 class ArithmeticRequest(BaseModel):
     """Structured deterministic computation request emitted by baseline or specialists."""
 
     expression: str = Field(min_length=1, max_length=256)
-    variables: dict[str, str | int | float] = Field(default_factory=dict)
-    input_provenance_refs: dict[str, str] = Field(default_factory=dict)
+    variable_bindings: list[ArithmeticVariableBinding] = Field(default_factory=list)
     proposed_result: str | int | float | None = None
     units: str = ""
     assumptions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_variable_dicts(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "variable_bindings" not in data and "variables" in data:
+            raw_vars = data.get("variables") or {}
+            raw_refs = data.get("input_provenance_refs") or {}
+            if isinstance(raw_vars, dict):
+                bindings = [
+                    {
+                        "name": k,
+                        "value": v,
+                        "provenance_ref": str(raw_refs.get(k, ""))
+                        if isinstance(raw_refs, dict)
+                        else "",
+                    }
+                    for k, v in raw_vars.items()
+                ]
+                copied = {
+                    k: v for k, v in data.items() if k not in {"variables", "input_provenance_refs"}
+                }
+                copied["variable_bindings"] = bindings
+                return copied
+        return data
+
+    @property
+    def variables(self) -> dict[str, str | int | float]:
+        """Dictionary mapping variable name -> value for tool evaluation."""
+        return {b.name: b.value for b in self.variable_bindings}
+
+    @property
+    def input_provenance_refs(self) -> dict[str, str]:
+        """Dictionary mapping variable name -> provenance reference target."""
+        return {b.name: b.provenance_ref for b in self.variable_bindings}
 
 
 class ProposedEvidence(BaseModel):
@@ -450,6 +525,7 @@ class ProposedEvidence(BaseModel):
         "user_prompt",
         "dependency_finding",
         "calculation",
+        "external_retrieved",
         "external_unverified",
     ]
     source_ref: str = Field(min_length=1, max_length=200)
@@ -534,10 +610,10 @@ class RevisionOutput(BaseModel):
 
 
 class ReviewerVerdictItem(BaseModel):
-    """Model-facing verdict entry for a specific claim ID and version."""
+    """Model-facing verdict entry for a specific claim alias or claim ID and version."""
 
     claim_id: str = Field(min_length=1)
-    claim_version: int = Field(ge=1)
+    claim_version: int | None = Field(default=None, ge=1)
     review_dimension: str = Field(default="combined_evidence_consistency", min_length=1)
     decision: ReviewDecision
     rationale: str = Field(min_length=1, max_length=250)
@@ -565,7 +641,7 @@ class ReleaseSegment(BaseModel):
         "unresolved_issue",
         "missing_information",
     ]
-    text: str = Field(min_length=1, max_length=1000)
+    text: str = Field(default="", max_length=1000)
     claim_refs: list[ClaimVersionRef] = Field(default_factory=list)
     requirement_ref: str | None = None
     is_factual_assertion: bool = True

@@ -170,6 +170,7 @@ class ModelExecutor:
                             "attempt": attempt_index + 1,
                             "provider": response.provider,
                             "model": response.model,
+                            "returned_model": response.returned_model,
                             "input_tokens": reconciled_usage.input_tokens,
                             "output_tokens": reconciled_usage.output_tokens,
                             "total_tokens": reconciled_usage.total_tokens,

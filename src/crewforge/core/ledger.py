@@ -18,7 +18,7 @@ from crewforge.schemas import (
     VerificationStatus,
 )
 from crewforge.storage.database import CrossRunReferenceError, Database
-from crewforge.tools.arithmetic import DeterministicArithmeticTool
+from crewforge.tools.arithmetic import DeterministicArithmeticTool, build_provenance_catalog
 
 _NON_MATERIAL_CATEGORIES = frozenset(
     {
@@ -52,15 +52,22 @@ class ClaimLedger:
         claim_proposals: list[ProposedClaim],
     ) -> tuple[list[Evidence], list[Claim], list[ToolExecutionRecord]]:
         """Validate evidence, run arithmetic requests, and persist initial claim versions."""
+        existing_all = await self._db.get_claims_for_run(run_id, latest_only=False)
         existing_claims = await self._db.get_claims_for_run(run_id, latest_only=True)
         existing_by_id = {c.claim_id: c for c in existing_claims}
+        existing_evidence = await self._db.get_evidence_for_run(run_id)
         prior_tool_records = await self._db.get_tool_executions_for_run(run_id)
 
-        grounded_texts = [original_prompt, dependency_findings_text]
-        grounded_texts.extend(
-            f"{r.computed_result} {r.units}"
-            for r in prior_tool_records
-            if r.success and r.computed_result is not None
+        # Resolve variables strictly against verified prompt spans, verified evidence,
+        # current supported claims, and prior valid tools (never unverified dependency prose).
+        verified_evidence_all = [e for e in existing_evidence if e.verified_in_input]
+        plan_assumptions: list[str] = []
+        catalog = build_provenance_catalog(
+            original_prompt=original_prompt,
+            verified_evidence=verified_evidence_all,
+            all_claims=existing_all,
+            tool_records=prior_tool_records,
+            assumptions=plan_assumptions,
         )
 
         # Execute computation requests attached to claims before validating computation evidence.
@@ -72,7 +79,7 @@ class ClaimLedger:
                     run_id=run_id,
                     actor=agent_id,
                     request=prop_claim.computation,
-                    grounded_texts=grounded_texts,
+                    catalog=catalog,
                     task_id=task_id,
                 )
                 claim_tool_records[idx] = rec
@@ -81,12 +88,16 @@ class ClaimLedger:
         combined_tool_records = [*prior_tool_records, *all_new_tool_records]
 
         persisted_evidence: list[Evidence] = []
+        retrieved_sources_text = "\n".join(
+            e.excerpt for e in verified_evidence_all if e.source_type == "external_retrieved"
+        )
         for proposal in evidence_proposals:
             check = verify_evidence_proposal(
                 proposal=proposal,
                 original_prompt=original_prompt,
                 dependency_findings_text=dependency_findings_text,
                 matching_tool_records=combined_tool_records,
+                retrieved_sources_text=retrieved_sources_text,
             )
             evd = Evidence(
                 run_id=run_id,
@@ -95,6 +106,15 @@ class ClaimLedger:
                 excerpt=proposal.excerpt,
                 reliability=check.reliability,
                 verified_in_input=check.verified_in_input,
+                retrieval_status=(
+                    "ok"
+                    if proposal.source_type == "external_retrieved" and check.verified_in_input
+                    else (
+                        "unavailable"
+                        if proposal.source_type == "external_unverified"
+                        else "not_applicable"
+                    )
+                ),
                 task_id=task_id,
                 created_by=agent_id,
             )
@@ -104,7 +124,8 @@ class ClaimLedger:
         persisted_claims: list[Claim] = []
         local_ref_map: dict[str, Claim] = {}
 
-        for idx, prop_claim in enumerate(claim_proposals):
+        # Enforce bounded claim count per specialist call (keep at most 6 claims per batch).
+        for idx, prop_claim in enumerate(claim_proposals[:6]):
             linked_evidence_ids = [
                 persisted_evidence[e_idx].evidence_id
                 for e_idx in prop_claim.evidence_indices
@@ -218,18 +239,23 @@ class ClaimLedger:
 
         tool_ids = list(prior_claim.tool_execution_ids)
         if computation_request is not None:
+            all_claims_run = await self._db.get_claims_for_run(run_id, latest_only=False)
+            verified_evd = [
+                e for e in await self._db.get_evidence_for_run(run_id) if e.verified_in_input
+            ]
             prior_tools = await self._db.get_tool_executions_for_run(run_id)
-            grounded_texts = [original_prompt, dependency_findings_text]
-            grounded_texts.extend(
-                f"{r.computed_result} {r.units}"
-                for r in prior_tools
-                if r.success and r.computed_result is not None
+            catalog = build_provenance_catalog(
+                original_prompt=original_prompt,
+                verified_evidence=verified_evd,
+                all_claims=all_claims_run,
+                tool_records=prior_tools,
+                assumptions=assumptions if assumptions is not None else prior_claim.assumptions,
             )
             rec = await self._arithmetic.execute(
                 run_id=run_id,
                 actor=author_agent_id,
                 request=computation_request,  # type: ignore[arg-type]
-                grounded_texts=grounded_texts,
+                catalog=catalog,
                 task_id=prior_claim.task_id,
             )
             tool_ids = [rec.tool_execution_id]

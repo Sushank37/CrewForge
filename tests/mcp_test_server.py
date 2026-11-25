@@ -149,13 +149,16 @@ def _scripted_mcp_handler(prompt: str, response_model: type[BaseModel] | None) -
             )
         return {"verdicts": verdicts, "missing_requirement_coverage": []}
     if response_model is SynthesisOutput:
-        supported_refs = _SUPPORTED_CLAIM_RE.findall(prompt)
+        supported_refs = re.findall(
+            r"- (clm_[a-f0-9]+) \(version=(\d+),.*?status=supported.*?\): ([^\n]+)",
+            prompt,
+        )
         accepted = []
-        for cid, cver in supported_refs:
+        for cid, cver, stmt in supported_refs:
             accepted.append(
                 {
                     "segment_type": "accepted_claim",
-                    "text": ("Schema validation prevents invalid state in multi-agent systems."),
+                    "text": stmt.strip(),
                     "claim_refs": [{"claim_id": cid, "claim_version": int(cver)}],
                     "is_factual_assertion": True,
                 }
@@ -164,19 +167,12 @@ def _scripted_mcp_handler(prompt: str, response_model: type[BaseModel] | None) -
             "user_requirements": ["Address schema validation in multi-agent systems"],
             "accepted_segments": accepted,
             "conditional_conclusions": [],
-            "recommendations": [
-                {
-                    "segment_type": "recommendation",
-                    "text": "Enforce strict schema checks at every agent boundary.",
-                    "claim_refs": [],
-                    "is_factual_assertion": False,
-                }
-            ],
+            "recommendations": [],
             "assumptions": ["Evaluated offline."],
             "unresolved_issues": [],
             "missing_information": ["Target throughput constraints."],
             "new_factual_assertions": [],
-            "referenced_claim_ids": [cid for cid, _ in supported_refs],
+            "referenced_claim_ids": [cid for cid, _, _ in supported_refs],
             "confidence_notes": "Synthesized from reviewed claims.",
         }
     return {

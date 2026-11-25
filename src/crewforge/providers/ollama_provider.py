@@ -206,6 +206,7 @@ class OllamaProvider(ModelProvider):
             retries=retries,
             latency_ms=latency_ms,
             usage_reported=usage_reported,
+            returned_model=str(data.get("model") or model),
         )
         return content, usage
 
@@ -254,6 +255,7 @@ class OllamaProvider(ModelProvider):
         return TextGenerationResult(
             provider=self.provider_name,
             model=self._model,
+            returned_model=usage.returned_model,
             text=content,
             usage=usage,
         )
@@ -313,6 +315,7 @@ class OllamaProvider(ModelProvider):
         return StructuredGenerationResult[T](
             provider=self.provider_name,
             model=self._model,
+            returned_model=usage.returned_model,
             raw_text=content,
             parsed=parsed,
             usage=usage,

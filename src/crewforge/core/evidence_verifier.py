@@ -33,6 +33,9 @@ class RetrievedSource(BaseModel):
     title: str = ""
     excerpt: str
     retrieved_at: str = ""
+    source_location: str = ""
+    content_hash: str = ""
+    reliability: EvidenceReliability = EvidenceReliability.MEDIUM
 
 
 class EvidenceRetriever(ABC):
@@ -115,12 +118,14 @@ def verify_evidence_proposal(
     original_prompt: str,
     dependency_findings_text: str = "",
     matching_tool_records: list[ToolExecutionRecord] | None = None,
+    retrieved_sources_text: str = "",
 ) -> ProvenanceCheckResult:
     """Deterministically validate provenance without conflating substring match with truth.
 
     - `user_prompt`: checks verbatim substring, numeric consistency, and surrounding negation.
     - `dependency_finding`: checks verbatim presence in completed dependency outputs.
     - `calculation`: requires an actual successful `ToolExecutionRecord` in the same run.
+    - `external_retrieved`: requires verbatim match inside genuinely retrieved external docs.
     - `external_unverified`: always remains UNVERIFIED without an active retriever.
     """
     norm_excerpt = normalize_text(proposal.excerpt)
@@ -172,6 +177,23 @@ def verify_evidence_proposal(
             reliability=EvidenceReliability.UNVERIFIED,
             verified_in_input=False,
             notes="Computation evidence lacks a successful grounded tool execution record.",
+        )
+
+    if proposal.source_type == "external_retrieved":
+        if not retrieved_sources_text:
+            return ProvenanceCheckResult(
+                reliability=EvidenceReliability.UNVERIFIED,
+                verified_in_input=False,
+                notes="No retrieved external document matches this citation.",
+            )
+        matched, note = _preserves_numbers_and_negation(
+            excerpt=proposal.excerpt,
+            source_text=retrieved_sources_text,
+        )
+        return ProvenanceCheckResult(
+            reliability=EvidenceReliability.MEDIUM if matched else EvidenceReliability.UNVERIFIED,
+            verified_in_input=matched,
+            notes=note,
         )
 
     # External factual assertions and URL-like citations remain unverified without retrieval.

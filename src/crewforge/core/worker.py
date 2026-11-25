@@ -26,6 +26,7 @@ from crewforge.schemas import (
     ToolExecutionRecord,
 )
 from crewforge.storage.database import CrossRunReferenceError
+from crewforge.tools.arithmetic import build_provenance_catalog
 
 
 @dataclass
@@ -107,6 +108,19 @@ class SpecialistWorker:
         )
         agent_labels, peer_directory = self._build_agent_labels(plan)
 
+        all_claims_run = await self._ledger.get_claims(run_id, latest_only=False)
+        verified_evd = [
+            e for e in await self._ledger._db.get_evidence_for_run(run_id) if e.verified_in_input
+        ]
+        prior_tools = await self._ledger._db.get_tool_executions_for_run(run_id)
+        prov_catalog = build_provenance_catalog(
+            original_prompt=original_prompt,
+            verified_evidence=verified_evd,
+            all_claims=all_claims_run,
+            tool_records=prior_tools,
+            assumptions=plan.assumptions,
+        )
+
         system_prompt = build_worker_system_prompt(agent)
         user_prompt = build_worker_user_prompt(
             original_prompt=original_prompt,
@@ -118,6 +132,7 @@ class SpecialistWorker:
             inbound_messages=inbound_messages,
             agent_labels=agent_labels,
             peer_directory=peer_directory,
+            provenance_lines=prov_catalog.prompt_summary_lines(),
         )
 
         response = await self._executor.execute_structured(

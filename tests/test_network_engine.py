@@ -39,7 +39,9 @@ from tests.fake_provider import FakeProvider
 
 _CLAIM_ID_VER_RE = re.compile(r"Claim (clm_[a-f0-9]+) \(version=(\d+),")
 _TARGET_CLAIM_RE = re.compile(r"claim_id=(clm_[a-f0-9]+),\s*expected_version=(\d+)")
-_SUPPORTED_LINE_RE = re.compile(r"- (clm_[a-f0-9]+) \(version=(\d+),.*?status=supported")
+_SUPPORTED_LINE_RE = re.compile(
+    r"- (clm_[a-f0-9]+) \(version=(\d+),.*?status=supported.*?\): ([^\n]+)"
+)
 
 
 def _settings(db_path: Path, **overrides: object) -> CrewForgeSettings:
@@ -292,11 +294,11 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
         assert "Lead notice: integration C finished cleanly." in prompt
         supported = _SUPPORTED_LINE_RE.findall(prompt)
         segments = []
-        for cid, cver in supported:
+        for cid, cver, stmt in supported:
             segments.append(
                 {
                     "segment_type": "accepted_claim",
-                    "text": "Analysis of alpha and beta completed with verified keyword alpha.",
+                    "text": stmt.strip(),
                     "claim_refs": [{"claim_id": cid, "claim_version": int(cver)}],
                     "is_factual_assertion": True,
                 }
@@ -310,7 +312,7 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
             "unresolved_issues": [],
             "missing_information": [],
             "new_factual_assertions": [],
-            "referenced_claim_ids": ["clm_forged_cross_run", *[c for c, _ in supported]],
+            "referenced_claim_ids": ["clm_forged_cross_run", *[c for c, _, _ in supported]],
             "confidence_notes": "All branches completed.",
         }
 

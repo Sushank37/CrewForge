@@ -67,12 +67,22 @@ def _build_review_user_prompt(
     evidence_by_id: dict[str, Evidence],
     tool_by_id: dict[str, ToolExecutionRecord],
     prior_claims_by_id: dict[str, Claim],
-) -> str:
-    reqs = "\n".join(f"- {r}" for r in plan.user_requirements) or "- None."
+) -> tuple[str, dict[str, tuple[str, int]]]:
+    reqs = (
+        "\n".join(f"- [req_{idx}] {r}" for idx, r in enumerate(plan.user_requirements, start=1))
+        or "- None."
+    )
+    alias_map: dict[str, tuple[str, int]] = {}
     claim_blocks: list[str] = []
-    for claim in claims:
+    for idx, claim in enumerate(claims, start=1):
+        alias = f"c{idx}"
+        alias_map[alias] = (claim.claim_id, claim.version)
         evd_lines: list[str] = []
+        seen_evd: set[str] = set()
         for eid in claim.evidence_ids:
+            if eid in seen_evd:
+                continue
+            seen_evd.add(eid)
             evd = evidence_by_id.get(eid)
             if evd is not None:
                 evd_lines.append(
@@ -88,19 +98,21 @@ def _build_review_user_prompt(
                     f"  - {rec.tool_execution_id}: expr=`{rec.expression}`, "
                     f"computed={rec.computed_result}, proposed={rec.proposed_result}, "
                     f"units='{rec.units}', matches={rec.matches_proposed}, "
-                    f"inputs_grounded={rec.inputs_grounded}, success={rec.success}"
+                    f"inputs_grounded={rec.inputs_grounded}, "
+                    f"ungrounded_literals={rec.has_ungrounded_literals}, success={rec.success}"
                 )
         premise_lines = []
         for p in claim.premise_refs:
+            p_obj = prior_claims_by_id.get(p.claim_id)
             p_status = (
-                prior_claims_by_id[p.claim_id].status.value
-                if p.claim_id in prior_claims_by_id
-                else "unknown"
+                p_obj.status.value
+                if (p_obj is not None and p_obj.version == p.claim_version)
+                else "stale_or_missing"
             )
             premise_lines.append(f"  - {p.claim_id} v{p.claim_version}: {p_status}")
         claim_blocks.append(
-            f"Claim {claim.claim_id} (version={claim.version}, category={claim.category.value}, "
-            f"author={claim.author_agent_id}):\n"
+            f"Claim {claim.claim_id} (version={claim.version}, alias={alias}, "
+            f"category={claim.category.value}, author={claim.author_agent_id}):\n"
             f"  Statement: {claim.statement}\n"
             f"  Assumptions: {claim.assumptions or ['None']}\n"
             f"  Evidence:\n" + ("\n".join(evd_lines) if evd_lines else "  - None") + "\n"
@@ -108,11 +120,13 @@ def _build_review_user_prompt(
             "  Premises:\n" + ("\n".join(premise_lines) if premise_lines else "  - None")
         )
 
-    return (
+    prompt = (
         f"Original user prompt:\n{original_prompt}\n\n"
         f"User requirements:\n{reqs}\n\n"
-        "Claims to audit independently:\n\n" + "\n\n".join(claim_blocks)
+        "Claims to audit independently (reference alias or claim_id):\n\n"
+        + "\n\n".join(claim_blocks)
     )
+    return prompt, alias_map
 
 
 class ReviewerPool:
@@ -174,14 +188,20 @@ class ReviewerPool:
         if not claim.is_material:
             return None, None, None
 
-        # Check premise integrity first.
+        # Check premise integrity and exact version currency first.
         for pref in claim.premise_refs:
             premise = latest_by_id.get(pref.claim_id)
-            if premise is None or premise.status in {
-                ClaimStatus.REJECTED,
-                ClaimStatus.STALE,
-                ClaimStatus.UNRESOLVED,
-            }:
+            if (
+                premise is None
+                or premise.version != pref.claim_version
+                or premise.verification_status == VerificationStatus.STALE_PENDING_REVIEW
+                or premise.status
+                in {
+                    ClaimStatus.REJECTED,
+                    ClaimStatus.STALE,
+                    ClaimStatus.UNRESOLVED,
+                }
+            ):
                 verdict = ReviewVerdict(
                     run_id=run_id,
                     claim_id=claim.claim_id,
@@ -190,12 +210,14 @@ class ReviewerPool:
                     review_dimension="consistency",
                     decision=ReviewDecision.NEEDS_REVISION,
                     rationale=(
-                        f"Depends on premise '{pref.claim_id}' whose current state is "
-                        f"'{premise.status.value if premise else 'missing'}'."
+                        f"Depends on premise '{pref.claim_id}' v{pref.claim_version} whose "
+                        f"current state is '{premise.status.value if premise else 'missing'}'."
                     ),
-                    required_correction="Revise or re-ground conclusion on verified premises.",
+                    required_correction=(
+                        "Revise or re-ground conclusion on current verified premises."
+                    ),
                     blocking_severity="blocking",
-                    blocking_issues=["Unverified or rejected premise dependency"],
+                    blocking_issues=["Unverified, stale, or superseded premise dependency"],
                 )
                 return verdict, ClaimStatus.STALE, VerificationStatus.STALE_PENDING_REVIEW
 
@@ -259,7 +281,9 @@ class ReviewerPool:
                 )
                 return verdict, ClaimStatus.REJECTED, VerificationStatus.CONTRADICTED
 
-            ungrounded = next((r for r in records if not r.inputs_grounded), None)
+            ungrounded = next(
+                (r for r in records if not r.inputs_grounded or r.has_ungrounded_literals), None
+            )
             if ungrounded is not None:
                 verdict = ReviewVerdict(
                     run_id=run_id,
@@ -269,14 +293,14 @@ class ReviewerPool:
                     review_dimension="numbers",
                     decision=ReviewDecision.NEEDS_REVISION,
                     rationale=(
-                        "Arithmetic expression evaluated, but one or more input variables lack "
-                        "grounded provenance in the user request or verified dependency findings."
+                        "Arithmetic expression evaluated, but one or more inputs or inline "
+                        "constants lack valid resolvable provenance in prompt, docs, or claims."
                     ),
                     required_correction=(
-                        "Bind variables strictly to grounded input numbers and provenance refs."
+                        "Bind every variable and empirical constant to grounded provenance aliases."
                     ),
                     blocking_severity="blocking",
-                    blocking_issues=["Ungrounded arithmetic inputs"],
+                    blocking_issues=["Ungrounded arithmetic inputs or inline constants"],
                 )
                 return verdict, ClaimStatus.REJECTED, VerificationStatus.UNSUPPORTED
 
@@ -310,7 +334,8 @@ class ReviewerPool:
                 for eid in claim.evidence_ids
                 if eid in evidence_by_id
                 and evidence_by_id[eid].verified_in_input
-                and evidence_by_id[eid].source_type in {"user_prompt", "dependency_finding"}
+                and evidence_by_id[eid].source_type
+                in {"user_prompt", "dependency_finding", "external_retrieved"}
             ]
             if not verified_evds:
                 verdict = ReviewVerdict(
@@ -354,7 +379,11 @@ class ReviewerPool:
         if claim.category == ClaimCategory.COMPUTATION:
             records = [tool_by_id[tid] for tid in claim.tool_execution_ids if tid in tool_by_id]
             if any(
-                r.success and r.inputs_grounded and r.matches_proposed is not False for r in records
+                r.success
+                and r.inputs_grounded
+                and not r.has_ungrounded_literals
+                and r.matches_proposed is not False
+                for r in records
             ):
                 return ClaimStatus.SUPPORTED, VerificationStatus.COMPUTATIONALLY_VERIFIED
             return ClaimStatus.UNRESOLVED, VerificationStatus.UNSUPPORTED
@@ -469,13 +498,16 @@ class ReviewerPool:
         verdicts_by_claim: dict[tuple[str, int], list[ReviewVerdict]] = {
             (c.claim_id, c.version): [] for c in pending_model_review
         }
+        seen_pass_keys: set[tuple[str, int, str, str]] = set()
+        expected_dims = {dim for _, dim in passes}
+        completed_dims: set[str] = set()
 
         for reviewer_id, dimension in passes:
             eligible_claims = [c for c in pending_model_review if c.author_agent_id != reviewer_id]
             if not eligible_claims:
                 continue
 
-            review_prompt = _build_review_user_prompt(
+            review_prompt, alias_map = _build_review_user_prompt(
                 original_prompt=original_prompt,
                 plan=plan,
                 claims=eligible_claims,
@@ -494,23 +526,59 @@ class ReviewerPool:
                     run_deadline_monotonic=run_deadline_monotonic,
                 )
                 outcome.reviewer_calls += 1
+                completed_dims.add(dimension)
             except Exception as exc:
                 await self._db.append_event(
                     ExecutionEvent(
                         run_id=run_id,
                         event_type="review_failed",
                         actor=reviewer_id,
-                        message=f"Reviewer {reviewer_id} failed: {exc}",
+                        message=f"Reviewer {reviewer_id} failed dimension '{dimension}': {exc}",
                     )
                 )
                 continue
 
             valid_targets = {(c.claim_id, c.version): c for c in eligible_claims}
             for item in res.parsed.verdicts:
-                key = (item.claim_id, item.claim_version)
-                if key not in valid_targets:
+                if item.claim_id in alias_map:
+                    resolved_cid, resolved_ver = alias_map[item.claim_id]
+                else:
+                    resolved_cid = item.claim_id
+                    if item.claim_version is not None:
+                        resolved_ver = item.claim_version
+                    else:
+                        matched = latest_by_id.get(resolved_cid)
+                        resolved_ver = matched.version if matched is not None else -1
+
+                key = (resolved_cid, resolved_ver)
+                target_claim = valid_targets.get(key)
+                if target_claim is None:
                     continue
-                safe_evd_refs = [eid for eid in item.evidence_refs if eid in evidence_by_id]
+
+                # Enforce uniqueness: at most 1 verdict per (claim, ver, reviewer, dim).
+                dedup_key = (resolved_cid, resolved_ver, reviewer_id, dimension)
+                if dedup_key in seen_pass_keys:
+                    await self._db.append_event(
+                        ExecutionEvent(
+                            run_id=run_id,
+                            event_type="duplicate_verdict_ignored",
+                            actor=reviewer_id,
+                            message=(
+                                f"Ignored duplicate verdict for {resolved_cid} v{resolved_ver} "
+                                f"in dimension '{dimension}'."
+                            ),
+                        )
+                    )
+                    continue
+                seen_pass_keys.add(dedup_key)
+
+                # Validate cited evidence genuinely belongs to the targeted claim and run.
+                claim_evidence_set = set(target_claim.evidence_ids)
+                safe_evd_refs = [
+                    eid
+                    for eid in item.evidence_refs
+                    if eid in evidence_by_id and eid in claim_evidence_set
+                ]
                 severity = item.blocking_severity
                 if (
                     item.decision in {ReviewDecision.REJECT, ReviewDecision.NEEDS_REVISION}
@@ -519,8 +587,8 @@ class ReviewerPool:
                     severity = "blocking"
                 verdict = ReviewVerdict(
                     run_id=run_id,
-                    claim_id=item.claim_id,
-                    claim_version=item.claim_version,
+                    claim_id=resolved_cid,
+                    claim_version=resolved_ver,
                     reviewer_id=reviewer_id,
                     review_dimension=dimension,
                     decision=item.decision,
@@ -534,8 +602,21 @@ class ReviewerPool:
                 verdicts_by_claim[key].append(verdict)
                 outcome.verdicts.append(verdict)
 
+        # Re-read latest claims so any mid-batch stale invalidations cannot be overwritten.
+        fresh_claims_list = await self._db.get_claims_for_run(run_id, latest_only=True)
+        fresh_latest_by_id = {c.claim_id: c for c in fresh_claims_list}
+
         # Finalize claim verification states from collected independent verdicts.
         for claim in pending_model_review:
+            fresh_claim = fresh_latest_by_id.get(claim.claim_id)
+            if fresh_claim is not None and (
+                fresh_claim.version != claim.version
+                or fresh_claim.status == ClaimStatus.STALE
+                or fresh_claim.verification_status == VerificationStatus.STALE_PENDING_REVIEW
+            ):
+                outcome.updated_claims[claim.claim_id] = fresh_claim
+                continue
+
             c_verdicts = verdicts_by_claim.get((claim.claim_id, claim.version), [])
             if not c_verdicts:
                 await self._mark_unresolved_missing_review(
@@ -552,7 +633,26 @@ class ReviewerPool:
                 if v.decision in {ReviewDecision.REJECT, ReviewDecision.NEEDS_REVISION}
             ]
             unresolved_v = [v for v in c_verdicts if v.decision == ReviewDecision.UNRESOLVED]
-            approvals = [v for v in c_verdicts if v.decision == ReviewDecision.APPROVE]
+            approved_dims = {
+                v.review_dimension for v in c_verdicts if v.decision == ReviewDecision.APPROVE
+            }
+
+            # Recheck premise dependency currency prior to final approval.
+            stale_premise_reason: str | None = None
+            for pref in claim.premise_refs:
+                p_fresh = fresh_latest_by_id.get(pref.claim_id)
+                if (
+                    p_fresh is None
+                    or p_fresh.version != pref.claim_version
+                    or p_fresh.status in {ClaimStatus.STALE, ClaimStatus.REJECTED}
+                    or p_fresh.verification_status == VerificationStatus.STALE_PENDING_REVIEW
+                    or (p_fresh.is_material and p_fresh.status != ClaimStatus.SUPPORTED)
+                ):
+                    stale_premise_reason = (
+                        f"Premise '{pref.claim_id}' v{pref.claim_version} is "
+                        f"{p_fresh.status.value if p_fresh else 'missing'}."
+                    )
+                    break
 
             if rejections:
                 blocking = any(v.blocking_severity == "blocking" for v in rejections)
@@ -573,6 +673,7 @@ class ReviewerPool:
                     update={"status": next_status, "verification_status": next_ver}
                 )
                 outcome.updated_claims[claim.claim_id] = updated
+                fresh_latest_by_id[claim.claim_id] = updated
                 if blocking:
                     outcome.blocking_claims.append(updated)
                 await self._graph.invalidate_dependents(
@@ -581,21 +682,35 @@ class ReviewerPool:
                     reason=rejections[0].rationale,
                     superseded_version=claim.version,
                 )
-            elif unresolved_v or len(approvals) < len(passes):
+            elif stale_premise_reason is not None:
                 await self._db.update_claim_verification_state(
                     run_id=run_id,
                     claim_id=claim.claim_id,
                     version=claim.version,
-                    status=ClaimStatus.UNRESOLVED,
-                    verification_status=VerificationStatus.UNSUPPORTED,
+                    status=ClaimStatus.STALE,
+                    verification_status=VerificationStatus.STALE_PENDING_REVIEW,
+                    revision_notes=stale_premise_reason,
                 )
                 updated = claim.model_copy(
                     update={
-                        "status": ClaimStatus.UNRESOLVED,
-                        "verification_status": VerificationStatus.UNSUPPORTED,
+                        "status": ClaimStatus.STALE,
+                        "verification_status": VerificationStatus.STALE_PENDING_REVIEW,
                     }
                 )
                 outcome.updated_claims[claim.claim_id] = updated
+                fresh_latest_by_id[claim.claim_id] = updated
+            elif unresolved_v or completed_dims != expected_dims or approved_dims != expected_dims:
+                missing_dims = sorted(expected_dims - approved_dims)
+                reason = (
+                    "Incomplete or conflicting review "
+                    f"(missing/unapproved dimensions: {missing_dims})."
+                )
+                await self._mark_unresolved_missing_review(
+                    run_id=run_id,
+                    claim=claim,
+                    reason=reason,
+                    outcome=outcome,
+                )
             else:
                 next_status, next_ver = self._resolve_approved_status(
                     claim, evidence_by_id, tool_by_id
@@ -611,6 +726,7 @@ class ReviewerPool:
                     update={"status": next_status, "verification_status": next_ver}
                 )
                 outcome.updated_claims[claim.claim_id] = updated
+                fresh_latest_by_id[claim.claim_id] = updated
 
         await self._db.append_event(
             ExecutionEvent(
