@@ -282,8 +282,18 @@ class ExperimentResult(BaseModel):
     prompt_id: str
     domain: PromptDomain
     experiment_fingerprint: str = ""
+    baseline_fingerprint: str = ""
+    network_fingerprint: str = ""
     baseline_run_id: str
     network_run_id: str
+    original_baseline_engine_commit: str = ""
+    recovered_network_engine_commit: str = ""
+    original_baseline_run_id: str = ""
+    original_failed_network_run_id: str = ""
+    recovered_network_run_id: str = ""
+    recovery_reason: str = ""
+    prompt_hash: str = ""
+    reference_document_hashes: dict[str, str] = Field(default_factory=dict)
     baseline_provider: str = ""
     baseline_model: str = ""
     network_provider: str = ""

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Literal
@@ -19,7 +20,12 @@ from crewforge.config import (
     sanitize_error_message,
 )
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
-from crewforge.core.budget import BudgetManager, UnifiedBudgetAuthority
+from crewforge.core.budget import (
+    BudgetConstraintError,
+    BudgetError,
+    BudgetManager,
+    UnifiedBudgetAuthority,
+)
 from crewforge.core.orchestrator import NetworkRunner
 from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
 from crewforge.evaluation.ablation import AblationConfig
@@ -47,9 +53,20 @@ from crewforge.evaluation.reporting import (
     generate_markdown_report,
 )
 from crewforge.evaluation.scoring import compute_evaluation_score
-from crewforge.providers.base import ModelProvider
+from crewforge.providers.base import ModelProvider, ProviderError
 from crewforge.schemas import RunResult, RunStatus, UsageMetrics
 from crewforge.storage.database import Database
+
+_SYSTEMIC_ERROR_RE = re.compile(
+    r"(AttributeError|TypeError|AuthenticationError|invalid_api_key|"
+    r"HTTP\s*401|HTTP\s*403|insufficient_quota|BudgetConstraintError|"
+    r"CREWFORGE_ALLOW_PAID_RUNS)",
+    re.IGNORECASE,
+)
+
+
+class SystemicBenchmarkError(RuntimeError):
+    """Raised on systemic integration, auth, config, or budget guard failures."""
 
 
 def get_current_git_commit() -> str:
@@ -250,6 +267,75 @@ class BenchmarkRunner:
         self._db = database or Database(settings.effective_db_path)
         self._authority = authority or UnifiedBudgetAuthority.get_instance(settings=settings)
 
+    def _preflight_check(
+        self,
+        *,
+        manifest: BenchmarkManifest,
+        manifest_dir: Path | None,
+        base_runner: BaselineRunner | None,
+        net_runner: NetworkRunner,
+        base_provider: ModelProvider | None,
+        net_provider: ModelProvider,
+        net_settings: CrewForgeSettings,
+    ) -> list[tuple[BenchmarkItem, list[ReferenceDocument], dict[str, str], dict[str, str]]]:
+        """Validate runner interfaces, providers, documents, and budget before any dispatch."""
+        if base_runner is not None:
+            if not callable(getattr(base_runner, "run", None)):
+                raise SystemicBenchmarkError(
+                    "Preflight failed: BaselineRunner.run is not callable."
+                )
+            if base_provider is None:
+                raise SystemicBenchmarkError("Preflight failed: baseline_provider is None.")
+            if base_provider.is_paid_provider and not self._baseline_settings.allow_paid_runs:
+                raise SystemicBenchmarkError(
+                    "Preflight failed: paid baseline execution requires allow_paid_runs=true."
+                )
+
+        if not callable(getattr(net_runner, "run", None)):
+            raise SystemicBenchmarkError("Preflight failed: NetworkRunner.run is not callable.")
+        if net_provider is None:
+            raise SystemicBenchmarkError("Preflight failed: network_provider is None.")
+        if net_provider.is_paid_provider and not net_settings.allow_paid_runs:
+            raise SystemicBenchmarkError(
+                "Preflight failed: paid network execution requires allow_paid_runs=true."
+            )
+
+        resolved_items: list[
+            tuple[BenchmarkItem, list[ReferenceDocument], dict[str, str], dict[str, str]]
+        ] = []
+        for item in manifest.items:
+            ref_docs, doc_hashes, doc_contents = resolve_item_documents(
+                item, manifest_dir=manifest_dir
+            )
+            resolved_items.append((item, ref_docs, doc_hashes, doc_contents))
+        return resolved_items
+
+    async def _extract_stages_executed(self, n_res: RunResult) -> list[str]:
+        """Derive actually executed orchestration stages from persisted trace events."""
+        if n_res.status == RunStatus.FAILED and (
+            n_res.usage is None or n_res.usage.model_calls == 0
+        ):
+            return []
+        trace = await self._db.get_run_trace(n_res.run_id)
+        if trace is None:
+            return []
+        for ev in reversed(trace.events):
+            if ev.event_type == "stages_executed_summary":
+                stages = ev.payload.get("stages_executed")
+                if isinstance(stages, list):
+                    return [str(s) for s in stages]
+        observed: list[str] = []
+        event_types = {ev.event_type for ev in trace.events}
+        if "plan_created" in event_types:
+            observed.append("planner")
+        if "task_completed" in event_types:
+            observed.append("dag_workers")
+        if trace.review_verdicts:
+            observed.append("independent_review")
+        if "honesty_gate_evaluated" in event_types:
+            observed.append("honesty_gate_and_synthesis")
+        return observed
+
     async def evaluate_manifest(
         self,
         manifest: BenchmarkManifest,
@@ -305,11 +391,17 @@ class BenchmarkRunner:
         blind_keys: list[BlindKey] = []
 
         try:
-            for item in manifest.items:
-                ref_docs, doc_hashes, doc_contents = resolve_item_documents(
-                    item, manifest_dir=manifest_dir
-                )
+            resolved_items = self._preflight_check(
+                manifest=manifest,
+                manifest_dir=manifest_dir,
+                base_runner=base_runner,
+                net_runner=net_runner,
+                base_provider=base_provider,
+                net_provider=net_provider,
+                net_settings=net_settings,
+            )
 
+            for item, ref_docs, doc_hashes, doc_contents in resolved_items:
                 base_fp = _build_side_fingerprint(
                     manifest_hash=manifest_hash,
                     item=item,
@@ -345,7 +437,6 @@ class BenchmarkRunner:
                     / f"{item.prompt_id}_network.json"
                 )
 
-                # 1. Baseline Run (fingerprint-isolated resume; never reruns failed/partial)
                 b_res = await self._run_or_load_cached(
                     cache_file=base_file,
                     fingerprint=base_fp,
@@ -362,14 +453,13 @@ class BenchmarkRunner:
                     prompt=item.prompt,
                 )
 
-                # 2. Network Run (fingerprint-isolated resume)
                 n_res = await self._run_or_load_cached(
                     cache_file=net_file,
                     fingerprint=net_fp,
                     prompt_id=item.prompt_id,
                     system_label="network",
                     resume=resume,
-                    coro_fn=lambda p=item.prompt, d=ref_docs: net_runner.solve(
+                    coro_fn=lambda p=item.prompt, d=ref_docs: net_runner.run(
                         p,
                         reference_documents=d,
                     ),
@@ -378,110 +468,40 @@ class BenchmarkRunner:
                     prompt=item.prompt,
                 )
 
-                # 3. Optional Diagnostics / Grading (only if rubrics supplied)
-                b_score: EvaluationScore | None = None
-                n_score: EvaluationScore | None = None
-                rubric = rubrics.get(item.prompt_id) if rubrics else None
-                if rubric is not None:
-                    b_grade = (
-                        human_grades.get((item.prompt_id, "baseline")) if human_grades else None
-                    )
-                    n_grade = (
-                        human_grades.get((item.prompt_id, "network")) if human_grades else None
-                    )
-                    b_score = compute_evaluation_score(
-                        rubric=rubric,
-                        system_label="baseline",
-                        answer_text=b_res.answer,
-                        assumptions=b_res.assumptions,
-                        missing_information=b_res.missing_information,
-                        confidence_notes=b_res.confidence_notes,
-                        human_grade=b_grade,
-                    )
-                    n_score = compute_evaluation_score(
-                        rubric=rubric,
-                        system_label="network",
-                        answer_text=n_res.answer,
-                        assumptions=n_res.assumptions,
-                        missing_information=n_res.missing_information,
-                        confidence_notes=n_res.confidence_notes,
-                        human_grade=n_grade,
-                    )
-
-                # 4. A/B Blind Anonymization using private random seed
-                blind_it, b_key = anonymize_pair(
-                    prompt_id=item.prompt_id,
-                    domain=item.domain,
-                    prompt=item.prompt,
-                    baseline_result=b_res,
-                    network_result=n_res,
-                    reference_documents=item.reference_documents,
-                    reference_document_contents=doc_contents,
-                    seed=resolved_blind_seed,
-                )
-                blind_items.append(blind_it)
-                blind_keys.append(b_key)
-
-                b_cost = (
-                    b_res.usage.actual_cost_usd
-                    if b_res.usage and b_res.usage.actual_cost_usd
-                    else 0.0
-                )
-                n_cost = (
-                    n_res.usage.actual_cost_usd
-                    if n_res.usage and n_res.usage.actual_cost_usd
-                    else 0.0
-                )
-
-                both_graded = (
-                    b_score is not None
-                    and n_score is not None
-                    and b_score.grading_status == "graded"
-                    and n_score.grading_status == "graded"
-                )
-                stages_executed = self._collect_stages_executed(ab_cfg)
-
-                exp_result = ExperimentResult(
-                    prompt_id=item.prompt_id,
-                    domain=item.domain,
-                    experiment_fingerprint=pair_fp_id,
-                    baseline_run_id=b_res.run_id,
-                    network_run_id=n_res.run_id,
-                    baseline_provider=self._baseline_settings.provider.value,
-                    baseline_model=self._baseline_settings.model,
-                    network_provider=net_settings.provider.value,
-                    network_model=net_settings.model,
-                    baseline_mode=baseline_mode_str,
+                stages_executed = await self._extract_stages_executed(n_res)
+                exp_result, b_it, b_key = self._build_pair_outputs(
+                    item=item,
+                    doc_hashes=doc_hashes,
+                    doc_contents=doc_contents,
+                    b_res=b_res,
+                    n_res=n_res,
+                    pair_fp_id=pair_fp_id,
+                    base_fp_id=base_fp.fingerprint_id,
+                    net_fp_id=net_fp.fingerprint_id,
+                    baseline_settings=self._baseline_settings,
+                    network_settings=net_settings,
+                    baseline_mode_str=baseline_mode_str,
                     ablation_variant=ab_cfg.variant.value,
                     stages_executed=stages_executed,
-                    baseline_result=b_res,
-                    network_result=n_res,
-                    baseline_score=b_score,
-                    network_score=n_score,
-                    grading_status="graded" if both_graded else "pending_independent_grading",
-                    latency_difference_ms=n_res.latency_ms - b_res.latency_ms,
-                    cost_difference_usd=(n_cost or 0.0) - (b_cost or 0.0),
-                    git_commit_sha=git_sha,
+                    git_sha=git_sha,
+                    rubrics=rubrics,
+                    human_grades=human_grades,
+                    blind_seed=resolved_blind_seed,
                 )
                 results.append(exp_result)
+                blind_items.append(b_it)
+                blind_keys.append(b_key)
 
-            # Export Evaluator Packet (no keys/seeds) and separate Blind Key File
-            export_evaluator_packet(blind_items, self.output_dir / "evaluator_packet.json")
-            export_blind_key_file(
-                blind_keys,
-                blinding_seed=resolved_blind_seed,
-                output_path=self.output_dir / "blind_key.json",
-                experiment_fingerprint=manifest_hash[:16],
+            self._write_experiment_artifacts(
+                results=results,
+                blind_items=blind_items,
+                blind_keys=blind_keys,
+                blind_seed=resolved_blind_seed,
+                manifest_hash=manifest_hash,
+                title=f"CrewForge Evaluation — {manifest.name}",
             )
 
-            # Export Result Formats atomically
-            export_experiment_results_json(results, self.output_dir / "experiment_results.json")
-            export_experiment_results_csv(results, self.output_dir / "experiment_results.csv")
-            md_report = generate_markdown_report(
-                results, title=f"CrewForge Evaluation — {manifest.name}"
-            )
-            _atomic_write_text(self.output_dir / "report.md", md_report)
-
+            md_report = (self.output_dir / "report.md").read_text(encoding="utf-8")
             return results, md_report
         finally:
             if self._baseline_provider is None:
@@ -489,17 +509,333 @@ class BenchmarkRunner:
             if self._network_provider is None:
                 await net_provider.aclose()
 
-    @staticmethod
-    def _collect_stages_executed(ab_cfg: AblationConfig) -> list[str]:
-        stages = ["planner", "dag_workers"]
-        if ab_cfg.enable_peer_messaging:
-            stages.append("peer_messaging")
-        if ab_cfg.enable_independent_review:
-            stages.append("independent_review")
-        if ab_cfg.enable_targeted_repair:
-            stages.append("targeted_repair")
-        stages.append("honesty_gate_and_synthesis")
-        return stages
+    async def recover_from_results(
+        self,
+        *,
+        original_results_path: str | Path,
+        manifest: BenchmarkManifest,
+        manifest_dir: Path | None = None,
+        mode: Literal[
+            "baseline_vs_network", "compute_matched_vs_network", "ablation"
+        ] = "baseline_vs_network",
+        ablation_variant: str = "full",
+        resume: bool = True,
+        blind_seed: str | None = None,
+        recovery_reason: str = "network_runner_solve_to_run_hotfix",
+    ) -> tuple[list[ExperimentResult], str]:
+        """Recover failed zero-call network runs while reusing verified original baselines."""
+        await self._db.initialize()
+        raw_text = await asyncio.to_thread(Path(original_results_path).read_text, encoding="utf-8")
+        raw_orig = json.loads(raw_text)
+        orig_by_id = {
+            r.prompt_id: r for r in (ExperimentResult.model_validate(x) for x in raw_orig)
+        }
+
+        net_provider = self._network_provider or build_provider_from_settings(
+            self._network_settings
+        )
+        net_settings = self._network_settings
+        ab_cfg = AblationConfig.from_variant(ablation_variant if mode == "ablation" else "full")
+        if mode == "ablation":
+            net_settings = ab_cfg.apply_to_settings(self._network_settings)
+        net_budget = BudgetManager(self._db, net_settings, authority=self._authority)
+        net_runner = NetworkRunner(
+            provider=net_provider,
+            database=self._db,
+            settings=net_settings,
+            budget_manager=net_budget,
+        )
+
+        manifest_hash = compute_manifest_hash(manifest)
+        new_git_sha = get_current_git_commit()
+        baseline_mode_str = (
+            "compute_budget_matched" if mode == "compute_matched_vs_network" else "standard"
+        )
+        resolved_blind_seed = blind_seed or generate_blinding_seed()
+
+        try:
+            resolved_items = self._preflight_check(
+                manifest=manifest,
+                manifest_dir=manifest_dir,
+                base_runner=None,
+                net_runner=net_runner,
+                base_provider=None,
+                net_provider=net_provider,
+                net_settings=net_settings,
+            )
+
+            # Strict validation of all original baseline records before any network dispatch
+            validated_originals: list[
+                tuple[
+                    BenchmarkItem,
+                    list[ReferenceDocument],
+                    dict[str, str],
+                    dict[str, str],
+                    ExperimentResult,
+                    ExperimentFingerprint,
+                ]
+            ] = []
+            for item, ref_docs, doc_hashes, doc_contents in resolved_items:
+                orig = orig_by_id.get(item.prompt_id)
+                if orig is None:
+                    raise ValueError(
+                        f"Recovery aborted: prompt '{item.prompt_id}' "
+                        "missing from original results."
+                    )
+                b_res = orig.baseline_result
+                if b_res.status != RunStatus.COMPLETED or not b_res.answer.strip():
+                    raise ValueError(
+                        f"Recovery aborted: baseline for '{item.prompt_id}' is not completed."
+                    )
+                if b_res.prompt != item.prompt:
+                    raise ValueError(
+                        f"Recovery aborted: baseline prompt mismatch for '{item.prompt_id}'."
+                    )
+                if (
+                    b_res.provider != self._baseline_settings.provider.value
+                    or b_res.model != self._baseline_settings.model
+                ):
+                    raise ValueError(
+                        f"Recovery aborted: baseline provider/model mismatch for "
+                        f"'{item.prompt_id}' ({b_res.provider}/{b_res.model})."
+                    )
+                if b_res.usage is None or b_res.usage.model_calls < 1:
+                    raise ValueError(
+                        f"Recovery aborted: baseline for '{item.prompt_id}' has 0 model calls."
+                    )
+                n_orig = orig.network_result
+                if n_orig.status != RunStatus.FAILED or (
+                    n_orig.usage is not None and n_orig.usage.model_calls != 0
+                ):
+                    raise ValueError(
+                        f"Recovery aborted: original network run for '{item.prompt_id}' "
+                        f"is not a zero-call failed attempt."
+                    )
+
+                orig_base_fp = _build_side_fingerprint(
+                    manifest_hash=manifest_hash,
+                    item=item,
+                    doc_hashes=doc_hashes,
+                    git_sha=orig.git_commit_sha or "unknown_commit",
+                    settings=self._baseline_settings,
+                    baseline_mode=baseline_mode_str,
+                    ablation_variant="none",
+                )
+                validated_originals.append(
+                    (item, ref_docs, doc_hashes, doc_contents, orig, orig_base_fp)
+                )
+
+            results: list[ExperimentResult] = []
+            blind_items: list[BlindEvaluationItem] = []
+            blind_keys: list[BlindKey] = []
+
+            for item, ref_docs, doc_hashes, doc_contents, orig, orig_base_fp in validated_originals:
+                b_res = orig.baseline_result
+                net_fp = _build_side_fingerprint(
+                    manifest_hash=manifest_hash,
+                    item=item,
+                    doc_hashes=doc_hashes,
+                    git_sha=new_git_sha,
+                    settings=net_settings,
+                    baseline_mode="none",
+                    ablation_variant=ab_cfg.variant.value,
+                )
+                pair_fp_id = hashlib.sha256(
+                    f"{orig_base_fp.fingerprint_id}:{net_fp.fingerprint_id}".encode()
+                ).hexdigest()[:16]
+
+                net_file = (
+                    self.output_dir
+                    / "runs"
+                    / net_fp.fingerprint_id
+                    / f"{item.prompt_id}_network.json"
+                )
+                n_res = await self._run_or_load_cached(
+                    cache_file=net_file,
+                    fingerprint=net_fp,
+                    prompt_id=item.prompt_id,
+                    system_label="network",
+                    resume=resume,
+                    coro_fn=lambda p=item.prompt, d=ref_docs: net_runner.run(
+                        p,
+                        reference_documents=d,
+                    ),
+                    provider_name=net_settings.provider.value,
+                    model_name=net_settings.model,
+                    prompt=item.prompt,
+                )
+
+                stages_executed = await self._extract_stages_executed(n_res)
+                exp_result, b_it, b_key = self._build_pair_outputs(
+                    item=item,
+                    doc_hashes=doc_hashes,
+                    doc_contents=doc_contents,
+                    b_res=b_res,
+                    n_res=n_res,
+                    pair_fp_id=pair_fp_id,
+                    base_fp_id=orig_base_fp.fingerprint_id,
+                    net_fp_id=net_fp.fingerprint_id,
+                    baseline_settings=self._baseline_settings,
+                    network_settings=net_settings,
+                    baseline_mode_str=baseline_mode_str,
+                    ablation_variant=ab_cfg.variant.value,
+                    stages_executed=stages_executed,
+                    git_sha=new_git_sha,
+                    rubrics=None,
+                    human_grades=None,
+                    blind_seed=resolved_blind_seed,
+                    original_baseline_engine_commit=orig.git_commit_sha,
+                    recovered_network_engine_commit=new_git_sha,
+                    original_baseline_run_id=b_res.run_id,
+                    original_failed_network_run_id=orig.network_run_id,
+                    recovered_network_run_id=n_res.run_id,
+                    recovery_reason=recovery_reason,
+                )
+                results.append(exp_result)
+                blind_items.append(b_it)
+                blind_keys.append(b_key)
+
+            self._write_experiment_artifacts(
+                results=results,
+                blind_items=blind_items,
+                blind_keys=blind_keys,
+                blind_seed=resolved_blind_seed,
+                manifest_hash=manifest_hash,
+                title=f"CrewForge Recovered Evaluation — {manifest.name}",
+            )
+            md_report = (self.output_dir / "report.md").read_text(encoding="utf-8")
+            return results, md_report
+        finally:
+            if self._network_provider is None:
+                await net_provider.aclose()
+
+    def _build_pair_outputs(
+        self,
+        *,
+        item: BenchmarkItem,
+        doc_hashes: dict[str, str],
+        doc_contents: dict[str, str],
+        b_res: RunResult,
+        n_res: RunResult,
+        pair_fp_id: str,
+        base_fp_id: str,
+        net_fp_id: str,
+        baseline_settings: CrewForgeSettings,
+        network_settings: CrewForgeSettings,
+        baseline_mode_str: str,
+        ablation_variant: str,
+        stages_executed: list[str],
+        git_sha: str,
+        rubrics: dict[str, EvaluationRubric] | None,
+        human_grades: dict[tuple[str, str], HumanGradeInput] | None,
+        blind_seed: str,
+        original_baseline_engine_commit: str = "",
+        recovered_network_engine_commit: str = "",
+        original_baseline_run_id: str = "",
+        original_failed_network_run_id: str = "",
+        recovered_network_run_id: str = "",
+        recovery_reason: str = "",
+    ) -> tuple[ExperimentResult, BlindEvaluationItem, BlindKey]:
+        b_score: EvaluationScore | None = None
+        n_score: EvaluationScore | None = None
+        rubric = rubrics.get(item.prompt_id) if rubrics else None
+        if rubric is not None:
+            b_grade = human_grades.get((item.prompt_id, "baseline")) if human_grades else None
+            n_grade = human_grades.get((item.prompt_id, "network")) if human_grades else None
+            b_score = compute_evaluation_score(
+                rubric=rubric,
+                system_label="baseline",
+                answer_text=b_res.answer,
+                assumptions=b_res.assumptions,
+                missing_information=b_res.missing_information,
+                confidence_notes=b_res.confidence_notes,
+                human_grade=b_grade,
+            )
+            n_score = compute_evaluation_score(
+                rubric=rubric,
+                system_label="network",
+                answer_text=n_res.answer,
+                assumptions=n_res.assumptions,
+                missing_information=n_res.missing_information,
+                confidence_notes=n_res.confidence_notes,
+                human_grade=n_grade,
+            )
+
+        blind_it, b_key = anonymize_pair(
+            prompt_id=item.prompt_id,
+            domain=item.domain,
+            prompt=item.prompt,
+            baseline_result=b_res,
+            network_result=n_res,
+            reference_documents=item.reference_documents,
+            reference_document_contents=doc_contents,
+            seed=blind_seed,
+        )
+
+        b_cost = b_res.usage.actual_cost_usd if b_res.usage and b_res.usage.actual_cost_usd else 0.0
+        n_cost = n_res.usage.actual_cost_usd if n_res.usage and n_res.usage.actual_cost_usd else 0.0
+        both_graded = (
+            b_score is not None
+            and n_score is not None
+            and b_score.grading_status == "graded"
+            and n_score.grading_status == "graded"
+        )
+
+        exp_result = ExperimentResult(
+            prompt_id=item.prompt_id,
+            domain=item.domain,
+            experiment_fingerprint=pair_fp_id,
+            baseline_fingerprint=base_fp_id,
+            network_fingerprint=net_fp_id,
+            baseline_run_id=b_res.run_id,
+            network_run_id=n_res.run_id,
+            original_baseline_engine_commit=original_baseline_engine_commit or git_sha,
+            recovered_network_engine_commit=recovered_network_engine_commit,
+            original_baseline_run_id=original_baseline_run_id or b_res.run_id,
+            original_failed_network_run_id=original_failed_network_run_id,
+            recovered_network_run_id=recovered_network_run_id,
+            recovery_reason=recovery_reason,
+            prompt_hash=item.prompt_hash,
+            reference_document_hashes=doc_hashes,
+            baseline_provider=baseline_settings.provider.value,
+            baseline_model=baseline_settings.model,
+            network_provider=network_settings.provider.value,
+            network_model=network_settings.model,
+            baseline_mode=baseline_mode_str,
+            ablation_variant=ablation_variant,
+            stages_executed=stages_executed,
+            baseline_result=b_res,
+            network_result=n_res,
+            baseline_score=b_score,
+            network_score=n_score,
+            grading_status="graded" if both_graded else "pending_independent_grading",
+            latency_difference_ms=n_res.latency_ms - b_res.latency_ms,
+            cost_difference_usd=(n_cost or 0.0) - (b_cost or 0.0),
+            git_commit_sha=git_sha,
+        )
+        return exp_result, blind_it, b_key
+
+    def _write_experiment_artifacts(
+        self,
+        *,
+        results: list[ExperimentResult],
+        blind_items: list[BlindEvaluationItem],
+        blind_keys: list[BlindKey],
+        blind_seed: str,
+        manifest_hash: str,
+        title: str,
+    ) -> None:
+        export_evaluator_packet(blind_items, self.output_dir / "evaluator_packet.json")
+        export_blind_key_file(
+            blind_keys,
+            blinding_seed=blind_seed,
+            output_path=self.output_dir / "blind_key.json",
+            experiment_fingerprint=manifest_hash[:16],
+        )
+        export_experiment_results_json(results, self.output_dir / "experiment_results.json")
+        export_experiment_results_csv(results, self.output_dir / "experiment_results.csv")
+        md_report = generate_markdown_report(results, title=title)
+        _atomic_write_text(self.output_dir / "report.md", md_report)
 
     async def _run_or_load_cached(
         self,
@@ -531,10 +867,52 @@ class BenchmarkRunner:
                     )
                 return record.result
 
+        systemic_exc: Exception | None = None
         try:
             res = await coro_fn()
+            if (
+                res.status == RunStatus.FAILED
+                and res.error
+                and _SYSTEMIC_ERROR_RE.search(res.error)
+            ):
+                systemic_exc = SystemicBenchmarkError(
+                    f"Systemic failure in {system_label} for '{prompt_id}': {res.error}"
+                )
+        except (
+            AttributeError,
+            TypeError,
+            BudgetError,
+            BudgetConstraintError,
+            SystemicBenchmarkError,
+        ) as exc:
+            systemic_exc = exc
+            res = RunResult(
+                run_id=f"run_{uuid4().hex[:12]}",
+                mode="baseline" if system_label == "baseline" else "network",
+                status=RunStatus.FAILED,
+                prompt=prompt,
+                provider=provider_name,
+                model=model_name,
+                answer="",
+                usage=UsageMetrics(),
+                error=f"systemic_failure: {type(exc).__name__}: {sanitize_error_message(str(exc))}",
+            )
+        except ProviderError as exc:
+            msg = sanitize_error_message(str(exc))
+            if _SYSTEMIC_ERROR_RE.search(msg):
+                systemic_exc = exc
+            res = RunResult(
+                run_id=f"run_{uuid4().hex[:12]}",
+                mode="baseline" if system_label == "baseline" else "network",
+                status=RunStatus.FAILED,
+                prompt=prompt,
+                provider=provider_name,
+                model=model_name,
+                answer="",
+                usage=UsageMetrics(),
+                error=f"unavailable_or_failed: {msg}",
+            )
         except Exception as exc:
-            # Record failed/unavailable attempt without silent model substitution
             res = RunResult(
                 run_id=f"run_{uuid4().hex[:12]}",
                 mode="baseline" if system_label == "baseline" else "network",
@@ -555,4 +933,6 @@ class BenchmarkRunner:
             result=res,
         )
         await asyncio.to_thread(_atomic_write_text, cache_file, cached.model_dump_json(indent=2))
+        if systemic_exc is not None:
+            raise SystemicBenchmarkError(str(systemic_exc)) from systemic_exc
         return res

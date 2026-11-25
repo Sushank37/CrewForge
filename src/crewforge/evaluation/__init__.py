@@ -40,6 +40,7 @@ from crewforge.evaluation.reporting import (
 )
 from crewforge.evaluation.runner import (
     BenchmarkRunner,
+    SystemicBenchmarkError,
     build_david_vs_goliath_settings,
     load_and_validate_manifest,
     resolve_item_documents,
@@ -72,6 +73,7 @@ __all__ = [
     "ObjectiveCheckResult",
     "PromptDifficulty",
     "PromptDomain",
+    "SystemicBenchmarkError",
     "anonymize_pair",
     "build_david_vs_goliath_settings",
     "compute_evaluation_score",

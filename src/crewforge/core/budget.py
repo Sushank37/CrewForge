@@ -63,12 +63,23 @@ class UnifiedBudgetAuthority:
         self,
         authority_path: str | Path | None = None,
         settings: CrewForgeSettings | None = None,
+        *,
+        source_dbs: list[Path | str] | None = None,
+        migrate_default_dbs: bool | None = None,
     ) -> None:
         self._settings = settings or CrewForgeSettings()
         raw_path = authority_path or self._settings.budget_authority_path
         self.authority_path = Path(raw_path)
+        self._source_dbs = [Path(p) for p in source_dbs] if source_dbs is not None else None
+        self._migrate_default_dbs = migrate_default_dbs
         self._db_lock = threading.Lock()
         self._initialize_sync()
+
+    @classmethod
+    def reset_instances(cls) -> None:
+        """Clear cached authority singletons (intended for test isolation)."""
+        with cls._lock:
+            cls._instances.clear()
 
     @classmethod
     def get_instance(
@@ -77,10 +88,11 @@ class UnifiedBudgetAuthority:
         authority_path: str | Path | None = None,
     ) -> UnifiedBudgetAuthority:
         cfg = settings or CrewForgeSettings()
-        path_str = str(authority_path or cfg.budget_authority_path)
+        raw_path = authority_path or cfg.budget_authority_path
+        path_str = ":memory:" if str(raw_path) == ":memory:" else str(Path(raw_path).resolve())
         with cls._lock:
             if path_str not in cls._instances:
-                cls._instances[path_str] = cls(authority_path=path_str, settings=cfg)
+                cls._instances[path_str] = cls(authority_path=raw_path, settings=cfg)
             return cls._instances[path_str]
 
     def _initialize_sync(self) -> None:
@@ -115,12 +127,26 @@ class UnifiedBudgetAuthority:
                 ON canonical_budget_ledger(status, provider, allocation_category);
                 """
             )
-            # Reconcile historical reservations from existing trace databases
-            # without double-counting.
-            candidate_dbs = [
-                Path(".crewforge/crewforge.db"),
-                Path(".crewforge/cloud_dev.db"),
-            ]
+            # Reconcile historical reservations only from explicitly supplied sources
+            # or when running against the canonical production authority path.
+            if self._source_dbs is not None:
+                candidate_dbs = self._source_dbs
+            else:
+                prod_auth = Path(".crewforge/budget_authority.db").resolve()
+                is_prod_auth = (
+                    str(self.authority_path) != ":memory:"
+                    and self.authority_path.resolve() == prod_auth
+                )
+                should_migrate = (
+                    self._migrate_default_dbs
+                    if self._migrate_default_dbs is not None
+                    else is_prod_auth
+                )
+                candidate_dbs = (
+                    [Path(".crewforge/crewforge.db"), Path(".crewforge/cloud_dev.db")]
+                    if should_migrate
+                    else []
+                )
             for c_path in candidate_dbs:
                 if c_path.exists() and str(c_path.resolve()) != str(self.authority_path.resolve()):
                     try:

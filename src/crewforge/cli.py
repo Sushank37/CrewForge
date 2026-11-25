@@ -275,6 +275,32 @@ def build_parser() -> argparse.ArgumentParser:
     grade_p.add_argument("--rubrics", required=True, help="Path to private rubrics JSON.")
     grade_p.add_argument("--output-dir", required=True, help="Output directory for final report.")
 
+    rec_p = eval_sub.add_parser(
+        "recover",
+        help="Recover missing/failed network runs while preserving verified original baselines.",
+    )
+    rec_p.add_argument(
+        "--original-results",
+        required=True,
+        help="Path to original immutable experiment_results.json.",
+    )
+    rec_p.add_argument("--manifest", required=True, help="Path to manifest JSON.")
+    rec_p.add_argument("--output-dir", required=True, help="Fresh output directory for recovery.")
+    rec_p.add_argument(
+        "--mode",
+        choices=["baseline_vs_network", "compute_matched_vs_network", "ablation"],
+        default="baseline_vs_network",
+    )
+    rec_p.add_argument(
+        "--ablation-variant",
+        choices=["full", "no_reviewer", "no_repair", "no_peer_messages"],
+        default="full",
+    )
+    rec_p.add_argument("--baseline-max-calls", type=int, default=None)
+    rec_p.add_argument("--baseline-max-output-tokens", type=int, default=None)
+    rec_p.add_argument("--resume", dest="resume", action="store_true", default=True)
+    rec_p.add_argument("--no-resume", dest="resume", action="store_false")
+
     return parser
 
 
@@ -432,6 +458,49 @@ def _run_eval_cmd(args: argparse.Namespace, *, settings: CrewForgeSettings) -> i
             json.dumps(
                 {
                     "completed_cases": len(results),
+                    "output_dir": args.output_dir,
+                    "grading_status": "pending_independent_grading",
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.eval_command == "recover":
+        manifest, m_dir = load_and_validate_manifest(args.manifest)
+        cat = (
+            BudgetAllocationCategory.PHASE5_SAME_MODEL
+            if settings.provider == ProviderType.OPENAI
+            else settings.budget_allocation_category
+        )
+        base_updates: dict[str, Any] = {"budget_allocation_category": cat}
+        if args.baseline_max_calls is not None:
+            base_updates["baseline_max_calls"] = args.baseline_max_calls
+        if args.baseline_max_output_tokens is not None:
+            base_updates["baseline_max_output_tokens"] = args.baseline_max_output_tokens
+        base_cfg = settings.model_copy(update=base_updates)
+        net_cfg = settings.model_copy(update={"budget_allocation_category": cat})
+
+        runner = BenchmarkRunner(
+            settings=settings,
+            baseline_settings=base_cfg,
+            network_settings=net_cfg,
+            output_dir=args.output_dir,
+        )
+        results, _ = asyncio.run(
+            runner.recover_from_results(
+                original_results_path=args.original_results,
+                manifest=manifest,
+                manifest_dir=m_dir,
+                mode=args.mode,
+                ablation_variant=args.ablation_variant,
+                resume=args.resume,
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "recovered_cases": len(results),
                     "output_dir": args.output_dir,
                     "grading_status": "pending_independent_grading",
                 },

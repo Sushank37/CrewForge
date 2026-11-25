@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -302,8 +303,11 @@ def test_unified_budget_authority_migration_and_caps(tmp_path: Path) -> None:
         allow_paid_runs=True,
     )
 
-    authority = UnifiedBudgetAuthority(authority_path=auth_db_path, settings=settings)
+    authority = UnifiedBudgetAuthority(
+        authority_path=auth_db_path, settings=settings, source_dbs=[hist_db_path]
+    )
     summary = authority.get_summary_sync()
+    assert summary["canonical_ledger_records"] == 1
     assert summary["protected_reserve_usd"] == 4.00
     assert summary["max_spendable_usd"] == pytest.approx(2.10)
 
@@ -779,6 +783,24 @@ def test_manifest_document_validation_and_fingerprint_isolation(tmp_path: Path) 
                 ],
                 "missing_requirement_coverage": [],
             }
+        if "Synthesis" in name:
+            return {
+                "user_requirements": ["Check SLA"],
+                "accepted_segments": [
+                    {
+                        "segment_type": "accepted_claim",
+                        "text": "SLA is 99.9%.",
+                        "claim_refs": [{"claim_id": "c1", "claim_version": 1}],
+                        "requirement_ref": "req_1",
+                        "is_factual_assertion": True,
+                    }
+                ],
+                "conditional_conclusions": [],
+                "recommendations": [],
+                "assumptions": [],
+                "unresolved_issues": [],
+                "missing_information": [],
+            }
         return {
             "answer": "SLA is 99.9%.",
             "refined_answer": "SLA is 99.9%.",
@@ -807,6 +829,28 @@ def test_manifest_document_validation_and_fingerprint_isolation(tmp_path: Path) 
     assert res_std[0].baseline_run_id != res_cm[0].baseline_run_id
     assert res_std[0].grading_status == "pending_independent_grading"
     assert res_std[0].baseline_score is None
+
+    # Genuine integration assertions (would have caught net_runner.solve defect!)
+    assert res_std[0].baseline_result.status == RunStatus.COMPLETED
+    assert res_std[0].network_result.status == RunStatus.COMPLETED
+    assert res_std[0].baseline_result.answer.strip()
+    assert res_std[0].network_result.answer.strip()
+    assert res_std[0].baseline_result.usage.model_calls >= 1
+    assert res_std[0].network_result.usage.model_calls >= 1
+    assert "planner" in res_std[0].stages_executed
+    assert "dag_workers" in res_std[0].stages_executed
+    assert res_std[0].network_result.error is None
+
+    packet_json = json.loads((tmp_path / "out" / "evaluator_packet.json").read_text())
+    assert packet_json["items"][0]["answer_a"]["content"].strip()
+    assert packet_json["items"][0]["answer_b"]["content"].strip()
+
+    async def _check_trace() -> None:
+        tr = await runner._db.get_run_trace(res_std[0].network_run_id)
+        assert tr is not None
+        assert len(tr.claims) >= 1
+
+    asyncio.run(_check_trace())
 
 
 def test_real_ablation_stage_switches(tmp_path: Path) -> None:
@@ -953,3 +997,265 @@ def test_real_ablation_stage_switches(tmp_path: Path) -> None:
     ops_no_peer, _, msgs_no_peer = asyncio.run(run_variant("no_peer_messages"))
     assert "FollowUpOutput" not in ops_no_peer
     assert msgs_no_peer == 0
+
+
+def test_fail_fast_on_systemic_error(tmp_path: Path) -> None:
+    """Verify systemic integration/auth errors halt further dispatch while persisting failure."""
+    import asyncio
+
+    from crewforge.evaluation.contracts import BenchmarkItem, BenchmarkManifest
+    from crewforge.evaluation.runner import BenchmarkRunner, SystemicBenchmarkError
+    from tests.fake_provider import FakeProvider
+
+    manifest = BenchmarkManifest(
+        manifest_id="ff_01",
+        name="Fail Fast Test",
+        items=[
+            BenchmarkItem(prompt_id="p1", domain=PromptDomain.FINANCIAL, prompt="Case 1"),
+            BenchmarkItem(prompt_id="p2", domain=PromptDomain.FINANCIAL, prompt="Case 2"),
+        ],
+    )
+
+    calls: list[str] = []
+
+    def base_ok(prompt: str, rm: Any) -> dict[str, Any]:
+        calls.append(f"base:{prompt}")
+        return {
+            "answer": "Baseline ok.",
+            "missing_information": [],
+            "assumptions": [],
+            "computations": [],
+            "needs_tool_followup": False,
+        }
+
+    def net_auth_fail(prompt: str, rm: Any) -> dict[str, Any]:
+        calls.append(f"net:{prompt}")
+        raise AttributeError("Simulated interface mismatch")
+
+    cfg = CrewForgeSettings(_env_file=None, db_path=tmp_path / "ff.db")
+    runner = BenchmarkRunner(
+        settings=cfg,
+        baseline_provider=FakeProvider(handler=base_ok, max_retries=0),
+        network_provider=FakeProvider(handler=net_auth_fail, max_retries=0),
+        output_dir=tmp_path / "out",
+    )
+
+    with pytest.raises(SystemicBenchmarkError, match="AttributeError"):
+        asyncio.run(runner.evaluate_manifest(manifest, mode="baseline_vs_network"))
+
+    # Case 2 must NEVER be dispatched after Case 1 systemic failure!
+    assert "base:Case 2" not in calls
+    assert "net:Case 2" not in calls
+
+    # Failed record must still be persisted under runs/
+    cached_files = list((tmp_path / "out" / "runs").rglob("*_network.json"))
+    assert len(cached_files) == 1
+    assert "AttributeError" in cached_files[0].read_text(encoding="utf-8")
+
+
+def test_recovery_workflow_preserves_baseline_and_runs_network_only(tmp_path: Path) -> None:
+    """Verify recovery reuses original baseline (0 baseline calls) and executes network.run."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from crewforge.evaluation.contracts import BenchmarkItem, BenchmarkManifest
+    from crewforge.evaluation.runner import BenchmarkRunner
+    from crewforge.schemas import UsageMetrics
+    from tests.fake_provider import FakeProvider
+
+    manifest = BenchmarkManifest(
+        manifest_id="rec_01",
+        name="Recovery Test",
+        items=[
+            BenchmarkItem(
+                prompt_id="fin_01",
+                domain=PromptDomain.FINANCIAL,
+                prompt="Calculate 100 / 4.",
+            )
+        ],
+    )
+
+    orig_created = datetime(2026, 11, 25, 17, 45, 0, tzinfo=UTC)
+    orig_base = RunResult(
+        run_id="run_orig_base_01",
+        mode="baseline",
+        status=RunStatus.COMPLETED,
+        prompt="Calculate 100 / 4.",
+        provider="ollama",
+        model="qwen3:4b",
+        returned_model="qwen3:4b",
+        answer="Original baseline answer is 25.",
+        usage=UsageMetrics(input_tokens=100, output_tokens=50, total_tokens=150, model_calls=1),
+        created_at=orig_created,
+        completed_at=orig_created,
+    )
+    orig_failed_net = RunResult(
+        run_id="run_orig_net_fail_01",
+        mode="network",
+        status=RunStatus.FAILED,
+        prompt="Calculate 100 / 4.",
+        provider="ollama",
+        model="qwen3:4b",
+        answer="",
+        usage=UsageMetrics(model_calls=0),
+        error="unavailable_or_failed: 'NetworkRunner' object has no attribute 'solve'",
+    )
+    orig_exp = ExperimentResult(
+        prompt_id="fin_01",
+        domain=PromptDomain.FINANCIAL,
+        baseline_run_id=orig_base.run_id,
+        network_run_id=orig_failed_net.run_id,
+        baseline_provider="ollama",
+        baseline_model="qwen3:4b",
+        network_provider="ollama",
+        network_model="qwen3:4b",
+        baseline_result=orig_base,
+        network_result=orig_failed_net,
+        git_commit_sha="073721033279233de8a04e2c36611aa20d231702",
+    )
+    orig_results_path = tmp_path / "orig_results.json"
+    orig_results_path.write_text(
+        json.dumps([orig_exp.model_dump(mode="json")], indent=2), encoding="utf-8"
+    )
+
+    def forbidden_baseline(prompt: str, rm: Any) -> dict[str, Any]:
+        raise AssertionError("Baseline provider MUST NOT be called during recovery!")
+
+    net_calls = 0
+
+    def net_handler(prompt: str, rm: Any) -> dict[str, Any]:
+        nonlocal net_calls
+        net_calls += 1
+        name = getattr(rm, "__name__", "")
+        if "Planner" in name:
+            return {
+                "goal": "Calculate 100 / 4.",
+                "user_requirements": ["Compute 100 / 4"],
+                "acceptance_criteria": ["Exact answer 25"],
+                "agents": [
+                    {
+                        "agent_ref": "a1",
+                        "role": "Analyst",
+                        "instructions": "Compute.",
+                        "capabilities": ["analysis"],
+                    }
+                ],
+                "tasks": [
+                    {
+                        "task_ref": "t1",
+                        "title": "Compute",
+                        "description": "Compute 100/4.",
+                        "assigned_agent_ref": "a1",
+                        "depends_on": [],
+                        "expected_deliverables": ["25"],
+                    }
+                ],
+            }
+        if "Specialist" in name:
+            return {
+                "findings": "100 / 4 equals 25.",
+                "claims": [
+                    {
+                        "statement": "100 / 4 equals 25.",
+                        "category": "given_fact",
+                        "evidence_indices": [0],
+                        "requirement_refs": ["req_1"],
+                    }
+                ],
+                "evidence_proposals": [
+                    {"source_type": "user_prompt", "source_ref": "up_1", "excerpt": "100 / 4"}
+                ],
+                "task_completed": True,
+            }
+        if "Reviewer" in name:
+            return {
+                "verdicts": [
+                    {
+                        "claim_id": "c1",
+                        "decision": "approve",
+                        "rationale": "Exact.",
+                        "blocking_severity": "none",
+                    }
+                ],
+                "missing_requirement_coverage": [],
+            }
+        return {
+            "user_requirements": ["Compute 100 / 4"],
+            "accepted_segments": [],
+            "conditional_conclusions": [],
+            "recommendations": [],
+            "assumptions": [],
+            "unresolved_issues": [],
+            "missing_information": [],
+        }
+
+    cfg = CrewForgeSettings(_env_file=None, db_path=tmp_path / "rec.db")
+    rec_out = tmp_path / "recovered"
+    runner = BenchmarkRunner(
+        settings=cfg,
+        baseline_provider=FakeProvider(handler=forbidden_baseline, max_retries=0),
+        network_provider=FakeProvider(handler=net_handler, max_retries=0),
+        output_dir=rec_out,
+    )
+
+    rec_results, _ = asyncio.run(
+        runner.recover_from_results(
+            original_results_path=orig_results_path,
+            manifest=manifest,
+            mode="baseline_vs_network",
+            resume=True,
+        )
+    )
+    assert len(rec_results) == 1
+    r0 = rec_results[0]
+    assert r0.baseline_run_id == "run_orig_base_01"
+    assert r0.original_baseline_run_id == "run_orig_base_01"
+    assert r0.original_baseline_engine_commit == "073721033279233de8a04e2c36611aa20d231702"
+    assert r0.original_failed_network_run_id == "run_orig_net_fail_01"
+    assert r0.recovered_network_run_id != "run_orig_net_fail_01"
+    assert r0.network_result.status == RunStatus.COMPLETED
+    assert net_calls >= 3
+    assert (rec_out / "evaluator_packet.json").exists()
+    assert (rec_out / "blind_key.json").exists()
+
+    # Resume must make 0 additional network calls
+    calls_before_resume = net_calls
+    rec_resumed, _ = asyncio.run(
+        runner.recover_from_results(
+            original_results_path=orig_results_path,
+            manifest=manifest,
+            mode="baseline_vs_network",
+            resume=True,
+        )
+    )
+    assert net_calls == calls_before_resume
+    assert rec_resumed[0].recovered_network_run_id == r0.recovered_network_run_id
+
+    # Corrupted baseline prompt must abort without regenerating baseline
+    bad_manifest = manifest.model_copy(
+        update={
+            "items": [
+                BenchmarkItem(
+                    prompt_id="fin_01",
+                    domain=PromptDomain.FINANCIAL,
+                    prompt="Altered prompt!",
+                )
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="prompt mismatch"):
+        asyncio.run(
+            runner.recover_from_results(
+                original_results_path=orig_results_path,
+                manifest=bad_manifest,
+                mode="baseline_vs_network",
+            )
+        )
+
+
+def test_production_budget_ledger_isolated_from_tests() -> None:
+    """Verify default settings in tests resolve to tmp_path, never production .crewforge DBs."""
+    settings = CrewForgeSettings()
+    prod_auth = Path(".crewforge/budget_authority.db").resolve()
+    assert settings.budget_authority_path.resolve() != prod_auth
+    assert settings.allow_paid_runs is False
