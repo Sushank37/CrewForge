@@ -1,0 +1,514 @@
+"""Backend chat, judge-session settings, and MCP status layer for CrewForge UI."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import socket
+import sqlite3
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+from crewforge.config import (
+    DEFAULT_MODEL_PRICING,
+    BudgetAllocationCategory,
+    CrewForgeSettings,
+    ProviderType,
+    sanitize_error_message,
+)
+from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
+from crewforge.core.budget import BudgetManager, UnifiedBudgetAuthority
+from crewforge.core.orchestrator import NetworkRunner
+from crewforge.core.retrieval import ReferenceDocument
+from crewforge.providers.base import ModelProvider
+from crewforge.storage.database import Database
+
+
+def _utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class AttachmentInput(BaseModel):
+    """Reference document attached in the chat composer."""
+
+    name: str = Field(min_length=1, max_length=120)
+    content: str = Field(min_length=1, max_length=200_000)
+
+
+class ChatMessageRequest(BaseModel):
+    """Request payload for submitting a prompt in a chat session."""
+
+    prompt: str = Field(min_length=1, max_length=32_000)
+    mode: Literal["network", "baseline"] = "network"
+    attachments: list[AttachmentInput] = Field(default_factory=list, max_length=5)
+
+
+class JudgeSettingsUpdate(BaseModel):
+    """Non-secret + transient API key settings submitted from the Settings page."""
+
+    provider: Literal["ollama", "openai", "openai_compatible"] | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=120)
+    api_key: str | None = None
+    clear_api_key: bool = False
+    openai_base_url: str | None = Field(default=None, max_length=300)
+    ollama_base_url: str | None = Field(default=None, max_length=300)
+    openai_reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    allow_paid_runs: bool | None = None
+    max_output_tokens: int | None = Field(default=None, ge=256, le=32768)
+    max_workers: int | None = Field(default=None, ge=1, le=6)
+    max_tasks: int | None = Field(default=None, ge=1, le=8)
+    max_concurrency: int | None = Field(default=None, ge=1, le=6)
+    max_model_calls_per_run: int | None = Field(default=None, ge=1, le=32)
+    max_cost_per_run_usd: float | None = Field(default=None, ge=0.0, le=5.0)
+    total_budget_ceiling_usd: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+class JudgeSessionManager:
+    """Manages isolated judge-session chats, transient settings, and real runner tasks."""
+
+    def __init__(
+        self,
+        *,
+        db_path: str | Path = ".crewforge/judge_session.db",
+        budget_db_path: str | Path | None = None,
+        provider_factory: Callable[[CrewForgeSettings], ModelProvider] | None = None,
+    ) -> None:
+        self.db_path = Path(db_path)
+        self.budget_db_path = (
+            Path(budget_db_path)
+            if budget_db_path is not None
+            else self.db_path.with_name("judge_budget.db")
+        )
+        self._provider_factory = provider_factory
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+
+        # Distributable product defaults: isolated judge session, no team budget lock-in
+        self._config: dict[str, Any] = {
+            "provider": "ollama",
+            "model": "qwen3:4b",
+            "openai_base_url": "",
+            "ollama_base_url": "http://127.0.0.1:11434",
+            "openai_reasoning_effort": "low",
+            "allow_paid_runs": False,
+            "max_output_tokens": 8192,
+            "max_workers": 3,
+            "max_tasks": 3,
+            "max_concurrency": 3,
+            "max_model_calls_per_run": 16,
+            "max_cost_per_run_usd": 0.05,
+            "total_budget_ceiling_usd": 5.00,
+        }
+        # Kept strictly in backend process memory — never persisted or returned raw
+        self._api_key: str | None = None
+        self._init_chat_tables()
+
+    def _connect(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_chat_tables(self) -> None:
+        conn = self._connect()
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    chat_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    message_id TEXT PRIMARY KEY,
+                    chat_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    run_id TEXT,
+                    status TEXT NOT NULL,
+                    attachments_json TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (chat_id) REFERENCES conversations(chat_id)
+                );
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_public_settings(self) -> dict[str, Any]:
+        """Return safe non-secret settings (never returns raw API key)."""
+        hint = None
+        if self._api_key:
+            tail = self._api_key[-4:] if len(self._api_key) >= 4 else "****"
+            hint = f"••••{tail}"
+        return {
+            **self._config,
+            "api_key_configured": bool(self._api_key),
+            "api_key_hint": hint,
+            "session_db_path": str(self.db_path),
+            "session_budget_db_path": str(self.budget_db_path),
+        }
+
+    def update_settings(self, patch: JudgeSettingsUpdate) -> dict[str, Any]:
+        """Apply validated judge-session configuration updates in memory."""
+        data = patch.model_dump(exclude_none=True)
+        raw_key = data.pop("api_key", None)
+        clear_key = data.pop("clear_api_key", False)
+        if clear_key:
+            self._api_key = None
+        elif isinstance(raw_key, str) and raw_key.strip():
+            self._api_key = raw_key.strip()
+        for k, v in data.items():
+            if k in self._config:
+                self._config[k] = v
+        return self.get_public_settings()
+
+    def build_runtime_settings(self) -> CrewForgeSettings:
+        """Build an isolated CrewForgeSettings instance for a judge chat run."""
+        prov = ProviderType(self._config["provider"])
+        is_cloud = prov in (ProviderType.OPENAI, ProviderType.OPENAI_COMPATIBLE)
+        max_out = int(self._config["max_output_tokens"])
+        pricing = dict(DEFAULT_MODEL_PRICING)
+
+        kwargs: dict[str, Any] = {
+            "provider": prov,
+            "model": str(self._config["model"]),
+            "openai_api_key": self._api_key,
+            "openai_base_url": self._config["openai_base_url"] or None,
+            "ollama_base_url": self._config["ollama_base_url"] or "http://127.0.0.1:11434",
+            "openai_reasoning_effort": self._config["openai_reasoning_effort"],
+            "cloud_reasoning_profile": is_cloud,
+            "small_model_profile": not is_cloud,
+            "ollama_think": False if not is_cloud else None,
+            "allow_paid_runs": bool(self._config["allow_paid_runs"]),
+            "max_output_tokens": max_out,
+            "planner_max_output_tokens": min(6144, max_out),
+            "worker_max_output_tokens": max_out,
+            "review_max_output_tokens": min(6144, max_out),
+            "revision_max_output_tokens": max_out,
+            "synthesis_max_output_tokens": min(6144, max_out),
+            "max_workers": int(self._config["max_workers"]),
+            "max_tasks": int(self._config["max_tasks"]),
+            "max_concurrency": 1 if not is_cloud else int(self._config["max_concurrency"]),
+            "max_communication_rounds": 1,
+            "max_revision_rounds": 1,
+            "max_retries": 0,
+            "max_model_calls_per_run": int(self._config["max_model_calls_per_run"]),
+            "max_cost_per_run_usd": float(self._config["max_cost_per_run_usd"]),
+            "max_cumulative_cost_usd": float(self._config["total_budget_ceiling_usd"]),
+            "total_budget_ceiling_usd": float(self._config["total_budget_ceiling_usd"]),
+            "protected_reserve_usd": 0.0,
+            "budget_allocation_category": BudgetAllocationCategory.GENERAL,
+            "db_path": self.db_path,
+            "cloud_db_path": self.db_path,
+            "canonical_budget_db_path": self.budget_db_path,
+            "pricing_json": pricing,
+            "request_timeout_seconds": 180.0,
+            "run_deadline_seconds": 480.0,
+            "enable_http_retrieval": False,
+        }
+        return CrewForgeSettings(**kwargs)
+
+    # ---------------- Conversation Persistence ----------------
+    def list_chats(self) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT chat_id, title, created_at, updated_at FROM conversations "
+                "ORDER BY updated_at DESC LIMIT 50"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def create_chat(self, title: str = "New Chat") -> dict[str, Any]:
+        now = _utc_iso()
+        chat = {
+            "chat_id": f"chat_{uuid4().hex[:10]}",
+            "title": (title or "New Chat").strip()[:80],
+            "created_at": now,
+            "updated_at": now,
+        }
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO conversations (chat_id, title, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (chat["chat_id"], chat["title"], chat["created_at"], chat["updated_at"]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return chat
+
+    def get_chat(self, chat_id: str) -> dict[str, Any] | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT chat_id, title, created_at, updated_at "
+                "FROM conversations WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            msgs = conn.execute(
+                "SELECT message_id, chat_id, role, mode, content, run_id, status, "
+                "attachments_json, error, created_at, updated_at "
+                "FROM chat_messages WHERE chat_id = ? ORDER BY created_at ASC",
+                (chat_id,),
+            ).fetchall()
+            out_msgs = []
+            for m in msgs:
+                d = dict(m)
+                d["attachments"] = json.loads(d.pop("attachments_json", "[]"))
+                out_msgs.append(d)
+            return {**dict(row), "messages": out_msgs}
+        finally:
+            conn.close()
+
+    def delete_chat(self, chat_id: str) -> bool:
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
+            cur = conn.execute("DELETE FROM conversations WHERE chat_id = ?", (chat_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def _update_message(
+        self,
+        message_id: str,
+        *,
+        status: str,
+        content: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        now = _utc_iso()
+        conn = self._connect()
+        try:
+            if content is not None:
+                conn.execute(
+                    "UPDATE chat_messages SET status = ?, content = ?, error = ?, updated_at = ? "
+                    "WHERE message_id = ?",
+                    (status, content, error, now, message_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE chat_messages SET status = ?, error = ?, updated_at = ? "
+                    "WHERE message_id = ?",
+                    (status, error, now, message_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def submit_message(
+        self,
+        chat_id: str,
+        req: ChatMessageRequest,
+    ) -> dict[str, Any]:
+        """Persist user prompt, start real CrewForge execution, and return run_id."""
+        chat = self.get_chat(chat_id)
+        if chat is None:
+            raise KeyError(f"Chat '{chat_id}' not found.")
+
+        now = _utc_iso()
+        user_msg_id = f"cmsg_{uuid4().hex[:10]}"
+        asst_msg_id = f"cmsg_{uuid4().hex[:10]}"
+        run_id = f"run_{uuid4().hex[:12]}"
+        att_meta = [{"name": a.name, "size": len(a.content)} for a in req.attachments]
+
+        conn = self._connect()
+        try:
+            if chat["title"] == "New Chat":
+                new_title = req.prompt.strip().splitlines()[0][:54] or "New Chat"
+                conn.execute(
+                    "UPDATE conversations SET title = ?, updated_at = ? WHERE chat_id = ?",
+                    (new_title, now, chat_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE chat_id = ?",
+                    (now, chat_id),
+                )
+            conn.execute(
+                "INSERT INTO chat_messages (message_id, chat_id, role, mode, content, run_id, "
+                "status, attachments_json, error, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    user_msg_id,
+                    chat_id,
+                    "user",
+                    req.mode,
+                    req.prompt.strip(),
+                    run_id,
+                    "completed",
+                    json.dumps(att_meta),
+                    None,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO chat_messages (message_id, chat_id, role, mode, content, run_id, "
+                "status, attachments_json, error, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    asst_msg_id,
+                    chat_id,
+                    "assistant",
+                    req.mode,
+                    "",
+                    run_id,
+                    "running",
+                    "[]",
+                    None,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        ref_docs = [
+            ReferenceDocument(
+                doc_id=f"doc_{idx + 1}",
+                source_ref=a.name,
+                content=a.content,
+            )
+            for idx, a in enumerate(req.attachments)
+        ]
+
+        task = asyncio.create_task(
+            self._execute_run(
+                run_id=run_id,
+                assistant_msg_id=asst_msg_id,
+                prompt=req.prompt.strip(),
+                mode=req.mode,
+                ref_docs=ref_docs,
+            )
+        )
+        self._tasks[run_id] = task
+        return {
+            "chat_id": chat_id,
+            "user_message_id": user_msg_id,
+            "assistant_message_id": asst_msg_id,
+            "run_id": run_id,
+            "status": "running",
+        }
+
+    async def _execute_run(
+        self,
+        *,
+        run_id: str,
+        assistant_msg_id: str,
+        prompt: str,
+        mode: Literal["network", "baseline"],
+        ref_docs: list[ReferenceDocument],
+    ) -> None:
+        settings = self.build_runtime_settings()
+        db = Database(self.db_path)
+        try:
+            await db.initialize()
+            authority = UnifiedBudgetAuthority(
+                settings=settings,
+                migrate_default_dbs=False,
+            )
+            budget = BudgetManager(database=db, settings=settings, authority=authority)
+            provider = (
+                self._provider_factory(settings)
+                if self._provider_factory is not None
+                else build_provider_from_settings(settings)
+            )
+            if mode == "baseline":
+                runner = BaselineRunner(
+                    provider=provider,
+                    database=db,
+                    budget_manager=budget,
+                    settings=settings,
+                )
+            else:
+                runner = NetworkRunner(
+                    provider=provider,
+                    database=db,
+                    budget_manager=budget,
+                    settings=settings,
+                )
+            res = await runner.run(
+                prompt,
+                run_id=run_id,
+                reference_documents=ref_docs or None,
+            )
+            self._update_message(
+                assistant_msg_id,
+                status=res.status.value,
+                content=res.answer or "",
+                error=sanitize_error_message(res.error) if res.error else None,
+            )
+        except asyncio.CancelledError:
+            self._update_message(
+                assistant_msg_id,
+                status="cancelled",
+                content="Execution cancelled by user.",
+                error="Cancelled by user.",
+            )
+            raise
+        except Exception as exc:
+            self._update_message(
+                assistant_msg_id,
+                status="failed",
+                content="",
+                error=sanitize_error_message(str(exc)),
+            )
+        finally:
+            self._tasks.pop(run_id, None)
+            with contextlib.suppress(Exception):
+                await db.close()
+
+    def cancel_run(self, run_id: str) -> bool:
+        """Cancel an in-flight run task if active."""
+        task = self._tasks.get(run_id)
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
+
+    def get_mcp_status(self) -> dict[str, Any]:
+        """Check local Streamable HTTP MCP port and return portable configs."""
+        http_reachable = False
+        with (
+            contextlib.suppress(OSError),
+            socket.create_connection(("127.0.0.1", 8000), timeout=0.3),
+        ):
+            http_reachable = True
+        return {
+            "tools": ["solve", "baseline", "trace"],
+            "http_endpoint": "http://127.0.0.1:8000/mcp",
+            "http_reachable": http_reachable,
+            "session_db_path": str(self.db_path),
+            "stdio_config": {
+                "mcpServers": {
+                    "crewforge": {
+                        "command": "uv",
+                        "args": ["run", "--directory", "/path/to/CrewForge", "crewforge-mcp"],
+                        "env": {"CREWFORGE_DB_PATH": str(self.db_path)},
+                    }
+                }
+            },
+            "http_command": (
+                f"CREWFORGE_DB_PATH={self.db_path} uv run crewforge-mcp "
+                "--transport streamable-http --host 127.0.0.1 --port 8000"
+            ),
+        }
