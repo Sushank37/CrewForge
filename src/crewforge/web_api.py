@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ from crewforge.core.budget import BudgetManager, UnifiedBudgetAuthority
 from crewforge.core.orchestrator import NetworkRunner
 from crewforge.core.retrieval import ReferenceDocument
 from crewforge.providers.base import ModelProvider
+from crewforge.providers.groq_quota import run_deadline_var, wait_observer_var
 from crewforge.storage.database import Database
 
 _ENV_ISOLATION_LOCK = threading.Lock()
@@ -100,6 +102,7 @@ class JudgeSessionManager:
         )
         self._provider_factory = provider_factory
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._provider_wait_state: dict[str, dict[str, Any]] = {}
 
         # Distributable product defaults: isolated judge session, no team budget or .env fallback
         self._config: dict[str, Any] = {
@@ -478,6 +481,16 @@ class JudgeSessionManager:
             "status": "running",
         }
 
+    def get_provider_wait_state(self, run_id: str) -> dict[str, Any] | None:
+        """Return active provider quota-wait metadata for a running execution, if any."""
+        state = self._provider_wait_state.get(run_id)
+        if state is None:
+            return None
+        if time.monotonic() >= float(state.get("expires_at", 0.0)):
+            self._provider_wait_state.pop(run_id, None)
+            return None
+        return state
+
     async def _execute_run(
         self,
         *,
@@ -489,6 +502,17 @@ class JudgeSessionManager:
     ) -> None:
         settings = self.build_runtime_settings()
         db = Database(self.db_path)
+
+        def _on_provider_wait(wait_s: float, reason: str) -> None:
+            self._provider_wait_state[run_id] = {
+                "waiting_for_provider": True,
+                "waiting_reason": reason,
+                "provider_wait_seconds": round(wait_s, 1),
+                "expires_at": time.monotonic() + wait_s,
+            }
+
+        deadline_token = run_deadline_var.set(time.monotonic() + settings.run_deadline_seconds)
+        wait_token = wait_observer_var.set(_on_provider_wait)
         try:
             await db.initialize()
             authority = UnifiedBudgetAuthority(
@@ -542,6 +566,9 @@ class JudgeSessionManager:
                 error=sanitize_error_message(str(exc)),
             )
         finally:
+            run_deadline_var.reset(deadline_token)
+            wait_observer_var.reset(wait_token)
+            self._provider_wait_state.pop(run_id, None)
             self._tasks.pop(run_id, None)
             with contextlib.suppress(Exception):
                 await db.close()

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from typing import Any, TypeVar
 from urllib.parse import urlparse
 
@@ -24,6 +26,13 @@ from crewforge.providers.base import (
     StructuredGenerationResult,
     TextGenerationResult,
     execute_with_retry,
+)
+from crewforge.providers.groq_quota import (
+    extract_retry_after_seconds,
+    get_groq_scheduler,
+    remaining_calls_var,
+    run_deadline_var,
+    wait_observer_var,
 )
 from crewforge.schemas import UsageMetrics
 
@@ -77,6 +86,9 @@ class OpenAIProvider(ModelProvider):
         self._is_free_tier = is_free_tier
         parsed_host = (urlparse(base_url).hostname or "").lower() if base_url else ""
         self._is_groq = parsed_host == "api.groq.com"
+        self._quota_scheduler = (
+            get_groq_scheduler(base_url=base_url, model=model) if self._is_groq else None
+        )
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._default_max_output_tokens = default_max_output_tokens
@@ -136,39 +148,103 @@ class OpenAIProvider(ModelProvider):
     def is_paid_provider(self) -> bool:
         return not self._is_free_tier
 
+    def _effective_chat_max_tokens(self, requested: int | None) -> int:
+        tokens = requested or self._default_max_output_tokens
+        if self._is_groq and self._is_free_tier:
+            return min(tokens, 2048)
+        return tokens
+
+    @staticmethod
+    def _compact_schema_json(response_model: type[BaseModel], *, strip_descriptions: bool) -> str:
+        schema = response_model.model_json_schema()
+        if strip_descriptions:
+            def _strip(obj: Any) -> Any:
+                if isinstance(obj, dict):
+                    return {
+                        k: _strip(v)
+                        for k, v in obj.items()
+                        if k not in ("description", "title")
+                    }
+                if isinstance(obj, list):
+                    return [_strip(item) for item in obj]
+                return obj
+            schema = _strip(schema)
+        return json.dumps(schema, separators=(",", ":"))
+
+    async def _create_chat_completion(
+        self, chat_kwargs: dict[str, Any]
+    ) -> tuple[Any, dict[str, str]]:
+        completions = self._client.chat.completions
+        raw_api = getattr(completions, "with_raw_response", None)
+        if raw_api is not None and hasattr(raw_api, "create"):
+            raw_resp = await raw_api.create(**chat_kwargs)
+            headers = {str(k).lower(): str(v) for k, v in getattr(raw_resp, "headers", {}).items()}
+            return raw_resp.parse(), headers
+        resp = await completions.create(**chat_kwargs)
+        return resp, {}
+
     async def _run_with_rate_limit_backoff(
         self,
         fn: Any,
         *,
         timeout_seconds: float,
         retries_cap: int,
+        estimated_tokens: int = 1200,
     ) -> tuple[Any, int, float]:
-        """Run provider call with bounded 429 rate-limit backoff (never switches models)."""
-        max_rl_retries = 2 if self._is_groq else 0
-        attempt = 0
+        """Run provider call with quota-aware 429 scheduling (never switches models)."""
+        max_rl_retries = 4 if self._is_groq else 0
+        rl_attempt = 0
+        started = time.perf_counter()
         while True:
+            if self._quota_scheduler is not None:
+                try:
+                    await self._quota_scheduler.wait_for_slot(
+                        estimated_tokens,
+                        deadline_monotonic=run_deadline_var.get(),
+                        on_wait=wait_observer_var.get(),
+                    )
+                except TimeoutError as exc:
+                    raise ProviderRateLimitError(
+                        str(exc),
+                        provider=self.provider_name,
+                        model=self._model,
+                        retries_attempted=rl_attempt,
+                    ) from exc
             try:
-                return await execute_with_retry(
+                result, inner_retries, _ = await execute_with_retry(
                     fn,
                     provider=self.provider_name,
                     model=self._model,
                     timeout_seconds=timeout_seconds,
                     max_retries=retries_cap,
                 )
-            except ProviderRateLimitError:
-                if attempt >= max_rl_retries:
+                total_latency_ms = (time.perf_counter() - started) * 1000.0
+                return result, inner_retries + rl_attempt, total_latency_ms
+            except ProviderRateLimitError as rl_exc:
+                rem_calls = remaining_calls_var.get()
+                if rl_attempt >= max_rl_retries or (
+                    rem_calls is not None and (1 + rl_attempt) >= rem_calls
+                ):
+                    rl_exc.retries_attempted = rl_attempt
                     raise
-                delay = min(15.0, 2.0 * (attempt + 1))
-                attempt += 1
+                if self._quota_scheduler is not None:
+                    delay = self._quota_scheduler.record_rate_limit(
+                        headers=rl_exc.response_headers,
+                        message=str(rl_exc),
+                    )
+                else:
+                    delay = min(15.0, 2.0 * (rl_attempt + 1))
+                rl_attempt += 1
                 logger.warning(
-                    "Rate limited by %s (%s); bounded backoff %.1fs (attempt %d/%d).",
+                    "Rate limited by %s (%s); quota-aware backoff %.1fs (attempt %d/%d).",
                     self.provider_name,
                     self._model,
                     delay,
-                    attempt,
+                    rl_attempt,
                     max_rl_retries,
                 )
-                await asyncio.sleep(delay)
+                if self._quota_scheduler is None:
+                    await asyncio.sleep(delay)
 
     @property
     def supports_reasoning_effort(self) -> bool:
@@ -209,11 +285,21 @@ class OpenAIProvider(ModelProvider):
                 model=self._model,
             )
         if isinstance(exc, openai.RateLimitError):
+            resp_obj = getattr(exc, "response", None)
+            raw_headers = getattr(resp_obj, "headers", None)
+            headers = (
+                {str(k).lower(): str(v) for k, v in raw_headers.items()}
+                if raw_headers is not None
+                else {}
+            )
+            msg = f"OpenAI rate limit error: {exc}"
             return ProviderRateLimitError(
-                f"OpenAI rate limit error: {exc}",
+                msg,
                 provider=self.provider_name,
                 model=self._model,
                 status_code=getattr(exc, "status_code", 429),
+                retry_after_seconds=extract_retry_after_seconds(headers, msg),
+                response_headers=headers,
             )
         if isinstance(exc, openai.AuthenticationError):
             return ProviderConfigurationError(
@@ -265,6 +351,7 @@ class OpenAIProvider(ModelProvider):
         inc_reason = getattr(inc_details, "reason", None) if inc_details is not None else None
 
         usage_obj = getattr(response, "usage", None)
+        total_attempts = 1 + max(0, retries)
         if usage_obj is None:
             return UsageMetrics(
                 input_tokens=0,
@@ -272,7 +359,7 @@ class OpenAIProvider(ModelProvider):
                 reasoning_tokens=0,
                 cached_input_tokens=0,
                 total_tokens=0,
-                model_calls=1,
+                model_calls=total_attempts,
                 retries=retries,
                 latency_ms=latency_ms,
                 usage_reported=False,
@@ -306,7 +393,7 @@ class OpenAIProvider(ModelProvider):
                 reasoning_tokens=reasoning_tokens,
                 cached_input_tokens=cached_tokens,
                 total_tokens=int(getattr(usage_obj, "total_tokens", 0) or 0),
-                model_calls=1,
+                model_calls=total_attempts,
                 retries=retries,
                 latency_ms=latency_ms,
                 usage_reported=False,
@@ -326,7 +413,7 @@ class OpenAIProvider(ModelProvider):
             reasoning_tokens=reasoning_tokens,
             cached_input_tokens=cached_tokens,
             total_tokens=max(total_tokens, input_tokens + output_tokens),
-            model_calls=1,
+            model_calls=total_attempts,
             retries=retries,
             latency_ms=latency_ms,
             usage_reported=True,
@@ -399,26 +486,30 @@ class OpenAIProvider(ModelProvider):
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
+            eff_tokens = self._effective_chat_max_tokens(max_output_tokens)
             chat_kwargs: dict[str, Any] = {
                 "model": self._model,
                 "messages": messages,
-                "max_tokens": max_output_tokens or self._default_max_output_tokens,
+                "max_tokens": eff_tokens,
             }
             if temperature is not None and self.supports_temperature:
                 chat_kwargs["temperature"] = temperature
 
-            async def _chat_call() -> Any:
+            async def _chat_call() -> tuple[Any, dict[str, str]]:
                 try:
-                    return await self._client.chat.completions.create(**chat_kwargs)
+                    return await self._create_chat_completion(chat_kwargs)
                 except Exception as exc:
                     raise self._translate_sdk_error(exc) from exc
 
-            response, retries, latency_ms = await execute_with_retry(
+            est_tokens = max(
+                400,
+                len(prompt) // 4 + len(system_prompt or "") // 4 + min(eff_tokens, 600),
+            )
+            (response, resp_headers), retries, latency_ms = await self._run_with_rate_limit_backoff(
                 _chat_call,
-                provider=self.provider_name,
-                model=self._model,
                 timeout_seconds=timeout,
-                max_retries=retries_cap,
+                retries_cap=retries_cap,
+                estimated_tokens=est_tokens,
             )
             choices = getattr(response, "choices", None) or []
             output_text = getattr(choices[0].message, "content", None) if choices else None
@@ -430,6 +521,8 @@ class OpenAIProvider(ModelProvider):
                     retries_attempted=retries,
                 )
             usage = self._extract_usage(response, retries, latency_ms, fallback_model=self._model)
+            if self._quota_scheduler is not None:
+                self._quota_scheduler.record_usage(usage.total_tokens, headers=resp_headers)
             return TextGenerationResult(
                 provider=self.provider_name,
                 model=self._model,
@@ -493,9 +586,10 @@ class OpenAIProvider(ModelProvider):
         retries_cap = self._max_retries if max_retries is None else max_retries
 
         if self._use_chat_completions:
-            import json as _json
-
-            schema_hint = _json.dumps(response_model.model_json_schema(), separators=(",", ":"))
+            schema_hint = self._compact_schema_json(
+                response_model,
+                strip_descriptions=self._is_groq,
+            )
             sys_msg = (
                 system_prompt or ""
             ) + f"\nReturn strictly valid JSON matching schema: {schema_hint}"
@@ -503,30 +597,38 @@ class OpenAIProvider(ModelProvider):
                 {"role": "system", "content": sys_msg.strip()},
                 {"role": "user", "content": prompt},
             ]
+            eff_tokens = self._effective_chat_max_tokens(max_output_tokens)
             chat_kwargs: dict[str, Any] = {
                 "model": self._model,
                 "messages": messages,
-                "max_tokens": max_output_tokens or self._default_max_output_tokens,
+                "max_tokens": eff_tokens,
                 "response_format": {"type": "json_object"},
             }
             if temperature is not None and self.supports_temperature:
                 chat_kwargs["temperature"] = temperature
 
-            async def _chat_struct_call() -> Any:
+            async def _chat_struct_call() -> tuple[Any, dict[str, str]]:
                 try:
-                    return await self._client.chat.completions.create(**chat_kwargs)
+                    return await self._create_chat_completion(chat_kwargs)
                 except Exception as exc:
                     raise self._translate_sdk_error(exc) from exc
 
-            response, retries, latency_ms = await self._run_with_rate_limit_backoff(
+            est_tokens = max(
+                600,
+                (len(sys_msg) + len(prompt)) // 4 + min(eff_tokens, 800),
+            )
+            (response, resp_headers), retries, latency_ms = await self._run_with_rate_limit_backoff(
                 _chat_struct_call,
                 timeout_seconds=timeout,
                 retries_cap=retries_cap,
+                estimated_tokens=est_tokens,
             )
             choices = getattr(response, "choices", None) or []
             finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
             raw_text = getattr(choices[0].message, "content", "") if choices else ""
             usage = self._extract_usage(response, retries, latency_ms, fallback_model=self._model)
+            if self._quota_scheduler is not None:
+                self._quota_scheduler.record_usage(usage.total_tokens, headers=resp_headers)
             if finish_reason == "length":
                 raise ProviderResponseError(
                     "OpenAI-compatible structured response truncated at max_tokens limit.",

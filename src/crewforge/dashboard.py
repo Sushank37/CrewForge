@@ -196,6 +196,12 @@ def create_dashboard_app(
         run_id = request.path_params["run_id"]
         try:
             payload = await trace_store.get_run_payload(run_id)
+            if payload.get("status") == "running":
+                wait_state = session_mgr.get_provider_wait_state(run_id)
+                if wait_state:
+                    payload["waiting_for_provider"] = True
+                    payload["waiting_reason"] = wait_state["waiting_reason"]
+                    payload["provider_wait_seconds"] = wait_state["provider_wait_seconds"]
             return JSONResponse(payload)
         except DashboardValidationError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)

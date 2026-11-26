@@ -71,6 +71,8 @@ class ClaimLedger:
         )
 
         # Execute computation requests attached to claims before validating computation evidence.
+        from crewforge.tools.arithmetic import ProvenanceTarget
+
         claim_tool_records: dict[int, ToolExecutionRecord] = {}
         all_new_tool_records: list[ToolExecutionRecord] = []
         for idx, prop_claim in enumerate(claim_proposals):
@@ -84,6 +86,25 @@ class ClaimLedger:
                 )
                 claim_tool_records[idx] = rec
                 all_new_tool_records.append(rec)
+                if (
+                    rec.success
+                    and rec.inputs_grounded
+                    and not rec.has_ungrounded_literals
+                    and rec.matches_proposed is not False
+                    and rec.computed_result is not None
+                ):
+                    t_intermediate = ProvenanceTarget(
+                        alias=rec.tool_execution_id,
+                        kind="tool_result",
+                        target_id=rec.tool_execution_id,
+                        text=f"{rec.computed_result} {rec.units}".strip(),
+                        units=rec.units,
+                        is_trusted=True,
+                    )
+                    catalog.targets_by_key[rec.tool_execution_id] = t_intermediate
+                    seq_alias = f"clm_{idx + 1}"
+                    if seq_alias not in catalog.targets_by_key:
+                        catalog.targets_by_key[seq_alias] = t_intermediate
 
         combined_tool_records = [*prior_tool_records, *all_new_tool_records]
 

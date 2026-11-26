@@ -176,14 +176,24 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
     <section className={`office-shell ${collapsed ? "office-collapsed" : ""}`} aria-label="AI Office Workspace">
       <div className="office-header">
         <div className="office-title-block">
-          <div className="office-headline">{stage.headline}</div>
-          <div className="office-subline">{stage.subline}</div>
+          <div className="office-headline">
+            {isRunning && trace?.waiting_for_provider
+              ? "Waiting for Provider Quota..."
+              : stage.headline}
+          </div>
+          <div className="office-subline">
+            {isRunning && trace?.waiting_for_provider
+              ? trace.waiting_reason || "Waiting for provider rate-limit reset..."
+              : stage.subline}
+          </div>
         </div>
         <div className="office-header-actions">
-          <span className={`office-pill ${isRunning ? "pill-live" : stage.blocked ? "pill-error" : "pill-idle"}`}>
+          <span className={`office-pill ${isRunning ? (trace?.waiting_for_provider ? "pill-warn" : "pill-live") : stage.blocked ? "pill-error" : "pill-idle"}`}>
             <span className="pulse-dot" />
             {isRunning
-              ? "Live Execution"
+              ? trace?.waiting_for_provider
+                ? "Waiting for Provider"
+                : "Live Execution"
               : stage.blocked
               ? "Verification Blocked"
               : trace

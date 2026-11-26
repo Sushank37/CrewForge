@@ -218,11 +218,22 @@ def build_provenance_catalog(
         if claim.version > prev_ver:
             latest_ver_by_id[claim.claim_id] = claim.version
 
+    valid_tool_ids: set[str] = {
+        rec.tool_execution_id
+        for rec in (tool_records or [])
+        if (
+            rec.success
+            and rec.inputs_grounded
+            and not rec.has_ungrounded_literals
+            and rec.matches_proposed is not False
+            and rec.computed_result is not None
+        )
+    }
+
     for claim in all_claims or []:
         is_latest = claim.version == latest_ver_by_id.get(claim.claim_id, -1)
-        is_ok = (
-            is_latest
-            and claim.status == ClaimStatus.SUPPORTED
+        is_supported = (
+            claim.status == ClaimStatus.SUPPORTED
             and claim.verification_status.value
             in {
                 "provenance_validated",
@@ -230,9 +241,14 @@ def build_provenance_catalog(
                 "independently_reviewed_inference",
             }
         )
+        is_verified_asserted = (
+            claim.status == ClaimStatus.ASSERTED
+            and any(tid in valid_tool_ids for tid in claim.tool_execution_ids)
+        )
+        is_ok = is_latest and (is_supported or is_verified_asserted)
         if not is_latest:
             reason = f"Stale claim reference '{claim.claim_id}' v{claim.version}."
-        elif claim.status != ClaimStatus.SUPPORTED:
+        elif not (is_supported or is_verified_asserted):
             reason = (
                 f"Premise claim '{claim.claim_id}' has status "
                 f"'{claim.status.value}', not supported."
@@ -310,8 +326,132 @@ def _parse_decimal(raw: str | int | float, *, field_name: str = "value") -> Deci
     return val
 
 
+_WORD_UNITS: dict[str, int] = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+}
+_WORD_TENS: dict[str, int] = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_WORD_SCALES: dict[str, int] = {
+    "hundred": 100,
+    "thousand": 1000,
+    "million": 1_000_000,
+    "billion": 1_000_000_000,
+}
+_WORD_FRACTIONS: dict[str, Decimal] = {
+    "half": Decimal("0.5"),
+    "quarter": Decimal("0.25"),
+}
+_WORD_NUM_TOKEN_RE = re.compile(r"[A-Za-z]+|[-]")
+
+
+def _extract_word_number_spans(text: str) -> list[tuple[Decimal, int, int, str]]:
+    """Extract numbers expressed in English words with their character spans."""
+    if not text:
+        return []
+    tokens = [(m.group(0).lower(), m.start(), m.end()) for m in _WORD_NUM_TOKEN_RE.finditer(text)]
+    results: list[tuple[Decimal, int, int, str]] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok, start, end = tokens[i]
+        if tok in _WORD_FRACTIONS:
+            # Handle standalone 'half' / 'quarter' (e.g. 'half an hour', 'a quarter')
+            results.append((_WORD_FRACTIONS[tok], start, end, text[start:end]))
+            i += 1
+            continue
+        if tok not in _WORD_UNITS and tok not in _WORD_TENS and tok not in _WORD_SCALES:
+            i += 1
+            continue
+
+        # Accumulate multi-word cardinal: e.g. 'two thousand five hundred', 'forty-five'
+        total = 0
+        current = 0
+        span_end = end
+        j = i
+        consumed_any = False
+        while j < n:
+            w, _, w_end = tokens[j]
+            if w == "-":
+                j += 1
+                continue
+            if w in _WORD_UNITS:
+                current += _WORD_UNITS[w]
+                span_end = w_end
+                consumed_any = True
+                j += 1
+            elif w in _WORD_TENS:
+                current += _WORD_TENS[w]
+                span_end = w_end
+                consumed_any = True
+                j += 1
+            elif w == "hundred":
+                current = (current or 1) * 100
+                span_end = w_end
+                consumed_any = True
+                j += 1
+            elif w in _WORD_SCALES:
+                scale = _WORD_SCALES[w]
+                total += (current or 1) * scale
+                current = 0
+                span_end = w_end
+                consumed_any = True
+                j += 1
+            elif w == "and" and consumed_any and j + 1 < n:
+                nxt = tokens[j + 1][0]
+                if nxt in _WORD_UNITS or nxt in _WORD_TENS:
+                    j += 1
+                    continue
+                if nxt in _WORD_FRACTIONS:
+                    val = Decimal(total + current) + _WORD_FRACTIONS[nxt]
+                    results.append((val, start, tokens[j + 1][2], text[start : tokens[j + 1][2]]))
+                    consumed_any = False
+                    j += 2
+                    break
+                if nxt in ("a", "an") and j + 2 < n and tokens[j + 2][0] in _WORD_FRACTIONS:
+                    frac = _WORD_FRACTIONS[tokens[j + 2][0]]
+                    val = Decimal(total + current) + frac
+                    results.append((val, start, tokens[j + 2][2], text[start : tokens[j + 2][2]]))
+                    consumed_any = False
+                    j += 3
+                    break
+                break
+            else:
+                break
+        if consumed_any:
+            results.append((Decimal(total + current), start, span_end, text[start:span_end]))
+        i = max(i + 1, j)
+    return results
+
+
 def extract_numbers_from_text(text: str) -> set[Decimal]:
-    """Extract normalized Decimal values (including percentages) from grounded text."""
+    """Extract normalized Decimal values (including percentages and number words)."""
     found: set[Decimal] = set()
     if not text:
         return found
@@ -330,6 +470,9 @@ def extract_numbers_from_text(text: str) -> set[Decimal]:
                     found.add(val)
         except InvalidOperation:
             continue
+    for val, _s, _e, _raw in _extract_word_number_spans(text):
+        if val.is_finite():
+            found.add(val)
     return found
 
 
@@ -364,6 +507,18 @@ def _extract_numeric_occurrences(text: str) -> list[tuple[Decimal, Decimal | Non
             if pos != -1:
                 right_slice = right_slice[:pos]
         results.append((raw_val, ratio_val, token, f"{left_slice} {token} {right_slice}".lower()))
+    for raw_val, start, end, token in _extract_word_number_spans(text):
+        left_slice = text[max(0, start - 45) : start]
+        for sep in (".", ";", "\n", ","):
+            pos = left_slice.rfind(sep)
+            if pos != -1:
+                left_slice = left_slice[pos + 1 :]
+        right_slice = text[end : min(len(text), end + 20)]
+        for sep in (".", ";", "\n", ","):
+            pos = right_slice.find(sep)
+            if pos != -1:
+                right_slice = right_slice[:pos]
+        results.append((raw_val, None, token, f"{left_slice} {token} {right_slice}".lower()))
     return results
 
 
@@ -874,12 +1029,29 @@ class DeterministicArithmeticTool:
             tree = ast.parse(request.expression.strip(), mode="eval")
             _check_ast_limits(tree)
             inline_literals = _extract_ast_numeric_literals(tree)
-            is_percent_expr = "%" in request.units or "percent" in request.units.lower()
+            units_lower = request.units.lower()
+            prompt_lower = (
+                catalog.original_prompt if catalog is not None else "\n".join(grounded_texts or [])
+            ).lower()
+            is_percent_expr = "%" in request.units or "percent" in units_lower
+            allowed_conversion_consts: set[Decimal] = {Decimal(0), Decimal(1)}
+            if is_percent_expr:
+                allowed_conversion_consts.add(Decimal(100))
+            ctx_blob = f"{units_lower} {prompt_lower}"
+            conversion_rules = (
+                (Decimal(1000), ("per 1,000", "per 1000", "thousand", "kilo", "milli", "km", "kg")),
+                (Decimal(60), ("minute", "min", "second", "sec", "hour", "hr")),
+                (Decimal(24), ("day", "days", "hour", "hours", "hr")),
+                (Decimal(12), ("month", "months", "year", "years", "yr")),
+                (Decimal(365), ("day", "days", "year", "years", "yr")),
+            )
+            for const_val, markers in conversion_rules:
+                if any(m in ctx_blob for m in markers):
+                    allowed_conversion_consts.add(const_val)
             ungrounded_literals = [
                 lit
                 for lit in inline_literals
-                if lit not in {Decimal(0), Decimal(1)}
-                and not (lit == Decimal(100) and is_percent_expr)
+                if lit not in allowed_conversion_consts
                 and format_decimal(lit) not in request.input_provenance_refs
                 and not any(_decimals_match(lit, v) for v in parsed_vars.values())
             ]

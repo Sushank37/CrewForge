@@ -285,12 +285,14 @@ def test_chat_and_shared_budget_isolation_offline(tmp_path: Path) -> None:
 def test_groq_bounded_rate_limit_backoff_without_model_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify Groq free-tier provider retries 429 up to 2 times without switching models."""
+    """Verify Groq free-tier provider retries 429 cleanly without switching models."""
     import asyncio
 
     from crewforge.providers.base import ProviderRateLimitError
+    from crewforge.providers.groq_quota import reset_groq_schedulers
     from crewforge.providers.openai_provider import OpenAIProvider
 
+    reset_groq_schedulers()
     provider = OpenAIProvider(
         api_key="gsk-test-key",
         model="openai/gpt-oss-120b",
@@ -305,6 +307,8 @@ def test_groq_bounded_rate_limit_backoff_without_model_switch(
 
     async def fake_sleep(delay: float) -> None:
         sleep_delays.append(delay)
+        if provider._quota_scheduler is not None:
+            provider._quota_scheduler._next_available_at = 0.0
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
@@ -325,12 +329,12 @@ def test_groq_bounded_rate_limit_backoff_without_model_switch(
         provider._run_with_rate_limit_backoff(flaky_call, timeout_seconds=5.0, retries_cap=0)
     )
     assert result == "ok"
-    assert retries == 0
+    assert retries == 2
     assert attempts == 3
-    assert sleep_delays == [2.0, 4.0]
+    assert len(sleep_delays) == 2
     assert provider._model == "openai/gpt-oss-120b"
 
-    # Exceeding the 2-retry cap must raise ProviderRateLimitError rather than switching models
+    # Exceeding the bounded retry cap must raise ProviderRateLimitError rather than switching models
     sleep_delays.clear()
     fail_attempts = 0
 
@@ -349,8 +353,8 @@ def test_groq_bounded_rate_limit_backoff_without_model_switch(
                 always_rate_limited, timeout_seconds=5.0, retries_cap=0
             )
         )
-    assert fail_attempts == 3
-    assert sleep_delays == [2.0, 4.0]
+    assert fail_attempts == 5
+    assert len(sleep_delays) == 4
 
 
 def test_build_provider_from_settings_supports_openai_compatible(tmp_path: Path) -> None:

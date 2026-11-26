@@ -171,6 +171,9 @@ export interface TracePayload {
   model: string;
   returned_model?: string | null;
   is_historical_replay: boolean;
+  waiting_for_provider?: boolean;
+  waiting_reason?: string | null;
+  provider_wait_seconds?: number | null;
   created_at?: string;
   completed_at?: string | null;
   latency_ms?: number | null;

@@ -125,6 +125,8 @@ class ProviderRateLimitError(ProviderError):
         model: str,
         status_code: int | None = 429,
         retries_attempted: int = 0,
+        retry_after_seconds: float | None = None,
+        response_headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(
             message,
@@ -136,6 +138,8 @@ class ProviderRateLimitError(ProviderError):
             status_code=status_code,
             retries_attempted=retries_attempted,
         )
+        self.retry_after_seconds = retry_after_seconds
+        self.response_headers = response_headers or {}
 
 
 class ProviderConnectionError(ProviderError):
