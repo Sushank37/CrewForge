@@ -86,8 +86,11 @@ class OpenAIProvider(ModelProvider):
         self._is_free_tier = is_free_tier
         parsed_host = (urlparse(base_url).hostname or "").lower() if base_url else ""
         self._is_groq = parsed_host == "api.groq.com"
+        self._is_groq_free_tier = self._is_groq and self._is_free_tier
         self._quota_scheduler = (
-            get_groq_scheduler(base_url=base_url, model=model) if self._is_groq else None
+            get_groq_scheduler(base_url=base_url, model=model)
+            if self._is_groq_free_tier
+            else None
         )
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
@@ -150,7 +153,7 @@ class OpenAIProvider(ModelProvider):
 
     def _effective_chat_max_tokens(self, requested: int | None) -> int:
         tokens = requested or self._default_max_output_tokens
-        if self._is_groq and self._is_free_tier:
+        if self._is_groq_free_tier:
             return min(tokens, 2048)
         return tokens
 
@@ -192,7 +195,7 @@ class OpenAIProvider(ModelProvider):
         estimated_tokens: int = 1200,
     ) -> tuple[Any, int, float]:
         """Run provider call with quota-aware 429 scheduling (never switches models)."""
-        max_rl_retries = 4 if self._is_groq else 0
+        max_rl_retries = 4 if self._is_groq_free_tier else 0
         rl_attempt = 0
         started = time.perf_counter()
         while True:
@@ -588,7 +591,7 @@ class OpenAIProvider(ModelProvider):
         if self._use_chat_completions:
             schema_hint = self._compact_schema_json(
                 response_model,
-                strip_descriptions=self._is_groq,
+                strip_descriptions=self._is_groq_free_tier,
             )
             sys_msg = (
                 system_prompt or ""

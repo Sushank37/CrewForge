@@ -394,6 +394,8 @@ class JudgeSessionManager:
         chat = self.get_chat(chat_id)
         if chat is None:
             raise KeyError(f"Chat '{chat_id}' not found.")
+        # Validate runtime settings before creating a running message so invalid config fails fast.
+        self.build_runtime_settings()
 
         now = _utc_iso()
         user_msg_id = f"cmsg_{uuid4().hex[:10]}"
@@ -500,7 +502,6 @@ class JudgeSessionManager:
         mode: Literal["network", "baseline"],
         ref_docs: list[ReferenceDocument],
     ) -> None:
-        settings = self.build_runtime_settings()
         db = Database(self.db_path)
 
         def _on_provider_wait(wait_s: float, reason: str) -> None:
@@ -511,9 +512,11 @@ class JudgeSessionManager:
                 "expires_at": time.monotonic() + wait_s,
             }
 
-        deadline_token = run_deadline_var.set(time.monotonic() + settings.run_deadline_seconds)
+        deadline_token = None
         wait_token = wait_observer_var.set(_on_provider_wait)
         try:
+            settings = self.build_runtime_settings()
+            deadline_token = run_deadline_var.set(time.monotonic() + settings.run_deadline_seconds)
             await db.initialize()
             authority = UnifiedBudgetAuthority(
                 settings=settings,
@@ -566,7 +569,8 @@ class JudgeSessionManager:
                 error=sanitize_error_message(str(exc)),
             )
         finally:
-            run_deadline_var.reset(deadline_token)
+            if deadline_token is not None:
+                run_deadline_var.reset(deadline_token)
             wait_observer_var.reset(wait_token)
             self._provider_wait_state.pop(run_id, None)
             self._tasks.pop(run_id, None)

@@ -150,9 +150,12 @@ class ModelExecutor:
                 )
 
                 attempt_latency_ms = (time.perf_counter() - attempt_start) * 1000.0
+                total_retries = attempt_index + max(0, int(response.usage.retries))
+                total_calls = max(1 + total_retries, int(response.usage.model_calls))
                 usage_with_attempt = response.usage.model_copy(
                     update={
-                        "retries": attempt_index,
+                        "retries": total_retries,
+                        "model_calls": total_calls,
                         "latency_ms": attempt_latency_ms,
                     }
                 )
@@ -253,12 +256,13 @@ class ModelExecutor:
 
             except ProviderError as err:
                 elapsed_ms = (time.perf_counter() - attempt_start) * 1000.0
-                err.retries_attempted = attempt_index
+                total_retries = attempt_index + max(0, int(err.retries_attempted))
+                err.retries_attempted = total_retries
                 await self._budget.reconcile_failure(
                     reservation,
                     billing_known_unbilled=(err.billing_outcome == "unbilled"),
                     usage=err.usage,
-                    retries=attempt_index,
+                    retries=total_retries,
                     latency_ms=elapsed_ms,
                     operation=operation,
                     reason=err.message,
@@ -365,10 +369,16 @@ class ModelExecutor:
                     timeout=attempt_timeout,
                 )
                 attempt_latency_ms = (time.perf_counter() - attempt_start) * 1000.0
+                total_retries = attempt_index + max(0, int(response.usage.retries))
+                total_calls = max(1 + total_retries, int(response.usage.model_calls))
                 reconciled_usage = await self._budget.reconcile_success(
                     reservation,
                     response.usage.model_copy(
-                        update={"retries": attempt_index, "latency_ms": attempt_latency_ms}
+                        update={
+                            "retries": total_retries,
+                            "model_calls": total_calls,
+                            "latency_ms": attempt_latency_ms,
+                        }
                     ),
                     operation=operation,
                 )
@@ -405,12 +415,13 @@ class ModelExecutor:
                     raise err from exc
             except ProviderError as err:
                 elapsed_ms = (time.perf_counter() - attempt_start) * 1000.0
-                err.retries_attempted = attempt_index
+                total_retries = attempt_index + max(0, int(err.retries_attempted))
+                err.retries_attempted = total_retries
                 await self._budget.reconcile_failure(
                     reservation,
                     billing_known_unbilled=(err.billing_outcome == "unbilled"),
                     usage=err.usage,
-                    retries=attempt_index,
+                    retries=total_retries,
                     latency_ms=elapsed_ms,
                     operation=operation,
                     reason=err.message,
