@@ -222,7 +222,11 @@ async def test_live_trace_api_polling_and_redaction(tmp_path: Path) -> None:
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["mode"] == "read_only_observability"
+    assert client.get("/favicon.ico").status_code == 200
 
+    db_bytes_before = db_path.read_bytes()
+    wal_path = tmp_path / "demo_live.db-wal"
+    wal_bytes_before = wal_path.read_bytes() if wal_path.exists() else b""
     runs = client.get("/api/live/runs").json()["runs"]
     assert len(runs) == 1
     assert runs[0]["run_id"] == "run_live001"
@@ -233,6 +237,9 @@ async def test_live_trace_api_polling_and_redaction(tmp_path: Path) -> None:
     assert [c["version"] for c in detail["claims"]] == [1, 2]
     assert "supersecrettoken999" not in json.dumps(detail)
     assert "sk-ant-api03-secretkeyvalue123456789" not in json.dumps(detail)
+    # Genuine read-only access: no DB or WAL modification
+    assert db_path.read_bytes() == db_bytes_before
+    assert (wal_path.read_bytes() if wal_path.exists() else b"") == wal_bytes_before
 
     await _seed_synthetic_run(db_path, run_id="run_live002")
     runs_after = client.get("/api/live/runs").json()["runs"]
@@ -244,11 +251,10 @@ def test_replay_security_malformed_and_benchmark(tmp_path: Path) -> None:
     replay_dir.mkdir()
     (replay_dir / "malformed.json").write_text("{not valid json", encoding="utf-8")
 
-    genuine_trace = Path("demo/traces/phase5e_canary_a.json")
-    assert genuine_trace.is_file()
-    (replay_dir / "phase5e_canary_a.json").write_text(
-        genuine_trace.read_text(encoding="utf-8"), encoding="utf-8"
-    )
+    for fname in ("phase5e_canary_a.json", "phase5e_canary_b.json"):
+        src = Path("demo/traces") / fname
+        assert src.is_file()
+        (replay_dir / fname).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
     bench_path = Path("demo/v2_reconciled_scores.json")
     assert bench_path.is_file()
@@ -261,15 +267,22 @@ def test_replay_security_malformed_and_benchmark(tmp_path: Path) -> None:
     client = TestClient(app)
 
     files = client.get("/api/replay/files").json()["files"]
-    assert [f["filename"] for f in files] == ["phase5e_canary_a.json"]
+    assert [f["filename"] for f in files] == ["phase5e_canary_a.json", "phase5e_canary_b.json"]
 
-    loaded = client.get("/api/replay/files/phase5e_canary_a.json")
-    assert loaded.status_code == 200
-    payload = loaded.json()
-    assert payload["is_historical_replay"] is True
-    assert payload["run_id"] == "run_08160b7fa1bd"
-    seqs = [e["seq"] for e in payload["execution_events"]]
-    assert seqs == list(range(1, len(seqs) + 1))
+    for fname, expected_id in [
+        ("phase5e_canary_a.json", "run_08160b7fa1bd"),
+        ("phase5e_canary_b.json", "run_808cff6805b4"),
+    ]:
+        loaded = client.get(f"/api/replay/files/{fname}")
+        assert loaded.status_code == 200
+        payload = loaded.json()
+        assert payload["is_historical_replay"] is True
+        assert payload["run_id"] == expected_id
+        seqs = [e["seq"] for e in payload["execution_events"]]
+        assert seqs == list(range(1, len(seqs) + 1))
+        assert all(e.get("created_at") for e in payload["execution_events"])
+        assert payload["honesty_gate"]["verification_summary"]["requirement_coverage"] > 0.75
+        assert payload["tool_executions"][0]["computed_result"] is not None
 
     assert client.get("/api/replay/files/malformed.json").status_code == 400
     assert client.get("/api/replay/files/nonexistent.json").status_code == 404

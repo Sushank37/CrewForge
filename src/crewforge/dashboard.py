@@ -23,6 +23,13 @@ from crewforge.dashboard_api import (
 
 _UI_DIR = Path(__file__).resolve().parent / "dashboard_ui"
 
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="7" fill="#3b82f6"/>'
+    '<text x="16" y="21" text-anchor="middle" fill="#ffffff" '
+    'font-family="sans-serif" font-size="14" font-weight="700">CF</text></svg>'
+)
+
 
 def create_dashboard_app(
     *,
@@ -38,6 +45,9 @@ def create_dashboard_app(
 
     async def index(_request: Request) -> Response:
         return FileResponse(_UI_DIR / "index.html")
+
+    async def favicon(_request: Request) -> Response:
+        return Response(_FAVICON_SVG, media_type="image/svg+xml")
 
     async def health(_request: Request) -> JSONResponse:
         return JSONResponse(
@@ -87,6 +97,7 @@ def create_dashboard_app(
 
     routes = [
         Route("/", index),
+        Route("/favicon.ico", favicon),
         Route("/api/health", health),
         Route("/api/live/runs", live_runs),
         Route("/api/live/runs/{run_id}", live_run_detail),

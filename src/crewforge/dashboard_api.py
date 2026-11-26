@@ -2,17 +2,38 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from crewforge.core.demo_trace import DemoTraceExport, _sanitize_recursive
-from crewforge.storage.database import Database
+from crewforge.schemas import (
+    AgentMessage,
+    AgentSpec,
+    Claim,
+    ClaimCategory,
+    ClaimStatus,
+    Evidence,
+    EvidenceReliability,
+    ExecutionEvent,
+    ExecutionPlan,
+    HonestyGateRecord,
+    ReviewDecision,
+    ReviewVerdict,
+    RunResult,
+    TaskSpec,
+    TaskStatus,
+    ToolExecutionRecord,
+    UsageMetrics,
+    VerificationSummary,
+)
 
 _RUN_ID_RE = re.compile(r"^run_[A-Za-z0-9_-]{4,64}$")
 _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.json$")
@@ -115,16 +136,20 @@ def build_agent_topology(trace: dict[str, Any]) -> dict[str, Any]:
             {
                 "id": aid,
                 "label": agent.get("role") or aid,
-                "sublabel": agent.get("specialty") or agent.get("model") or "",
+                "sublabel": (
+                    agent.get("specialty")
+                    or agent.get("model_override")
+                    or agent.get("model")
+                    or ""
+                ),
                 "node_type": node_type,
                 "status": _agent_status_from_tasks(aid, role, tasks, run_status),
-                "model": agent.get("model"),
+                "model": agent.get("model_override") or agent.get("model") or trace.get("model"),
                 "task_ids": [t.get("task_id") for t in assigned_tasks],
                 "tasks": assigned_tasks,
             }
         )
 
-    # Add verification components only when persisted review/gate artifacts exist
     if verdicts:
         reviewer_ids = sorted({str(v.get("reviewer_id", "reviewer")) for v in verdicts})
         for rid in reviewer_ids:
@@ -149,7 +174,12 @@ def build_agent_topology(trace: dict[str, Any]) -> dict[str, Any]:
         gate_id = "honesty_gate"
         if gate_id not in seen_ids:
             seen_ids.add(gate_id)
-            gate_status = "completed" if gate.get("passed") else "blocked"
+            rmode = str(gate.get("release_mode", "unknown")).lower()
+            gate_status = (
+                "blocked"
+                if (not gate.get("passed") or rmode == "blocked")
+                else ("partial" if rmode == "partial" else "completed")
+            )
             nodes.append(
                 {
                     "id": gate_id,
@@ -166,7 +196,6 @@ def build_agent_topology(trace: dict[str, Any]) -> dict[str, Any]:
     edges: list[dict[str, Any]] = []
     edge_keys: set[tuple[str, str, str]] = set()
 
-    # Lead -> root tasks (no dependencies)
     lead_id = next((n["id"] for n in nodes if n["node_type"] == "lead"), None)
     task_by_id = {str(t.get("task_id")): t for t in tasks if t.get("task_id")}
     for t in tasks:
@@ -200,7 +229,6 @@ def build_agent_topology(trace: dict[str, Any]) -> dict[str, Any]:
                         }
                     )
 
-    # Peer message edges
     for msg in messages:
         src = str(msg.get("sender_id") or msg.get("sender_agent_id") or "")
         dst = str(msg.get("recipient_id") or msg.get("recipient_agent_id") or "")
@@ -231,13 +259,123 @@ def normalize_trace_payload(
     data["topology"] = build_agent_topology(data)
     events = data.get("execution_events") or []
     for idx, ev in enumerate(events):
-        ev["seq"] = idx + 1
+        if ev.get("seq") is None:
+            ev["seq"] = idx + 1
         ev["category"] = _categorize_event(str(ev.get("event_type", "")))
     return data
 
 
+def _row_to_claim(row: sqlite3.Row) -> Claim:
+    keys = set(row.keys())
+    return Claim(
+        claim_id=row["claim_id"],
+        run_id=row["run_id"],
+        statement=row["statement"],
+        category=ClaimCategory(row["category"]),
+        status=ClaimStatus(row["status"]),
+        verification_status=row["verification_status"],
+        version=int(row["version"]),
+        parent_claim_id=row["parent_claim_id"],
+        author_agent_id=row["author_agent_id"],
+        task_id=row["task_id"],
+        evidence_ids=json.loads(row["evidence_ids_json"]),
+        depends_on_claim_ids=json.loads(row["depends_on_claim_ids_json"]),
+        premise_refs=json.loads(row["premise_refs_json"]) if "premise_refs_json" in keys else [],
+        tool_execution_ids=json.loads(row["tool_execution_ids_json"]),
+        requirement_refs=json.loads(row["requirement_refs_json"]),
+        assumptions=json.loads(row["assumptions_json"]),
+        revision_notes=row["revision_notes"],
+        confidence=(float(row["confidence"]) if row["confidence"] is not None else None),
+        is_material=bool(row["is_material"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _row_to_tool(row: sqlite3.Row) -> ToolExecutionRecord:
+    keys = set(row.keys())
+    return ToolExecutionRecord(
+        tool_execution_id=row["tool_execution_id"],
+        run_id=row["run_id"],
+        tool_name=row["tool_name"],
+        actor=row["actor"],
+        task_id=row["task_id"],
+        expression=row["expression"],
+        variables=json.loads(row["variables_json"]),
+        input_provenance_refs=(
+            json.loads(row["input_provenance_refs_json"])
+            if "input_provenance_refs_json" in keys
+            else {}
+        ),
+        provenance_details=(
+            json.loads(row["provenance_details_json"])
+            if "provenance_details_json" in keys
+            else {}
+        ),
+        proposed_result=row["proposed_result"],
+        computed_result=row["computed_result"],
+        units=row["units"],
+        assumptions=json.loads(row["assumptions_json"]) if "assumptions_json" in keys else [],
+        matches_proposed=(
+            bool(row["matches_proposed"]) if row["matches_proposed"] is not None else None
+        ),
+        inputs_grounded=bool(row["inputs_grounded"]) if "inputs_grounded" in keys else False,
+        has_ungrounded_literals=(
+            bool(row["has_ungrounded_literals"]) if "has_ungrounded_literals" in keys else False
+        ),
+        formula_appropriate=(
+            bool(row["formula_appropriate"])
+            if "formula_appropriate" in keys and row["formula_appropriate"] is not None
+            else None
+        ),
+        success=bool(row["success"]),
+        error=row["error"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _aggregate_usage_ro(conn: sqlite3.Connection, run_id: str) -> UsageMetrics:
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(estimated_cost_usd), 0.0) AS estimated_cost_usd,
+            COALESCE(SUM(COALESCE(actual_cost_usd, 0.0)), 0.0) AS actual_cost_usd,
+            COUNT(*) AS model_calls,
+            COALESCE(SUM(
+                CASE WHEN outcome IN ('completed', 'completed_unknown_usage')
+                    THEN 1 ELSE 0 END
+            ), 0) AS successful_operations,
+            COALESCE(SUM(retries), 0) AS retries,
+            COALESCE(SUM(latency_ms), 0.0) AS latency_ms,
+            COALESCE(MIN(
+                CASE WHEN outcome = 'completed_unknown_usage' THEN 0 ELSE 1 END
+            ), 1) AS all_usage_reported
+        FROM usage_records
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    if row is None or int(row["model_calls"]) == 0:
+        return UsageMetrics(usage_reported=False)
+    return UsageMetrics(
+        input_tokens=int(row["input_tokens"]),
+        output_tokens=int(row["output_tokens"]),
+        total_tokens=int(row["total_tokens"]),
+        estimated_cost_usd=float(row["estimated_cost_usd"]),
+        actual_cost_usd=float(row["actual_cost_usd"]),
+        model_calls=int(row["model_calls"]),
+        successful_operations=int(row["successful_operations"]),
+        retries=int(row["retries"]),
+        latency_ms=float(row["latency_ms"]),
+        usage_reported=bool(row["all_usage_reported"]),
+    )
+
+
 class ReadOnlyTraceStore:
-    """Read-only SQLite trace store bound to an explicitly configured demo database."""
+    """Genuine read-only SQLite trace store (mode=ro + PRAGMA query_only=ON, no WAL/writes)."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -246,8 +384,9 @@ class ReadOnlyTraceStore:
         if not self.db_path.is_file():
             return None
         uri = f"file:{self.db_path.resolve()}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON;")
         return conn
 
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -271,54 +410,272 @@ class ReadOnlyTraceStore:
         finally:
             conn.close()
 
-    async def get_run_payload(self, run_id: str) -> dict[str, Any]:
-        """Load and sanitize a single run trace from the read-only demo database."""
+    def _get_run_payload_sync(self, run_id: str) -> dict[str, Any]:
         validate_run_id(run_id)
-        if not self.db_path.is_file():
+        conn = self._connect_ro()
+        if conn is None:
             raise DashboardNotFoundError(f"Demo database '{self.db_path}' does not exist.")
-        db = Database(self.db_path)
-        trace = await db.get_run_trace(run_id)
-        if trace is None:
-            raise DashboardNotFoundError(f"Run '{run_id}' not found.")
+        try:
+            run_row = conn.execute(
+                "SELECT * FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise DashboardNotFoundError(f"Run '{run_id}' not found.")
 
-        usage_metrics = (
-            trace.result.usage
-            if trace.result and trace.result.usage
-            else await db.aggregate_run_usage(run_id)
+            plan_row = conn.execute(
+                "SELECT * FROM execution_plans WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            agent_rows = conn.execute(
+                "SELECT * FROM agents WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            task_rows = conn.execute(
+                "SELECT * FROM tasks WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            transition_rows = conn.execute(
+                "SELECT * FROM task_transitions WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            evidence_rows = conn.execute(
+                "SELECT * FROM evidence WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            claim_rows = conn.execute(
+                "SELECT * FROM claims WHERE run_id = ? ORDER BY created_at ASC, version ASC",
+                (run_id,),
+            ).fetchall()
+            message_rows = conn.execute(
+                """
+                SELECT m.*,
+                    COALESCE((
+                        SELECT d.status FROM message_deliveries d
+                        WHERE d.message_id = m.message_id
+                        ORDER BY CASE d.status
+                            WHEN 'consumed' THEN 3
+                            WHEN 'delivered' THEN 2
+                            ELSE 1 END DESC
+                        LIMIT 1
+                    ), 'pending') AS agg_status
+                FROM agent_messages m
+                WHERE m.run_id = ?
+                ORDER BY m.created_at ASC
+                """,
+                (run_id,),
+            ).fetchall()
+            verdict_rows = conn.execute(
+                "SELECT * FROM review_verdicts WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            tool_rows = conn.execute(
+                "SELECT * FROM tool_executions WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            gate_row = conn.execute(
+                "SELECT * FROM honesty_gate_decisions WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            event_rows = conn.execute(
+                "SELECT * FROM execution_events WHERE run_id = ? ORDER BY seq ASC",
+                (run_id,),
+            ).fetchall()
+
+            result = (
+                RunResult.model_validate_json(run_row["result_json"])
+                if run_row["result_json"]
+                else None
+            )
+            usage_metrics = (
+                result.usage if result and result.usage else _aggregate_usage_ro(conn, run_id)
+            )
+        except sqlite3.OperationalError as exc:
+            raise DashboardNotFoundError(
+                f"Demo database '{self.db_path}' is temporarily unavailable: {exc}"
+            ) from exc
+        finally:
+            conn.close()
+
+        agents = [
+            AgentSpec(
+                agent_id=row["agent_id"],
+                agent_ref=row["agent_ref"],
+                run_id=row["run_id"],
+                role=row["role"],
+                instructions=row["instructions"],
+                capabilities=json.loads(row["capabilities_json"]),
+                model_override=row["model_override"],
+                created_by=row["created_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in agent_rows
+        ]
+        tasks = [
+            TaskSpec(
+                task_id=row["task_id"],
+                task_ref=row["task_ref"],
+                run_id=row["run_id"],
+                plan_id=row["plan_id"],
+                title=row["title"],
+                description=row["description"],
+                assigned_agent_id=row["assigned_agent_id"],
+                depends_on=json.loads(row["depends_on_json"]),
+                expected_outputs=json.loads(row["expected_outputs_json"]),
+                acceptance_criteria=json.loads(row["acceptance_criteria_json"]),
+                status=TaskStatus(row["status"]),
+                findings=row["findings"],
+                error=row["error"],
+                created_by=row["created_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                started_at=datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
+                completed_at=(
+                    datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
+                ),
+            )
+            for row in task_rows
+        ]
+        plan = (
+            ExecutionPlan(
+                plan_id=plan_row["plan_id"],
+                run_id=plan_row["run_id"],
+                goal=plan_row["goal"],
+                user_requirements=json.loads(plan_row["user_requirements_json"]),
+                acceptance_criteria=json.loads(plan_row["acceptance_criteria_json"]),
+                agents=agents,
+                tasks=tasks,
+                assumptions=json.loads(plan_row["assumptions_json"]),
+                missing_information=json.loads(plan_row["missing_information_json"]),
+                created_by=plan_row["created_by"],
+                created_at=datetime.fromisoformat(plan_row["created_at"]),
+            )
+            if plan_row is not None
+            else None
         )
-        raw_plan = trace.plan.model_dump() if trace.plan else None
-        raw_final = trace.result.model_dump() if trace.result else None
+        evidence = [
+            Evidence(
+                evidence_id=row["evidence_id"],
+                run_id=row["run_id"],
+                source_type=row["source_type"],
+                source_ref=row["source_ref"],
+                excerpt=row["excerpt"],
+                reliability=EvidenceReliability(row["reliability"]),
+                verified_in_input=bool(row["verified_in_input"]),
+                task_id=row["task_id"],
+                created_by=row["created_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in evidence_rows
+        ]
+        claims = [_row_to_claim(row) for row in claim_rows]
+        messages = [
+            AgentMessage(
+                message_id=row["message_id"],
+                run_id=row["run_id"],
+                sender_id=row["sender_id"],
+                recipient_id=row["recipient_id"],
+                message_type=row["message_type"],
+                content=row["content"],
+                related_claim_ids=json.loads(row["related_claim_ids_json"]),
+                delivery_status=row["agg_status"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in message_rows
+        ]
+        verdicts = [
+            ReviewVerdict(
+                verdict_id=row["verdict_id"],
+                run_id=row["run_id"],
+                claim_id=row["claim_id"],
+                claim_version=int(row["claim_version"]),
+                reviewer_id=row["reviewer_id"],
+                review_dimension=(
+                    row["review_dimension"] if "review_dimension" in set(row.keys()) else "general"
+                ),
+                decision=ReviewDecision(row["decision"]),
+                rationale=row["rationale"],
+                evidence_refs=(
+                    json.loads(row["evidence_refs_json"])
+                    if "evidence_refs_json" in set(row.keys())
+                    else []
+                ),
+                required_correction=(
+                    row["required_correction"]
+                    if "required_correction" in set(row.keys())
+                    else None
+                ),
+                blocking_severity=(
+                    row["blocking_severity"] if "blocking_severity" in set(row.keys()) else "none"
+                ),
+                blocking_issues=json.loads(row["blocking_issues_json"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in verdict_rows
+        ]
+        tools = [_row_to_tool(row) for row in tool_rows]
+        honesty_gate = (
+            HonestyGateRecord(
+                gate_id=gate_row["gate_id"],
+                run_id=gate_row["run_id"],
+                passed=bool(gate_row["passed"]),
+                release_mode=gate_row["release_mode"],
+                rejected_segments=json.loads(gate_row["rejected_segments_json"]),
+                rejected_claim_refs=json.loads(gate_row["rejected_claim_refs_json"]),
+                reasons=json.loads(gate_row["reasons_json"]),
+                verification_summary=VerificationSummary.model_validate_json(
+                    gate_row["verification_summary_json"]
+                ),
+                created_at=datetime.fromisoformat(gate_row["created_at"]),
+            )
+            if gate_row is not None
+            else None
+        )
+        events = [
+            ExecutionEvent(
+                event_id=row["event_id"],
+                run_id=row["run_id"],
+                seq=row["seq"],
+                event_type=row["event_type"],
+                actor=row["actor"],
+                message=row["message"],
+                payload=json.loads(row["payload_json"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in event_rows
+        ]
 
         export = DemoTraceExport(
             is_historical_replay=False,
-            run_id=trace.run_id,
-            mode=trace.mode,
-            status=trace.status.value,
-            provider=trace.provider,
-            model=trace.model,
-            returned_model=trace.result.returned_model if trace.result else None,
-            prompt=_sanitize_recursive(trace.prompt),
-            error=_sanitize_recursive(trace.result.error if trace.result else None),
-            created_at=trace.created_at.isoformat(),
-            completed_at=trace.completed_at.isoformat() if trace.completed_at else None,
-            latency_ms=trace.result.latency_ms if trace.result else 0.0,
+            run_id=run_row["run_id"],
+            mode=run_row["mode"],
+            status=run_row["status"],
+            provider=run_row["provider"],
+            model=run_row["model"],
+            returned_model=result.returned_model if result else None,
+            prompt=_sanitize_recursive(run_row["prompt"]),
+            error=_sanitize_recursive(result.error if result else None),
+            created_at=run_row["created_at"],
+            completed_at=run_row["completed_at"],
+            latency_ms=result.latency_ms if result else usage_metrics.latency_ms,
             usage=_sanitize_recursive(usage_metrics.model_dump()),
-            roster=_sanitize_recursive([a.model_dump() for a in trace.agents]),
-            execution_plan=_sanitize_recursive(raw_plan),
-            tasks=_sanitize_recursive([t.model_dump() for t in trace.tasks]),
-            task_transitions=_sanitize_recursive(trace.task_transitions),
-            execution_events=_sanitize_recursive([e.model_dump() for e in trace.events]),
-            peer_messages=_sanitize_recursive([m.model_dump() for m in trace.messages]),
-            evidence=_sanitize_recursive([e.model_dump() for e in trace.evidence]),
-            claims=_sanitize_recursive([c.model_dump() for c in trace.claims]),
-            review_verdicts=_sanitize_recursive([v.model_dump() for v in trace.review_verdicts]),
-            tool_executions=_sanitize_recursive([t.model_dump() for t in trace.tool_executions]),
-            honesty_gate=_sanitize_recursive(
-                trace.honesty_gate.model_dump() if trace.honesty_gate else None
-            ),
-            final_result=_sanitize_recursive(raw_final),
+            roster=_sanitize_recursive([a.model_dump() for a in agents]),
+            execution_plan=_sanitize_recursive(plan.model_dump() if plan else None),
+            tasks=_sanitize_recursive([t.model_dump() for t in tasks]),
+            task_transitions=_sanitize_recursive([dict(r) for r in transition_rows]),
+            execution_events=_sanitize_recursive([e.model_dump() for e in events]),
+            peer_messages=_sanitize_recursive([m.model_dump() for m in messages]),
+            evidence=_sanitize_recursive([e.model_dump() for e in evidence]),
+            claims=_sanitize_recursive([c.model_dump() for c in claims]),
+            review_verdicts=_sanitize_recursive([v.model_dump() for v in verdicts]),
+            tool_executions=_sanitize_recursive([t.model_dump() for t in tools]),
+            honesty_gate=_sanitize_recursive(honesty_gate.model_dump() if honesty_gate else None),
+            final_result=_sanitize_recursive(result.model_dump() if result else None),
         )
         return normalize_trace_payload(export, is_historical_replay=False)
+
+    async def get_run_payload(self, run_id: str) -> dict[str, Any]:
+        """Load and sanitize a single run trace from the read-only demo database."""
+        return await asyncio.to_thread(self._get_run_payload_sync, run_id)
 
 
 class ReplayStore:

@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CrewForge Mission Control</title>
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -23,6 +24,7 @@
     </nav>
 
     <div class="topbar-right">
+      <span id="connection-pill" class="pill pill-green">Connected</span>
       <span id="mode-indicator" class="pill pill-amber">HISTORICAL REPLAY</span>
     </div>
   </header>
@@ -30,7 +32,7 @@
   <main class="container">
     <!-- EXECUTION VIEW (shared by Historical Replay & Live Monitor) -->
     <section id="view-execution">
-      <!-- Source Selector & Replay Bar -->
+      <!-- Source Selector, Replay Controls & Section Nav -->
       <div class="panel control-bar">
         <div id="replay-controls" class="control-group">
           <label for="replay-select" class="ctrl-label">Demo Trace</label>
@@ -47,7 +49,7 @@
             </select>
           </div>
           <div class="scrubber-wrap">
-            <input id="replay-scrubber" type="range" min="0" max="0" value="0" />
+            <input id="replay-scrubber" type="range" min="0" max="0" value="0" aria-label="Replay timeline scrubber" />
             <span id="replay-counter" class="mono-sm">0 / 0 events</span>
           </div>
         </div>
@@ -55,9 +57,21 @@
         <div id="live-controls" class="control-group hidden">
           <label for="live-select" class="ctrl-label">Live Demo DB Run</label>
           <select id="live-select" class="select-input"></select>
+          <label class="checkbox-label">
+            <input id="chk-follow-newest" type="checkbox" checked />
+            Follow newest run
+          </label>
           <button id="btn-refresh-live" class="btn btn-sm">Refresh</button>
           <span id="live-db-status" class="mono-sm muted">Polling read-only demo DB...</span>
         </div>
+
+        <nav class="quick-nav" aria-label="Section Navigation">
+          <a href="#sec-overview">Overview</a>
+          <a href="#sec-topology">Topology</a>
+          <a href="#sec-timeline">Timeline</a>
+          <a href="#sec-claims">Claims &amp; Evidence</a>
+          <a href="#sec-gate">Honesty Gate</a>
+        </nav>
       </div>
 
       <div id="replay-banner" class="banner banner-amber">
@@ -65,7 +79,7 @@
       </div>
 
       <!-- Run Overview Cards -->
-      <section class="panel" aria-label="Run Overview">
+      <section id="sec-overview" class="panel" aria-label="Run Overview">
         <div class="panel-header">
           <h2>Run Overview</h2>
           <span id="ov-status-badge" class="pill">—</span>
@@ -76,7 +90,7 @@
       <!-- Main Two-Column Grid: Topology + Timeline -->
       <div class="grid-2">
         <!-- Dynamic Agent Topology -->
-        <section class="panel" aria-label="Dynamic Agent Topology">
+        <section id="sec-topology" class="panel" aria-label="Dynamic Agent Topology">
           <div class="panel-header">
             <h2>Dynamic Agent Topology</h2>
             <div class="legend">
@@ -93,7 +107,7 @@
         </section>
 
         <!-- Execution Timeline -->
-        <section class="panel" aria-label="Execution Timeline">
+        <section id="sec-timeline" class="panel" aria-label="Execution Timeline">
           <div class="panel-header">
             <h2>Execution Timeline</h2>
             <span id="timeline-count" class="mono-sm muted">0 events</span>
@@ -106,7 +120,7 @@
       <!-- Verification Inspector & Honesty Gate -->
       <div class="grid-2">
         <!-- Claim Ledger -->
-        <section class="panel" aria-label="Verification Inspector">
+        <section id="sec-claims" class="panel" aria-label="Verification Inspector">
           <div class="panel-header">
             <h2>Verification Inspector — Claim Ledger</h2>
             <span id="claims-summary" class="mono-sm muted">0 claims</span>
@@ -116,7 +130,7 @@
         </section>
 
         <!-- Honesty Gate Panel -->
-        <section class="panel" aria-label="Honesty Gate">
+        <section id="sec-gate" class="panel" aria-label="Honesty Gate">
           <div class="panel-header">
             <h2>Honesty Gate &amp; Final Release</h2>
             <span id="gate-mode-pill" class="pill">—</span>
