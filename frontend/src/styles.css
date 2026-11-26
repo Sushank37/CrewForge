@@ -331,3 +331,89 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 .sub-card { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; font-size: 12px; }
 .mc-timeline { display: flex; flex-direction: column; gap: 5px; max-height: 300px; overflow-y: auto; }
 .mc-ev { display: grid; grid-template-columns: 92px 140px 1fr; gap: 8px; font-size: 12px; background: var(--surface-2); padding: 6px 8px; border-radius: 6px; }
+
+/* 2D Miniature Office & Full-Body Sprite Animations */
+.office-2d-viewport {
+  width: 100%;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #141022;
+}
+.office-2d-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+}
+.office-ticker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.ticker-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.2);
+  color: #a5b4fc;
+  font-weight: 600;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.ticker-text {
+  flex: 1;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ticker-meta {
+  color: var(--muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.pill-warn {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.4);
+}
+@keyframes cfWalkBob {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes cfWalkLegA {
+  0%, 100% { transform: rotate(-10deg); }
+  50% { transform: rotate(10deg); }
+}
+@keyframes cfWalkLegB {
+  0%, 100% { transform: rotate(10deg); }
+  50% { transform: rotate(-10deg); }
+}
+@keyframes cfWorkType {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-1.6px); }
+}
+.cf-pose-walking .cf-sprite-body {
+  animation: cfWalkBob 0.36s ease-in-out infinite;
+}
+.cf-pose-walking .cf-leg-left {
+  transform-origin: -5px 13px;
+  animation: cfWalkLegA 0.36s ease-in-out infinite;
+}
+.cf-pose-walking .cf-leg-right {
+  transform-origin: 5px 13px;
+  animation: cfWalkLegB 0.36s ease-in-out infinite;
+}
+.cf-pose-working .cf-arm-left,
+.cf-pose-working .cf-arm-right {
+  animation: cfWorkType 0.4s ease-in-out infinite;
+}
+.cf-pose-reviewing .cf-arm-right {
+  animation: cfWorkType 0.9s ease-in-out infinite;
+}
