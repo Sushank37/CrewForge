@@ -107,7 +107,7 @@ class BaselineModelOutput(BaseModel):
 
 def build_provider_from_settings(settings: CrewForgeSettings) -> ModelProvider:
     """Instantiate the configured production provider without silent fallbacks."""
-    if settings.provider == ProviderType.OPENAI:
+    if settings.provider in (ProviderType.OPENAI, ProviderType.OPENAI_COMPATIBLE):
         return OpenAIProvider.from_settings(settings)
     if settings.provider == ProviderType.OLLAMA:
         return OllamaProvider.from_settings(settings)

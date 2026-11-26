@@ -351,3 +351,29 @@ def test_groq_bounded_rate_limit_backoff_without_model_switch(
         )
     assert fail_attempts == 3
     assert sleep_delays == [2.0, 4.0]
+
+
+def test_build_provider_from_settings_supports_openai_compatible(tmp_path: Path) -> None:
+    """Ensure build_provider_from_settings instantiates OpenAIProvider for openai_compatible."""
+    from crewforge.core.baseline import build_provider_from_settings
+    from crewforge.providers.openai_provider import OpenAIProvider
+
+    mgr = JudgeSessionManager(
+        db_path=tmp_path / "judge_session.db",
+        budget_db_path=tmp_path / "judge_budget.db",
+    )
+    mgr.update_settings(
+        JudgeSettingsUpdate(
+            billing_mode="free",
+            free_tier_verified=True,
+            provider="openai_compatible",
+            model="openai/gpt-oss-120b",
+            openai_base_url="https://api.groq.com/openai/v1",
+            api_key="gsk-test-groq-key-1234",
+        )
+    )
+    rt = mgr.build_runtime_settings()
+    provider = build_provider_from_settings(rt)
+    assert isinstance(provider, OpenAIProvider)
+    assert provider._is_groq is True
+    assert provider._is_free_tier is True
