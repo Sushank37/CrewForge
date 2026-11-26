@@ -6,7 +6,7 @@ CrewForge is a model-agnostic, self-assembling multi-agent intelligence network 
 
 - **Unified Persistent Budget Authority & Reserve Protection (`core/budget.py`):**
   - Standalone canonical ledger (`.crewforge/budget_authority.db`) reconciles historical spending from `.crewforge/crewforge.db` and `.crewforge/cloud_dev.db` without double-counting ($0.025516 committed across pilot development).
-  - Enforces the hackathon-mandated $4.00 emergency protected reserve (from $6.10 total OpenAI balance, leaving $2.10 total spendable ceiling) and category caps (`phase5_same_model` max $0.75, `david_vs_goliath` max $1.10).
+  - Enforces a team-configured $4.00 emergency protected reserve (from a $6.10 team OpenAI balance, leaving a $2.10 spendable ceiling) and category caps (`phase5_same_model` max $0.75, `david_vs_goliath` max $1.10).
   - Conservative unknown-outcome billing and immediate atomic reservations (`BEGIN IMMEDIATE`) ensure strict compliance.
 - **Reproducible Blind Benchmark & Scoring Harness (`evaluation/`, `benchmarks/`):**
   - Cryptographically random per-experiment blinding seed (`secrets.token_hex(32)`) persisted separately in `blind_key.json`; strips multi-claim tags, run IDs, model names, and CrewForge verification metadata from `confidence_notes` while preserving assumptions, missing info, and full reference documents.
@@ -21,7 +21,7 @@ CrewForge is a model-agnostic, self-assembling multi-agent intelligence network 
   - Compact profile for Apple Silicon M1 (concurrency 1, max 2 workers, max 3 tasks, ~4096 context).
   - Parity arithmetic tool resolving variables to exact prompt/evidence spans with AST literal verification.
 - **Reasoning-Aware Cloud Profile & Failed-Call Reconciliation (`providers/openai_provider.py`, `core/budget.py`):**
-  - Explicit `CrewForgeSettings.for_cloud_reasoning_profile()` (`8192` global/worker/revision, `6144` planner/review/synthesis) prevents reasoning-token starvation without clamping operation-specific limits or altering Ollama's local profile.
+  - Explicit `CrewForgeSettings.for_cloud_reasoning_profile()` (`8192` global/worker/revision, `6144` planner/review/synthesis) prevents reasoning-token starvation while enforcing `max_output_tokens` as the hard global ceiling (without altering Ollama's local profile).
   - `OpenAIProvider.generate_structured` uses `responses.create` with strict JSON Schema (`to_strict_json_schema`) to capture `provider_response_id`, `response_status`, `incomplete_reason`, `reasoning_tokens`, and `cached_input_tokens` before validation.
   - Failed structured calls with known usage (e.g., `incomplete` at `max_output_tokens`, refusal, or `ValidationError`) reconcile exact cost (`status="reconciled"`, `outcome="failed"`) without incrementing `successful_operations`.
   - Accurate `stages_executed` and `stage_telemetry` reflect persisted work rather than feature flags.
@@ -138,7 +138,7 @@ uv run crewforge-mcp --transport streamable-http --host 127.0.0.1 --port 8000
       "args": [
         "run",
         "--directory",
-        "/Users/sushanksingh/Desktop/CrewForge",
+        "/path/to/CrewForge",
         "crewforge-mcp"
       ],
       "env": {
