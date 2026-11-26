@@ -100,6 +100,33 @@ export function createInitialOfficeState(): OfficeSimState {
   };
 }
 
+export type ReleaseOutcome = "none" | "full" | "partial" | "blocked";
+
+export function classifyReleaseOutcome(trace: TracePayload | null): ReleaseOutcome {
+  if (!trace) return "none";
+  const status = String(trace.status || "").toLowerCase();
+  if (status === "failed" || status === "cancelled") return "blocked";
+  const gate = trace.honesty_gate;
+  if (gate) {
+    const mode = String(gate.release_mode || "").toLowerCase();
+    const supported =
+      gate.verification_summary?.supported_claim_count ??
+      (trace.claims || []).filter((c) => String(c.status).toLowerCase() === "supported").length;
+    if (mode === "blocked" || (gate.passed === false && mode !== "partial" && supported === 0)) {
+      return "blocked";
+    }
+    if (mode === "partial" || status === "partial" || (gate.passed === false && supported > 0)) {
+      return "partial";
+    }
+    if (gate.passed === true || mode === "full") {
+      return "full";
+    }
+  }
+  if (status === "partial") return "partial";
+  if (status === "completed") return "full";
+  return "none";
+}
+
 function eventKey(ev: TraceEvent, index: number): string {
   return ev.event_id || `${ev.seq ?? index}:${ev.event_type}:${ev.actor || ""}`;
 }
@@ -107,6 +134,7 @@ function eventKey(ev: TraceEvent, index: number): string {
 function resolveRecipientFromEvent(ev: TraceEvent): string | null {
   const payload = ev.payload || {};
   const explicit =
+    (payload.recipient_id as string | undefined) ||
     (payload.recipient_agent_id as string | undefined) ||
     (payload.to_agent_id as string | undefined) ||
     (payload.target_agent_id as string | undefined);
@@ -116,17 +144,18 @@ function resolveRecipientFromEvent(ev: TraceEvent): string | null {
   return m ? m[1] : null;
 }
 
-function resolveActorPos(
+function resolveActorPosStrict(
   actors: Record<string, OfficeActorState>,
   actorId: string | undefined | null
-): { x: number; y: number } {
-  if (!actorId || actorId === "lead" || actorId === "orchestrator" || actorId === "honesty_gate") {
+): { x: number; y: number } | null {
+  if (!actorId) return null;
+  if (actorId === "lead" || actorId === "orchestrator" || actorId === "honesty_gate") {
     return actors.lead?.deskPos || LEAD_DESK;
   }
-  if (actorId.startsWith("reviewer") || actorId === "claim_graph") {
+  if (actorId.startsWith("reviewer")) {
     return actors.reviewer?.deskPos || REVIEW_BAY;
   }
-  return actors[actorId]?.deskPos || LEAD_DESK;
+  return actors[actorId]?.deskPos || null;
 }
 
 function findDependentDesk(
@@ -153,8 +182,7 @@ export function applyTraceToOffice(
   prev: OfficeSimState,
   trace: TracePayload | null,
   isRunning: boolean,
-  nowMs: number,
-  blocked: boolean
+  nowMs: number
 ): OfficeSimState {
   // Reset when switching runs or clearing chat
   if (!trace) {
@@ -302,31 +330,37 @@ export function applyTraceToOffice(
         }
         break;
       }
-      case "message_sent":
-      case "messages_delivered": {
+      case "message_sent": {
         const recipient = resolveRecipientFromEvent(ev);
-        const fromPos =
-          ev.event_type === "message_sent"
-            ? resolveActorPos(actors, actorId)
-            : REVIEW_BAY;
-        const toPos =
-          ev.event_type === "message_sent"
-            ? resolveActorPos(actors, recipient)
-            : resolveActorPos(actors, actorId);
-        packets.push({
-          id: `pkt_${key}`,
-          kind: "message",
-          label: "Msg",
-          fromX: fromPos.x,
-          fromY: fromPos.y - 14,
-          toX: toPos.x,
-          toY: toPos.y - 14,
-          startTime: tStart,
-          durationMs: 1050,
-          color: "#38bdf8",
-        });
-        stagger += 1;
-        note = ev.message || "Agent collaboration message exchanged.";
+        const fromPos = resolveActorPosStrict(actors, actorId);
+        const toPos = resolveActorPosStrict(actors, recipient);
+        if (fromPos && toPos && (fromPos.x !== toPos.x || fromPos.y !== toPos.y)) {
+          packets.push({
+            id: `pkt_${key}`,
+            kind: "message",
+            label: "Msg",
+            fromX: fromPos.x,
+            fromY: fromPos.y - 14,
+            toX: toPos.x,
+            toY: toPos.y - 14,
+            startTime: tStart,
+            durationMs: 1050,
+            color: "#38bdf8",
+          });
+          stagger += 1;
+        }
+        note = ev.message || "Agent collaboration message sent.";
+        break;
+      }
+      case "messages_delivered": {
+        if (actor) {
+          actors[actorId] = {
+            ...actor,
+            bubble: "Received feedback",
+            bubbleUntil: tStart + 2400,
+          };
+        }
+        note = ev.message || "Delivered inbound collaboration message.";
         break;
       }
       case "review_completed":
@@ -389,22 +423,41 @@ export function applyTraceToOffice(
       case "synthesis_fast_path":
       case "synthesis_completed":
       case "run_completed": {
-        const finalPose: SpritePose = blocked ? "error" : "completed";
+        const outcome = classifyReleaseOutcome(trace);
+        const leadPose: SpritePose = outcome === "blocked" ? "error" : "completed";
+        const revPose: SpritePose =
+          outcome === "blocked" ? "error" : outcome === "partial" ? "reviewing" : "completed";
         actors.lead = {
           ...actors.lead,
-          pose: finalPose,
-          arrivedPose: finalPose,
-          bubble: blocked ? "Release blocked" : "Answer ready ✓",
+          pose: leadPose,
+          arrivedPose: leadPose,
+          bubble:
+            outcome === "blocked"
+              ? "Release blocked"
+              : outcome === "partial"
+              ? "Partial verified ✓"
+              : "Answer ready ✓",
           bubbleUntil: tStart + 5000,
         };
         actors.reviewer = {
           ...actors.reviewer,
-          pose: blocked ? "error" : "completed",
-          arrivedPose: blocked ? "error" : "completed",
-          bubble: blocked ? "Gate withheld" : "Verified ✓",
+          pose: revPose,
+          arrivedPose: revPose,
+          bubble:
+            outcome === "blocked"
+              ? "Gate withheld"
+              : outcome === "partial"
+              ? "Withheld unverified"
+              : "Verified ✓",
           bubbleUntil: tStart + 5000,
         };
-        note = ev.message || (blocked ? "Honesty Gate blocked unsafe release." : "Verified answer delivered.");
+        note =
+          ev.message ||
+          (outcome === "blocked"
+            ? "Honesty Gate blocked unsafe release."
+            : outcome === "partial"
+            ? "Released verified subset; unverified claims withheld."
+            : "Verified answer delivered.");
         break;
       }
       default:
@@ -429,9 +482,12 @@ export function applyTraceToOffice(
     });
     note = trace.waiting_reason || waitText;
   } else if (!isRunning && (trace.status === "completed" || trace.status === "partial" || trace.status === "failed")) {
-    const finalLeadPose: SpritePose = blocked ? "error" : "completed";
+    const outcome = classifyReleaseOutcome(trace);
+    const finalLeadPose: SpritePose = outcome === "blocked" ? "error" : "completed";
+    const finalRevPose: SpritePose =
+      outcome === "blocked" ? "error" : outcome === "partial" ? "reviewing" : "completed";
     actors.lead = { ...actors.lead, pose: finalLeadPose, arrivedPose: finalLeadPose };
-    actors.reviewer = { ...actors.reviewer, pose: blocked ? "error" : "completed", arrivedPose: blocked ? "error" : "completed" };
+    actors.reviewer = { ...actors.reviewer, pose: finalRevPose, arrivedPose: finalRevPose };
     Object.keys(actors).forEach((id) => {
       if (id !== "lead" && id !== "reviewer" && actors[id].pose === "waiting") {
         actors[id] = { ...actors[id], pose: "completed" };

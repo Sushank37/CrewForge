@@ -1,0 +1,2472 @@
+{
+  "export_version": "1.1",
+  "exported_at": "2026-11-26T20:36:18.645175+00:00",
+  "is_historical_replay": false,
+  "run_id": "run_0edd437ada29",
+  "mode": "network",
+  "status": "partial",
+  "provider": "openai_compatible",
+  "model": "openai/gpt-oss-120b",
+  "returned_model": "openai/gpt-oss-120b",
+  "prompt": "Evaluate a 12-month cloud migration and staffing plan: (1) Compute annual cloud infrastructure cost for 240,000,000 API requests/year at $0.15 per 1,000 requests plus $1,200/month fixed platform fees; (2) Compute annual support staffing cost for 3 engineers at $85/hour for 1,920 billable hours each per year; (3) Determine the total annual cost and remaining budget out of a $600,000 annual allocation, and state whether the plan stays under budget.",
+  "error": null,
+  "created_at": "2026-11-26T20:21:33.341026+00:00",
+  "completed_at": "2026-11-26T20:23:50.282404+00:00",
+  "latency_ms": 136945.04191703163,
+  "usage": {
+    "input_tokens": 11455,
+    "output_tokens": 8389,
+    "reasoning_tokens": 0,
+    "cached_input_tokens": 0,
+    "total_tokens": 19844,
+    "estimated_cost_usd": 0.0,
+    "actual_cost_usd": 0.0,
+    "model_calls": 7,
+    "successful_operations": 7,
+    "retries": 0,
+    "latency_ms": 138514.57912381738,
+    "usage_reported": true,
+    "returned_model": null,
+    "provider_response_id": null,
+    "response_status": null,
+    "incomplete_reason": null
+  },
+  "roster": [
+    {
+      "agent_id": "agt_7ada29_1_74d3",
+      "agent_ref": "a1",
+      "run_id": "run_0edd437ada29",
+      "role": "Cloud Cost Analyst",
+      "instructions": "Calculate the annual cloud infrastructure cost using the request volume, per\u2011thousand\u2011request rate, and monthly fixed platform fees.",
+      "capabilities": [
+        "analysis",
+        "calculation"
+      ],
+      "model_override": null,
+      "created_by": "lead",
+      "created_at": "2026-11-26T20:21:37.251868Z"
+    },
+    {
+      "agent_id": "agt_7ada29_2_fe84",
+      "agent_ref": "a2",
+      "run_id": "run_0edd437ada29",
+      "role": "Staffing Cost Analyst",
+      "instructions": "Calculate the annual support staffing cost for the three engineers based on hourly rate and billable hours.",
+      "capabilities": [
+        "analysis",
+        "calculation"
+      ],
+      "model_override": null,
+      "created_by": "lead",
+      "created_at": "2026-11-26T20:21:37.251908Z"
+    },
+    {
+      "agent_id": "agt_7ada29_3_3a2c",
+      "agent_ref": "a3",
+      "run_id": "run_0edd437ada29",
+      "role": "Budget Aggregator",
+      "instructions": "Combine the cloud and staffing costs, compare the total to the $600,000 allocation, and report remaining budget and status.",
+      "capabilities": [
+        "analysis",
+        "calculation",
+        "synthesis"
+      ],
+      "model_override": null,
+      "created_by": "lead",
+      "created_at": "2026-11-26T20:21:37.251930Z"
+    }
+  ],
+  "execution_plan": {
+    "plan_id": "pln_c413f9d2063d",
+    "run_id": "run_0edd437ada29",
+    "goal": "Evaluate a 12\u2011month cloud migration and staffing plan, calculate all relevant costs, and determine if the plan stays within a $600,000 annual budget.",
+    "user_requirements": [
+      "Compute annual cloud infrastructure cost for 240,000,000 API requests/year at $0.15 per 1,000 requests plus $1,200/month fixed platform fees.",
+      "Compute annual support staffing cost for 3 engineers at $85/hour for 1,920 billable hours each per year.",
+      "Determine total annual cost, remaining budget from $600,000, and state whether the plan stays under budget."
+    ],
+    "acceptance_criteria": [
+      "All calculations use the figures provided by the user.",
+      "Results are presented with clear numeric values (in USD) for cloud cost, staffing cost, total cost, remaining budget, and budget status.",
+      "The budget status explicitly says \"under budget\" or \"over budget\"."
+    ],
+    "agents": [
+      {
+        "agent_id": "agt_7ada29_1_74d3",
+        "agent_ref": "a1",
+        "run_id": "run_0edd437ada29",
+        "role": "Cloud Cost Analyst",
+        "instructions": "Calculate the annual cloud infrastructure cost using the request volume, per\u2011thousand\u2011request rate, and monthly fixed platform fees.",
+        "capabilities": [
+          "analysis",
+          "calculation"
+        ],
+        "model_override": null,
+        "created_by": "lead",
+        "created_at": "2026-11-26T20:21:37.251868Z"
+      },
+      {
+        "agent_id": "agt_7ada29_2_fe84",
+        "agent_ref": "a2",
+        "run_id": "run_0edd437ada29",
+        "role": "Staffing Cost Analyst",
+        "instructions": "Calculate the annual support staffing cost for the three engineers based on hourly rate and billable hours.",
+        "capabilities": [
+          "analysis",
+          "calculation"
+        ],
+        "model_override": null,
+        "created_by": "lead",
+        "created_at": "2026-11-26T20:21:37.251908Z"
+      },
+      {
+        "agent_id": "agt_7ada29_3_3a2c",
+        "agent_ref": "a3",
+        "run_id": "run_0edd437ada29",
+        "role": "Budget Aggregator",
+        "instructions": "Combine the cloud and staffing costs, compare the total to the $600,000 allocation, and report remaining budget and status.",
+        "capabilities": [
+          "analysis",
+          "calculation",
+          "synthesis"
+        ],
+        "model_override": null,
+        "created_by": "lead",
+        "created_at": "2026-11-26T20:21:37.251930Z"
+      }
+    ],
+    "tasks": [
+      {
+        "task_id": "tsk_7ada29_1_50ce",
+        "task_ref": "t1",
+        "run_id": "run_0edd437ada29",
+        "plan_id": "pln_c413f9d2063d",
+        "title": "Calculate Annual Cloud Infrastructure Cost",
+        "description": "Use 240,000,000 API requests per year, $0.15 per 1,000 requests, and $1,200 monthly fixed fees to compute the total cloud cost for one year.",
+        "assigned_agent_id": "agt_7ada29_1_74d3",
+        "depends_on": [],
+        "expected_outputs": [
+          "annual_cloud_cost"
+        ],
+        "acceptance_criteria": [
+          "Cost includes both per\u2011request charges and monthly platform fees.",
+          "Result is expressed in USD and rounded to the nearest dollar."
+        ],
+        "status": "completed",
+        "findings": "The annual cloud infrastructure cost for 240,000,000 API requests, at $0.15 per 1,000 requests plus $1,200 monthly fixed platform fees, is $50,400.",
+        "error": null,
+        "created_by": "lead",
+        "created_at": "2026-11-26T20:21:37.252011Z",
+        "started_at": "2026-11-26T20:21:37.332405Z",
+        "completed_at": "2026-11-26T20:21:40.511611Z"
+      },
+      {
+        "task_id": "tsk_7ada29_2_3a4b",
+        "task_ref": "t2",
+        "run_id": "run_0edd437ada29",
+        "plan_id": "pln_c413f9d2063d",
+        "title": "Calculate Annual Staffing Cost",
+        "description": "Compute the yearly cost for 3 engineers each working 1,920 billable hours at $85 per hour.",
+        "assigned_agent_id": "agt_7ada29_2_fe84",
+        "depends_on": [],
+        "expected_outputs": [
+          "annual_staffing_cost"
+        ],
+        "acceptance_criteria": [
+          "Cost is expressed in USD and rounded to the nearest dollar."
+        ],
+        "status": "completed",
+        "findings": "The annual staffing cost for three engineers working 1,920 billable hours each at $85 per hour is $489,600.",
+        "error": null,
+        "created_by": "lead",
+        "created_at": "2026-11-26T20:21:37.252028Z",
+        "started_at": "2026-11-26T20:21:37.338649Z",
+        "completed_at": "2026-11-26T20:21:39.457610Z"
+      },
+      {
+        "task_id": "tsk_7ada29_3_fadc",
+        "task_ref": "t3",
+        "run_id": "run_0edd437ada29",
+        "plan_id": "pln_c413f9d2063d",
+        "title": "Aggregate Costs and Determine Budget Status",
+        "description": "Add the cloud infrastructure cost and staffing cost, compare the sum to the $600,000 allocation, and report remaining budget and whether the plan is under or over budget.",
+        "assigned_agent_id": "agt_7ada29_3_3a2c",
+        "depends_on": [
+          "tsk_7ada29_1_50ce",
+          "tsk_7ada29_2_3a4b"
+        ],
+        "expected_outputs": [
+          "total_annual_cost",
+          "remaining_budget",
+          "budget_status"
+        ],
+        "acceptance_criteria": [
+          "Total cost equals the sum of cloud and staffing costs.",
+          "Remaining budget = $600,000 \u2013 total cost.",
+          "Budget status clearly states \"under budget\" if remaining budget \u2265 0, otherwise \"over budget\"."
+        ],
+        "status": "completed",
+        "findings": "Annual cloud infrastructure cost is $50,400 and annual staffing cost is $489,600. Total annual cost = $540,000. Remaining budget from the $600,000 allocation = $60,000. Budget status: under budget.",
+        "error": null,
+        "created_by": "lead",
+        "created_at": "2026-11-26T20:21:37.252044Z",
+        "started_at": "2026-11-26T20:21:40.513805Z",
+        "completed_at": "2026-11-26T20:22:43.848925Z"
+      }
+    ],
+    "assumptions": [
+      "All months have equal fixed platform fees; no discounts or volume pricing apply.",
+      "Engineers work exactly 1,920 billable hours each year (40 hrs/week * 48 weeks)."
+    ],
+    "missing_information": [],
+    "created_by": "lead",
+    "created_at": "2026-11-26T20:21:37.252880Z"
+  },
+  "tasks": [
+    {
+      "task_id": "tsk_7ada29_1_50ce",
+      "task_ref": "t1",
+      "run_id": "run_0edd437ada29",
+      "plan_id": "pln_c413f9d2063d",
+      "title": "Calculate Annual Cloud Infrastructure Cost",
+      "description": "Use 240,000,000 API requests per year, $0.15 per 1,000 requests, and $1,200 monthly fixed fees to compute the total cloud cost for one year.",
+      "assigned_agent_id": "agt_7ada29_1_74d3",
+      "depends_on": [],
+      "expected_outputs": [
+        "annual_cloud_cost"
+      ],
+      "acceptance_criteria": [
+        "Cost includes both per\u2011request charges and monthly platform fees.",
+        "Result is expressed in USD and rounded to the nearest dollar."
+      ],
+      "status": "completed",
+      "findings": "The annual cloud infrastructure cost for 240,000,000 API requests, at $0.15 per 1,000 requests plus $1,200 monthly fixed platform fees, is $50,400.",
+      "error": null,
+      "created_by": "lead",
+      "created_at": "2026-11-26T20:21:37.252011Z",
+      "started_at": "2026-11-26T20:21:37.332405Z",
+      "completed_at": "2026-11-26T20:21:40.511611Z"
+    },
+    {
+      "task_id": "tsk_7ada29_2_3a4b",
+      "task_ref": "t2",
+      "run_id": "run_0edd437ada29",
+      "plan_id": "pln_c413f9d2063d",
+      "title": "Calculate Annual Staffing Cost",
+      "description": "Compute the yearly cost for 3 engineers each working 1,920 billable hours at $85 per hour.",
+      "assigned_agent_id": "agt_7ada29_2_fe84",
+      "depends_on": [],
+      "expected_outputs": [
+        "annual_staffing_cost"
+      ],
+      "acceptance_criteria": [
+        "Cost is expressed in USD and rounded to the nearest dollar."
+      ],
+      "status": "completed",
+      "findings": "The annual staffing cost for three engineers working 1,920 billable hours each at $85 per hour is $489,600.",
+      "error": null,
+      "created_by": "lead",
+      "created_at": "2026-11-26T20:21:37.252028Z",
+      "started_at": "2026-11-26T20:21:37.338649Z",
+      "completed_at": "2026-11-26T20:21:39.457610Z"
+    },
+    {
+      "task_id": "tsk_7ada29_3_fadc",
+      "task_ref": "t3",
+      "run_id": "run_0edd437ada29",
+      "plan_id": "pln_c413f9d2063d",
+      "title": "Aggregate Costs and Determine Budget Status",
+      "description": "Add the cloud infrastructure cost and staffing cost, compare the sum to the $600,000 allocation, and report remaining budget and whether the plan is under or over budget.",
+      "assigned_agent_id": "agt_7ada29_3_3a2c",
+      "depends_on": [
+        "tsk_7ada29_1_50ce",
+        "tsk_7ada29_2_3a4b"
+      ],
+      "expected_outputs": [
+        "total_annual_cost",
+        "remaining_budget",
+        "budget_status"
+      ],
+      "acceptance_criteria": [
+        "Total cost equals the sum of cloud and staffing costs.",
+        "Remaining budget = $600,000 \u2013 total cost.",
+        "Budget status clearly states \"under budget\" if remaining budget \u2265 0, otherwise \"over budget\"."
+      ],
+      "status": "completed",
+      "findings": "Annual cloud infrastructure cost is $50,400 and annual staffing cost is $489,600. Total annual cost = $540,000. Remaining budget from the $600,000 allocation = $60,000. Budget status: under budget.",
+      "error": null,
+      "created_by": "lead",
+      "created_at": "2026-11-26T20:21:37.252044Z",
+      "started_at": "2026-11-26T20:21:40.513805Z",
+      "completed_at": "2026-11-26T20:22:43.848925Z"
+    }
+  ],
+  "task_transitions": [
+    {
+      "transition_id": "trn_3f5ee9b83c9f",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_1_50ce",
+      "from_status": null,
+      "to_status": "pending",
+      "reason": "Plan initialized",
+      "created_at": "2026-11-26T20:21:37.252011+00:00"
+    },
+    {
+      "transition_id": "trn_3a6eb878c9fb",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_2_3a4b",
+      "from_status": null,
+      "to_status": "pending",
+      "reason": "Plan initialized",
+      "created_at": "2026-11-26T20:21:37.252028+00:00"
+    },
+    {
+      "transition_id": "trn_fd7b6759839a",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_3_fadc",
+      "from_status": null,
+      "to_status": "pending",
+      "reason": "Plan initialized",
+      "created_at": "2026-11-26T20:21:37.252044+00:00"
+    },
+    {
+      "transition_id": "trn_82f7e8fb8879",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_1_50ce",
+      "from_status": "pending",
+      "to_status": "running",
+      "reason": "Dependencies satisfied.",
+      "created_at": "2026-11-26T20:21:37.332405+00:00"
+    },
+    {
+      "transition_id": "trn_49db2338f465",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_2_3a4b",
+      "from_status": "pending",
+      "to_status": "running",
+      "reason": "Dependencies satisfied.",
+      "created_at": "2026-11-26T20:21:37.338649+00:00"
+    },
+    {
+      "transition_id": "trn_e02694d8f28c",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_2_3a4b",
+      "from_status": "running",
+      "to_status": "completed",
+      "reason": "Task completed.",
+      "created_at": "2026-11-26T20:21:39.457610+00:00"
+    },
+    {
+      "transition_id": "trn_0afc956ec621",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_1_50ce",
+      "from_status": "running",
+      "to_status": "completed",
+      "reason": "Task completed.",
+      "created_at": "2026-11-26T20:21:40.511611+00:00"
+    },
+    {
+      "transition_id": "trn_71e4bb737b47",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_3_fadc",
+      "from_status": "pending",
+      "to_status": "running",
+      "reason": "Dependencies satisfied.",
+      "created_at": "2026-11-26T20:21:40.513805+00:00"
+    },
+    {
+      "transition_id": "trn_a54e21c98dfe",
+      "run_id": "run_0edd437ada29",
+      "task_id": "tsk_7ada29_3_fadc",
+      "from_status": "running",
+      "to_status": "completed",
+      "reason": "Task completed.",
+      "created_at": "2026-11-26T20:22:43.848925+00:00"
+    }
+  ],
+  "execution_events": [
+    {
+      "event_id": "evt_f681c1889179",
+      "run_id": "run_0edd437ada29",
+      "seq": 1,
+      "event_type": "run_started",
+      "actor": "lead",
+      "message": "Started dynamic multi-agent network run.",
+      "payload": {
+        "provider": "openai_compatible",
+        "model": "openai/gpt-oss-120b",
+        "max_concurrency": 3,
+        "max_workers": 3,
+        "max_tasks": 3,
+        "run_deadline_seconds": 480.0
+      },
+      "created_at": "2026-11-26T20:21:33.346962Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_094df1bb2721",
+      "run_id": "run_0edd437ada29",
+      "seq": 2,
+      "event_type": "budget_reserved",
+      "actor": "lead",
+      "message": "Reserved budget for planner attempt #1.",
+      "payload": {
+        "operation": "planner",
+        "attempt": 1,
+        "reservation_id": "res_b9710b50a8fd",
+        "reserved_cost_usd": 0.0,
+        "estimated_input_tokens": 1397,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-26T20:21:33.367999Z",
+      "category": "budget"
+    },
+    {
+      "event_id": "evt_c60afb8c560f",
+      "run_id": "run_0edd437ada29",
+      "seq": 3,
+      "event_type": "model_call_completed",
+      "actor": "lead",
+      "message": "Completed planner attempt #1.",
+      "payload": {
+        "operation": "planner",
+        "attempt": 1,
+        "provider": "openai_compatible",
+        "model": "openai/gpt-oss-120b",
+        "returned_model": "openai/gpt-oss-120b",
+        "input_tokens": 929,
+        "output_tokens": 1358,
+        "reasoning_tokens": 439,
+        "cached_input_tokens": 768,
+        "total_tokens": 2287,
+        "actual_cost_usd": 0.0,
+        "usage_reported": true,
+        "provider_response_id": "chatcmpl-0ad220e2-abc2-4fe5-a767-ae0f76b4ec8c",
+        "response_status": null,
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 3868.9647080609575
+      },
+      "created_at": "2026-11-26T20:21:37.242796Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_4cd571c2e33e",
+      "run_id": "run_0edd437ada29",
+      "seq": 4,
+      "event_type": "plan_created",
+      "actor": "lead",
+      "message": "Persisted execution plan with 3 specialist(s) and 3 task(s).",
+      "payload": {
+        "plan_id": "pln_c413f9d2063d",
+        "roles": [
+          "Cloud Cost Analyst",
+          "Staffing Cost Analyst",
+          "Budget Aggregator"
+        ],
+        "task_refs": [
+          "t1",
+          "t2",
+          "t3"
+        ]
+      },
+      "created_at": "2026-11-26T20:21:37.310511Z",
+      "category": "planning"
+    },
+    {
+      "event_id": "evt_359cf7182d98",
+      "run_id": "run_0edd437ada29",
+      "seq": 5,
+      "event_type": "task_started",
+      "actor": "agt_7ada29_1_74d3",
+      "message": "Started task t1: Calculate Annual Cloud Infrastructure Cost",
+      "payload": {
+        "task_id": "tsk_7ada29_1_50ce",
+        "agent_id": "agt_7ada29_1_74d3"
+      },
+      "created_at": "2026-11-26T20:21:37.335725Z",
+      "category": "task_execution"
+    },
+    {
+      "event_id": "evt_2832b4e149a9",
+      "run_id": "run_0edd437ada29",
+      "seq": 6,
+      "event_type": "task_started",
+      "actor": "agt_7ada29_2_fe84",
+      "message": "Started task t2: Calculate Annual Staffing Cost",
+      "payload": {
+        "task_id": "tsk_7ada29_2_3a4b",
+        "agent_id": "agt_7ada29_2_fe84"
+      },
+      "created_at": "2026-11-26T20:21:37.403239Z",
+      "category": "task_execution"
+    },
+    {
+      "event_id": "evt_027d2fb53e54",
+      "run_id": "run_0edd437ada29",
+      "seq": 7,
+      "event_type": "budget_reserved",
+      "actor": "agt_7ada29_1_74d3",
+      "message": "Reserved budget for worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "reservation_id": "res_18fbd31280d1",
+        "reserved_cost_usd": 0.0,
+        "estimated_input_tokens": 3023,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-26T20:21:37.461753Z",
+      "category": "budget"
+    },
+    {
+      "event_id": "evt_2eeecddea61a",
+      "run_id": "run_0edd437ada29",
+      "seq": 8,
+      "event_type": "budget_reserved",
+      "actor": "agt_7ada29_2_fe84",
+      "message": "Reserved budget for worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "reservation_id": "res_570c158e9c67",
+        "reserved_cost_usd": 0.0,
+        "estimated_input_tokens": 2996,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-26T20:21:37.513163Z",
+      "category": "budget"
+    },
+    {
+      "event_id": "evt_552f11b71d31",
+      "run_id": "run_0edd437ada29",
+      "seq": 9,
+      "event_type": "model_call_completed",
+      "actor": "agt_7ada29_2_fe84",
+      "message": "Completed worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "provider": "openai_compatible",
+        "model": "openai/gpt-oss-120b",
+        "returned_model": "openai/gpt-oss-120b",
+        "input_tokens": 1885,
+        "output_tokens": 766,
+        "reasoning_tokens": 392,
+        "cached_input_tokens": 0,
+        "total_tokens": 2651,
+        "actual_cost_usd": 0.0,
+        "usage_reported": true,
+        "provider_response_id": "chatcmpl-fb73644b-f312-4377-9025-f97aa950024b",
+        "response_status": null,
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 1925.319708068855
+      },
+      "created_at": "2026-11-26T20:21:39.443099Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_c59924494eeb",
+      "run_id": "run_0edd437ada29",
+      "seq": 10,
+      "event_type": "tool_executed",
+      "actor": "agt_7ada29_2_fe84",
+      "message": "Arithmetic tool succeeded: engineers * hours_per_engineer * rate -> 489600",
+      "payload": {
+        "tool_execution_id": "tlx_5e9a6584dbe5",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "489600"
+      },
+      "created_at": "2026-11-26T20:21:39.454092Z",
+      "category": "tool_calls"
+    },
+    {
+      "event_id": "evt_f4892db4d66e",
+      "run_id": "run_0edd437ada29",
+      "seq": 11,
+      "event_type": "claims_recorded",
+      "actor": "agt_7ada29_2_fe84",
+      "message": "Recorded 1 claim(s) and 1 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_7ada29_2_3a4b",
+        "claim_ids": [
+          "clm_b91b7e20e0a3"
+        ],
+        "evidence_ids": [
+          "evd_3e627fe5bcf8"
+        ],
+        "tool_execution_ids": [
+          "tlx_5e9a6584dbe5"
+        ]
+      },
+      "created_at": "2026-11-26T20:21:39.456728Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_c16f8f91c64d",
+      "run_id": "run_0edd437ada29",
+      "seq": 12,
+      "event_type": "task_completed",
+      "actor": "agt_7ada29_2_fe84",
+      "message": "Completed task t2: Calculate Annual Staffing Cost",
+      "payload": {
+        "task_id": "tsk_7ada29_2_3a4b",
+        "claims_count": 1,
+        "messages_sent": 0
+      },
+      "created_at": "2026-11-26T20:21:39.457968Z",
+      "category": "task_execution"
+    },
+    {
+      "event_id": "evt_848983e13c5e",
+      "run_id": "run_0edd437ada29",
+      "seq": 13,
+      "event_type": "model_call_completed",
+      "actor": "agt_7ada29_1_74d3",
+      "message": "Completed worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "provider": "openai_compatible",
+        "model": "openai/gpt-oss-120b",
+        "returned_model": "openai/gpt-oss-120b",
+        "input_tokens": 1908,
+        "output_tokens": 1296,
+        "reasoning_tokens": 856,
+        "cached_input_tokens": 0,
+        "total_tokens": 3204,
+        "actual_cost_usd": 0.0,
+        "usage_reported": true,
+        "provider_response_id": "chatcmpl-f76d04e2-ca7a-4a8c-a7a3-1d46530317b1",
+        "response_status": null,
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 3033.573125023395
+      },
+      "created_at": "2026-11-26T20:21:40.500966Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_c53d4a050aab",
+      "run_id": "run_0edd437ada29",
+      "seq": 14,
+      "event_type": "tool_executed",
+      "actor": "agt_7ada29_1_74d3",
+      "message": "Arithmetic tool succeeded: (requests/1000 * rate_per_1000) + (monthly_fee * 12) -> 50400",
+      "payload": {
+        "tool_execution_id": "tlx_719e7c95c8d3",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "50400"
+      },
+      "created_at": "2026-11-26T20:21:40.506346Z",
+      "category": "tool_calls"
+    },
+    {
+      "event_id": "evt_a11f53e4a399",
+      "run_id": "run_0edd437ada29",
+      "seq": 15,
+      "event_type": "claims_recorded",
+      "actor": "agt_7ada29_1_74d3",
+      "message": "Recorded 1 claim(s) and 1 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_7ada29_1_50ce",
+        "claim_ids": [
+          "clm_dfff18424851"
+        ],
+        "evidence_ids": [
+          "evd_0f45ffb9cb1c"
+        ],
+        "tool_execution_ids": [
+          "tlx_719e7c95c8d3"
+        ]
+      },
+      "created_at": "2026-11-26T20:21:40.510529Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_46e955150211",
+      "run_id": "run_0edd437ada29",
+      "seq": 16,
+      "event_type": "task_completed",
+      "actor": "agt_7ada29_1_74d3",
+      "message": "Completed task t1: Calculate Annual Cloud Infrastructure Cost",
+      "payload": {
+        "task_id": "tsk_7ada29_1_50ce",
+        "claims_count": 1,
+        "messages_sent": 0
+      },
+      "created_at": "2026-11-26T20:21:40.512240Z",
+      "category": "task_execution"
+    },
+    {
+      "event_id": "evt_c4cf440d69d9",
+      "run_id": "run_0edd437ada29",
+      "seq": 17,
+      "event_type": "task_started",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Started task t3: Aggregate Costs and Determine Budget Status",
+      "payload": {
+        "task_id": "tsk_7ada29_3_fadc",
+        "agent_id": "agt_7ada29_3_3a2c"
+      },
+      "created_at": "2026-11-26T20:21:40.515080Z",
+      "category": "task_execution"
+    },
+    {
+      "event_id": "evt_2cf14af5a09a",
+      "run_id": "run_0edd437ada29",
+      "seq": 18,
+      "event_type": "budget_reserved",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Reserved budget for worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "reservation_id": "res_f79e7c0879bd",
+        "reserved_cost_usd": 0.0,
+        "estimated_input_tokens": 3415,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-26T20:21:40.528566Z",
+      "category": "budget"
+    },
+    {
+      "event_id": "evt_5fd84b3dd6f7",
+      "run_id": "run_0edd437ada29",
+      "seq": 19,
+      "event_type": "model_call_completed",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Completed worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "provider": "openai_compatible",
+        "model": "openai/gpt-oss-120b",
+        "returned_model": "openai/gpt-oss-120b",
+        "input_tokens": 2276,
+        "output_tokens": 1459,
+        "reasoning_tokens": 840,
+        "cached_input_tokens": 0,
+        "total_tokens": 3735,
+        "actual_cost_usd": 0.0,
+        "usage_reported": true,
+        "provider_response_id": "chatcmpl-e9e78eb4-14f9-4293-8928-2479914676de",
+        "response_status": null,
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 63311.092749936506
+      },
+      "created_at": "2026-11-26T20:22:43.840438Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_4b85028094ae",
+      "run_id": "run_0edd437ada29",
+      "seq": 20,
+      "event_type": "tool_executed",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Arithmetic tool succeeded: cloud_cost + staffing_cost -> 540000",
+      "payload": {
+        "tool_execution_id": "tlx_faf448d21344",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "540000"
+      },
+      "created_at": "2026-11-26T20:22:43.844785Z",
+      "category": "tool_calls"
+    },
+    {
+      "event_id": "evt_4dd9e6b0be47",
+      "run_id": "run_0edd437ada29",
+      "seq": 21,
+      "event_type": "tool_executed",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Arithmetic tool succeeded: allocation - total_cost -> 60000",
+      "payload": {
+        "tool_execution_id": "tlx_ef741358402e",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": false,
+        "has_ungrounded_literals": false,
+        "computed_result": "60000"
+      },
+      "created_at": "2026-11-26T20:22:43.845714Z",
+      "category": "tool_calls"
+    },
+    {
+      "event_id": "evt_5c55c81a2187",
+      "run_id": "run_0edd437ada29",
+      "seq": 22,
+      "event_type": "claims_recorded",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Recorded 3 claim(s) and 2 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_7ada29_3_fadc",
+        "claim_ids": [
+          "clm_24125382adc6",
+          "clm_b16c598fd746",
+          "clm_a890d25efeaf"
+        ],
+        "evidence_ids": [
+          "evd_c96048a83aed",
+          "evd_73dcb298c7ac"
+        ],
+        "tool_execution_ids": [
+          "tlx_faf448d21344",
+          "tlx_ef741358402e"
+        ]
+      },
+      "created_at": "2026-11-26T20:22:43.848291Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_1f3b9112234e",
+      "run_id": "run_0edd437ada29",
+      "seq": 23,
+      "event_type": "task_completed",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Completed task t3: Aggregate Costs and Determine Budget Status",
+      "payload": {
+        "task_id": "tsk_7ada29_3_fadc",
+        "claims_count": 3,
+        "messages_sent": 0
+      },
+      "created_at": "2026-11-26T20:22:43.849120Z",
+      "category": "task_execution"
+    },
+    {
+      "event_id": "evt_c59e736bbca2",
+      "run_id": "run_0edd437ada29",
+      "seq": 24,
+      "event_type": "claims_invalidated",
+      "actor": "claim_graph",
+      "message": "Invalidated 1 dependent claim(s) after change to 'clm_b16c598fd746'.",
+      "payload": {
+        "root_claim_id": "clm_b16c598fd746",
+        "invalidated_claim_ids": [
+          "clm_a890d25efeaf"
+        ],
+        "reason": "Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims."
+      },
+      "created_at": "2026-11-26T20:22:43.855926Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_7f11a8aece4c",
+      "run_id": "run_0edd437ada29",
+      "seq": 25,
+      "event_type": "budget_reserved",
+      "actor": "reviewer_combined",
+      "message": "Reserved budget for review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "reservation_id": "res_6b8cfcebe3e0",
+        "reserved_cost_usd": 0.0,
+        "estimated_input_tokens": 1824,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-26T20:22:43.858602Z",
+      "category": "budget"
+    },
+    {
+      "event_id": "evt_462e16a1d57b",
+      "run_id": "run_0edd437ada29",
+      "seq": 26,
+      "event_type": "model_call_completed",
+      "actor": "reviewer_combined",
+      "message": "Completed review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "provider": "openai_compatible",
+        "model": "openai/gpt-oss-120b",
+        "returned_model": "openai/gpt-oss-120b",
+        "input_tokens": 1405,
+        "output_tokens": 1209,
+        "reasoning_tokens": 802,
+        "cached_input_tokens": 0,
+        "total_tokens": 2614,
+        "actual_cost_usd": 0.0,
+        "usage_reported": true,
+        "provider_response_id": "chatcmpl-3bba3b18-fcf8-43d1-89df-14d42c75b58b",
+        "response_status": null,
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 2837.200666894205
+      },
+      "created_at": "2026-11-26T20:22:46.696644Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_f8e522bf7e28",
+      "run_id": "run_0edd437ada29",
+      "seq": 27,
+      "event_type": "claims_invalidated",
+      "actor": "claim_graph",
+      "message": "Invalidated 1 dependent claim(s) after change to 'clm_24125382adc6'.",
+      "payload": {
+        "root_claim_id": "clm_24125382adc6",
+        "invalidated_claim_ids": [
+          "clm_a890d25efeaf"
+        ],
+        "reason": "Evidence cited is unverified; must reference verified sources or prior claims."
+      },
+      "created_at": "2026-11-26T20:22:46.700559Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_1cc95a7a3ac7",
+      "run_id": "run_0edd437ada29",
+      "seq": 28,
+      "event_type": "review_completed",
+      "actor": "reviewer_pool",
+      "message": "Completed review round: 5 verdict(s), 2 blocking claim(s).",
+      "payload": {
+        "reviewer_calls": 1,
+        "blocking_claim_ids": [
+          "clm_b16c598fd746",
+          "clm_24125382adc6"
+        ]
+      },
+      "created_at": "2026-11-26T20:22:46.700831Z",
+      "category": "review"
+    },
+    {
+      "event_id": "evt_3deaa3d0413c",
+      "run_id": "run_0edd437ada29",
+      "seq": 29,
+      "event_type": "message_sent",
+      "actor": "reviewer_combined",
+      "message": "Sent clarification message to agt_7ada29_3_3a2c.",
+      "payload": {
+        "message_id": "msg_a7cade266cc9",
+        "recipient_id": "agt_7ada29_3_3a2c",
+        "related_claim_ids": [
+          "clm_24125382adc6"
+        ]
+      },
+      "created_at": "2026-11-26T20:22:46.705014Z",
+      "category": "peer_messages"
+    },
+    {
+      "event_id": "evt_f8ef4cac258a",
+      "run_id": "run_0edd437ada29",
+      "seq": 30,
+      "event_type": "message_sent",
+      "actor": "reviewer_numbers",
+      "message": "Sent clarification message to agt_7ada29_3_3a2c.",
+      "payload": {
+        "message_id": "msg_659d6abfcff6",
+        "recipient_id": "agt_7ada29_3_3a2c",
+        "related_claim_ids": [
+          "clm_b16c598fd746"
+        ]
+      },
+      "created_at": "2026-11-26T20:22:46.705705Z",
+      "category": "peer_messages"
+    },
+    {
+      "event_id": "evt_e57384726ed0",
+      "run_id": "run_0edd437ada29",
+      "seq": 31,
+      "event_type": "messages_delivered",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Delivered 2 inbound message(s) to agt_7ada29_3_3a2c.",
+      "payload": {
+        "message_ids": [
+          "msg_a7cade266cc9",
+          "msg_659d6abfcff6"
+        ]
+      },
+      "created_at": "2026-11-26T20:22:46.706535Z",
+      "category": "peer_messages"
+    },
+    {
+      "event_id": "evt_7364ef6036b0",
+      "run_id": "run_0edd437ada29",
+      "seq": 32,
+      "event_type": "budget_reserved",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Reserved budget for revision attempt #1.",
+      "payload": {
+        "operation": "revision",
+        "attempt": 1,
+        "reservation_id": "res_1f33254c84db",
+        "reserved_cost_usd": 0.0,
+        "estimated_input_tokens": 2808,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-26T20:22:46.712090Z",
+      "category": "budget"
+    },
+    {
+      "event_id": "evt_2550737fd58a",
+      "run_id": "run_0edd437ada29",
+      "seq": 33,
+      "event_type": "model_call_completed",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Completed revision attempt #1.",
+      "payload": {
+        "operation": "revision",
+        "attempt": 1,
+        "provider": "openai_compatible",
+        "model": "openai/gpt-oss-120b",
+        "returned_model": "openai/gpt-oss-120b",
+        "input_tokens": 1791,
+        "output_tokens": 1577,
+        "reasoning_tokens": 907,
+        "cached_input_tokens": 0,
+        "total_tokens": 3368,
+        "actual_cost_usd": 0.0,
+        "usage_reported": true,
+        "provider_response_id": "chatcmpl-039f9de1-7601-430a-aba8-8c5b5e67aca3",
+        "response_status": null,
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 61609.80958293658
+      },
+      "created_at": "2026-11-26T20:23:48.321440Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_c71be7de44a3",
+      "run_id": "run_0edd437ada29",
+      "seq": 34,
+      "event_type": "messages_consumed",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Consumed 2 inbound message(s) in model context.",
+      "payload": {
+        "message_ids": [
+          "msg_a7cade266cc9",
+          "msg_659d6abfcff6"
+        ]
+      },
+      "created_at": "2026-11-26T20:23:48.322160Z",
+      "category": "peer_messages"
+    },
+    {
+      "event_id": "evt_5058ff248d5e",
+      "run_id": "run_0edd437ada29",
+      "seq": 35,
+      "event_type": "claims_recorded",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Recorded 0 claim(s) and 2 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_7ada29_3_fadc",
+        "claim_ids": [],
+        "evidence_ids": [
+          "evd_41e6d53654c1",
+          "evd_0db4f1f0c00c"
+        ],
+        "tool_execution_ids": []
+      },
+      "created_at": "2026-11-26T20:23:48.325278Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_8e5f58dabe46",
+      "run_id": "run_0edd437ada29",
+      "seq": 36,
+      "event_type": "tool_executed",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Arithmetic tool succeeded: cloud_cost + staff_cost -> 540000",
+      "payload": {
+        "tool_execution_id": "tlx_240adda0d333",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "540000"
+      },
+      "created_at": "2026-11-26T20:23:48.328350Z",
+      "category": "tool_calls"
+    },
+    {
+      "event_id": "evt_3a8968dc0600",
+      "run_id": "run_0edd437ada29",
+      "seq": 37,
+      "event_type": "claim_revised",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Recorded claim clm_24125382adc6 version 2.",
+      "payload": {
+        "claim_id": "clm_24125382adc6",
+        "version": 2,
+        "parent_claim_id": "clm_24125382adc6"
+      },
+      "created_at": "2026-11-26T20:23:48.328813Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_fdfbab214bd4",
+      "run_id": "run_0edd437ada29",
+      "seq": 38,
+      "event_type": "claims_invalidated",
+      "actor": "claim_graph",
+      "message": "Invalidated 1 dependent claim(s) after change to 'clm_24125382adc6'.",
+      "payload": {
+        "root_claim_id": "clm_24125382adc6",
+        "invalidated_claim_ids": [
+          "clm_a890d25efeaf"
+        ],
+        "reason": "Upstream premise revised."
+      },
+      "created_at": "2026-11-26T20:23:48.329430Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_99618240929b",
+      "run_id": "run_0edd437ada29",
+      "seq": 39,
+      "event_type": "tool_executed",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Arithmetic tool succeeded: allocation - total_cost -> 60000",
+      "payload": {
+        "tool_execution_id": "tlx_105de1abc775",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "60000"
+      },
+      "created_at": "2026-11-26T20:23:48.330967Z",
+      "category": "tool_calls"
+    },
+    {
+      "event_id": "evt_c12c4ea458f7",
+      "run_id": "run_0edd437ada29",
+      "seq": 40,
+      "event_type": "claim_revised",
+      "actor": "agt_7ada29_3_3a2c",
+      "message": "Recorded claim clm_b16c598fd746 version 2.",
+      "payload": {
+        "claim_id": "clm_b16c598fd746",
+        "version": 2,
+        "parent_claim_id": "clm_b16c598fd746"
+      },
+      "created_at": "2026-11-26T20:23:48.331413Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_6f4df5da672f",
+      "run_id": "run_0edd437ada29",
+      "seq": 41,
+      "event_type": "claims_invalidated",
+      "actor": "claim_graph",
+      "message": "Invalidated 1 dependent claim(s) after change to 'clm_b16c598fd746'.",
+      "payload": {
+        "root_claim_id": "clm_b16c598fd746",
+        "invalidated_claim_ids": [
+          "clm_a890d25efeaf"
+        ],
+        "reason": "Upstream premise revised."
+      },
+      "created_at": "2026-11-26T20:23:48.332031Z",
+      "category": "revision"
+    },
+    {
+      "event_id": "evt_4e795b2eb747",
+      "run_id": "run_0edd437ada29",
+      "seq": 42,
+      "event_type": "budget_reserved",
+      "actor": "reviewer_combined",
+      "message": "Reserved budget for review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "reservation_id": "res_f9315cd3e898",
+        "reserved_cost_usd": 0.0,
+        "estimated_input_tokens": 1687,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-26T20:23:48.336538Z",
+      "category": "budget"
+    },
+    {
+      "event_id": "evt_3a518ea14a01",
+      "run_id": "run_0edd437ada29",
+      "seq": 43,
+      "event_type": "model_call_completed",
+      "actor": "reviewer_combined",
+      "message": "Completed review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "provider": "openai_compatible",
+        "model": "openai/gpt-oss-120b",
+        "returned_model": "openai/gpt-oss-120b",
+        "input_tokens": 1261,
+        "output_tokens": 724,
+        "reasoning_tokens": 474,
+        "cached_input_tokens": 0,
+        "total_tokens": 1985,
+        "actual_cost_usd": 0.0,
+        "usage_reported": true,
+        "provider_response_id": "chatcmpl-ae9a1ee8-7e49-4830-8363-b247cb54f6a2",
+        "response_status": null,
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 1928.6185828968883
+      },
+      "created_at": "2026-11-26T20:23:50.266519Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_20fa0ee75872",
+      "run_id": "run_0edd437ada29",
+      "seq": 44,
+      "event_type": "review_completed",
+      "actor": "reviewer_pool",
+      "message": "Completed review round: 2 verdict(s), 0 blocking claim(s).",
+      "payload": {
+        "reviewer_calls": 1,
+        "blocking_claim_ids": []
+      },
+      "created_at": "2026-11-26T20:23:50.269884Z",
+      "category": "review"
+    },
+    {
+      "event_id": "evt_b776b2983f91",
+      "run_id": "run_0edd437ada29",
+      "seq": 45,
+      "event_type": "synthesis_fast_path",
+      "actor": "lead",
+      "message": "Used deterministic claim-locked synthesis fast path without extra model call.",
+      "payload": {
+        "lead_messages_consumed": 0
+      },
+      "created_at": "2026-11-26T20:23:50.273955Z",
+      "category": "synthesis"
+    },
+    {
+      "event_id": "evt_34aa6b91e774",
+      "run_id": "run_0edd437ada29",
+      "seq": 46,
+      "event_type": "honesty_gate_evaluated",
+      "actor": "honesty_gate",
+      "message": "Honesty Gate release_mode=partial, passed=False.",
+      "payload": {
+        "gate_id": "hgt_9283eb4b86b1",
+        "release_mode": "partial",
+        "rejected_segments_count": 0,
+        "rejected_claim_refs_count": 0
+      },
+      "created_at": "2026-11-26T20:23:50.279391Z",
+      "category": "honesty_gate"
+    },
+    {
+      "event_id": "evt_36305100de39",
+      "run_id": "run_0edd437ada29",
+      "seq": 47,
+      "event_type": "stages_executed_summary",
+      "actor": "orchestrator",
+      "message": "Stages executed: planner, dag_workers, peer_messaging, independent_review, targeted_repair, honesty_gate_and_synthesis",
+      "payload": {
+        "stages_executed": [
+          "planner",
+          "dag_workers",
+          "peer_messaging",
+          "independent_review",
+          "targeted_repair",
+          "honesty_gate_and_synthesis"
+        ],
+        "stage_telemetry": {
+          "planner": {
+            "configured": true,
+            "status": "completed"
+          },
+          "dag_workers": {
+            "configured": true,
+            "completed_tasks": 3,
+            "failed_or_blocked_tasks": 0,
+            "status": "completed"
+          },
+          "peer_messaging": {
+            "configured": true,
+            "delivered_messages": 2,
+            "followup_calls": 0,
+            "status": "completed"
+          },
+          "independent_review": {
+            "configured": true,
+            "reviewer_calls": 2,
+            "verdict_count": 7,
+            "status": "completed"
+          },
+          "targeted_repair": {
+            "configured": true,
+            "revision_attempts": 1,
+            "persisted_claim_versions": 2,
+            "accepted_revisions": 2,
+            "status": "completed"
+          },
+          "honesty_gate_and_synthesis": {
+            "configured": true,
+            "synthesis_mode": "deterministic_fast_path",
+            "release_mode": "partial",
+            "status": "completed"
+          }
+        }
+      },
+      "created_at": "2026-11-26T20:23:50.281858Z",
+      "category": "other"
+    },
+    {
+      "event_id": "evt_ca986f3f7aba",
+      "run_id": "run_0edd437ada29",
+      "seq": 48,
+      "event_type": "run_completed",
+      "actor": "lead",
+      "message": "Network run finished with status=partial.",
+      "payload": {
+        "status": "partial",
+        "release_mode": "partial",
+        "latency_ms": 136945.04191703163
+      },
+      "created_at": "2026-11-26T20:23:50.282445Z",
+      "category": "other"
+    }
+  ],
+  "peer_messages": [
+    {
+      "message_id": "msg_a7cade266cc9",
+      "run_id": "run_0edd437ada29",
+      "sender_id": "reviewer_combined",
+      "recipient_id": "agt_7ada29_3_3a2c",
+      "message_type": "clarification",
+      "content": "Revision requested for clm_24125382adc6 v1: Evidence cited is unverified; must reference verified sources or prior claims. Correction: Replace unverified evidence with verified claim references or source data.",
+      "related_claim_ids": [
+        "clm_24125382adc6"
+      ],
+      "delivery_status": "consumed",
+      "created_at": "2026-11-26T20:22:46.704249Z"
+    },
+    {
+      "message_id": "msg_659d6abfcff6",
+      "run_id": "run_0edd437ada29",
+      "sender_id": "reviewer_numbers",
+      "recipient_id": "agt_7ada29_3_3a2c",
+      "message_type": "clarification",
+      "content": "Revision requested for clm_b16c598fd746 v1: Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims. Correction: Bind every variable and empirical constant to grounded provenance aliases.",
+      "related_claim_ids": [
+        "clm_b16c598fd746"
+      ],
+      "delivery_status": "consumed",
+      "created_at": "2026-11-26T20:22:46.705292Z"
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "evd_3e627fe5bcf8",
+      "run_id": "run_0edd437ada29",
+      "source_type": "user_prompt",
+      "source_ref": "up_2",
+      "excerpt": "(2) Compute annual support staffing cost for 3 engineers at $85/hour for 1,920 billable hours each per year;",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7ada29_2_3a4b",
+      "created_by": "agt_7ada29_2_fe84",
+      "created_at": "2026-11-26T20:21:39.455111Z"
+    },
+    {
+      "evidence_id": "evd_0f45ffb9cb1c",
+      "run_id": "run_0edd437ada29",
+      "source_type": "user_prompt",
+      "source_ref": "up_1",
+      "excerpt": "Compute annual cloud infrastructure cost for 240,000,000 API requests/year at $0.15 per 1,000 requests plus $1,200/month fixed platform fees",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7ada29_1_50ce",
+      "created_by": "agt_7ada29_1_74d3",
+      "created_at": "2026-11-26T20:21:40.508429Z"
+    },
+    {
+      "evidence_id": "evd_c96048a83aed",
+      "run_id": "run_0edd437ada29",
+      "source_type": "dependency_finding",
+      "source_ref": "t1",
+      "excerpt": "annual cloud infrastructure cost ... is $50,400.",
+      "reliability": "unverified",
+      "verified_in_input": false,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7ada29_3_fadc",
+      "created_by": "agt_7ada29_3_3a2c",
+      "created_at": "2026-11-26T20:22:43.846029Z"
+    },
+    {
+      "evidence_id": "evd_73dcb298c7ac",
+      "run_id": "run_0edd437ada29",
+      "source_type": "dependency_finding",
+      "source_ref": "t2",
+      "excerpt": "annual staffing cost for three engineers ... is $489,600.",
+      "reliability": "unverified",
+      "verified_in_input": false,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7ada29_3_fadc",
+      "created_by": "agt_7ada29_3_3a2c",
+      "created_at": "2026-11-26T20:22:43.846367Z"
+    },
+    {
+      "evidence_id": "evd_41e6d53654c1",
+      "run_id": "run_0edd437ada29",
+      "source_type": "dependency_finding",
+      "source_ref": "dep_cloud_cost",
+      "excerpt": "The annual cloud infrastructure cost for 240,000,000 API requests, at $0.15 per 1,000 requests plus $1,200 monthly fixed platform fees, is $50,400.",
+      "reliability": "low",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7ada29_3_fadc",
+      "created_by": "agt_7ada29_3_3a2c",
+      "created_at": "2026-11-26T20:23:48.324687Z"
+    },
+    {
+      "evidence_id": "evd_0db4f1f0c00c",
+      "run_id": "run_0edd437ada29",
+      "source_type": "dependency_finding",
+      "source_ref": "dep_staff_cost",
+      "excerpt": "The annual staffing cost for three engineers working 1,920 billable hours each at $85 per hour is $489,600.",
+      "reliability": "low",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7ada29_3_fadc",
+      "created_by": "agt_7ada29_3_3a2c",
+      "created_at": "2026-11-26T20:23:48.325040Z"
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "clm_b91b7e20e0a3",
+      "run_id": "run_0edd437ada29",
+      "statement": "Annual staffing cost = 3 * 1920 * 85 = 489600 USD",
+      "category": "computation",
+      "status": "supported",
+      "verification_status": "computationally_verified",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7ada29_2_fe84",
+      "task_id": "tsk_7ada29_2_3a4b",
+      "evidence_ids": [
+        "evd_3e627fe5bcf8"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_5e9a6584dbe5"
+      ],
+      "requirement_refs": [
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-26T20:21:39.455885Z",
+      "updated_at": "2026-11-26T20:22:46.698887Z"
+    },
+    {
+      "claim_id": "clm_dfff18424851",
+      "run_id": "run_0edd437ada29",
+      "statement": "Annual cloud infrastructure cost is $50,400.",
+      "category": "computation",
+      "status": "supported",
+      "verification_status": "computationally_verified",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7ada29_1_74d3",
+      "task_id": "tsk_7ada29_1_50ce",
+      "evidence_ids": [
+        "evd_0f45ffb9cb1c"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_719e7c95c8d3"
+      ],
+      "requirement_refs": [
+        "req_1"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-26T20:21:40.509177Z",
+      "updated_at": "2026-11-26T20:22:46.699173Z"
+    },
+    {
+      "claim_id": "clm_24125382adc6",
+      "run_id": "run_0edd437ada29",
+      "statement": "Total annual cost = $540,000 USD.",
+      "category": "computation",
+      "status": "rejected",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "evidence_ids": [
+        "evd_c96048a83aed",
+        "evd_73dcb298c7ac"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_faf448d21344"
+      ],
+      "requirement_refs": [
+        "req_3"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": null,
+      "is_material": true,
+      "created_at": "2026-11-26T20:22:43.846683Z",
+      "updated_at": "2026-11-26T20:22:46.699358Z"
+    },
+    {
+      "claim_id": "clm_24125382adc6",
+      "run_id": "run_0edd437ada29",
+      "statement": "Total annual cost = 540000 USD.",
+      "category": "computation",
+      "status": "supported",
+      "verification_status": "computationally_verified",
+      "version": 2,
+      "parent_claim_id": "clm_24125382adc6",
+      "author_agent_id": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "evidence_ids": [
+        "evd_c96048a83aed",
+        "evd_73dcb298c7ac",
+        "evd_41e6d53654c1",
+        "evd_0db4f1f0c00c"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_240adda0d333"
+      ],
+      "requirement_refs": [
+        "req_3"
+      ],
+      "assumptions": [],
+      "revision_notes": "Recomputed total using verified cloud ($50,400) and staffing ($489,600) figures.",
+      "confidence": null,
+      "is_material": true,
+      "created_at": "2026-11-26T20:22:43.846683Z",
+      "updated_at": "2026-11-26T20:23:50.269298Z"
+    },
+    {
+      "claim_id": "clm_b16c598fd746",
+      "run_id": "run_0edd437ada29",
+      "statement": "Remaining budget = $60,000 USD.",
+      "category": "computation",
+      "status": "rejected",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "evidence_ids": [],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_ef741358402e"
+      ],
+      "requirement_refs": [
+        "req_3"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": null,
+      "is_material": true,
+      "created_at": "2026-11-26T20:22:43.847160Z",
+      "updated_at": "2026-11-26T20:22:43.855082Z"
+    },
+    {
+      "claim_id": "clm_b16c598fd746",
+      "run_id": "run_0edd437ada29",
+      "statement": "Remaining budget = 60000 USD.",
+      "category": "computation",
+      "status": "supported",
+      "verification_status": "computationally_verified",
+      "version": 2,
+      "parent_claim_id": "clm_b16c598fd746",
+      "author_agent_id": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "evidence_ids": [],
+      "depends_on_claim_ids": [
+        "clm_24125382adc6"
+      ],
+      "premise_refs": [
+        {
+          "claim_id": "clm_24125382adc6",
+          "claim_version": 2
+        }
+      ],
+      "tool_execution_ids": [
+        "tlx_105de1abc775"
+      ],
+      "requirement_refs": [
+        "req_3"
+      ],
+      "assumptions": [],
+      "revision_notes": "Calculated remaining budget using allocation $600,000 and revised total cost $540,000.",
+      "confidence": null,
+      "is_material": true,
+      "created_at": "2026-11-26T20:22:43.847160Z",
+      "updated_at": "2026-11-26T20:23:50.269600Z"
+    },
+    {
+      "claim_id": "clm_a890d25efeaf",
+      "run_id": "run_0edd437ada29",
+      "statement": "The plan stays under budget.",
+      "category": "logical_inference",
+      "status": "stale",
+      "verification_status": "stale_pending_review",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "evidence_ids": [],
+      "depends_on_claim_ids": [
+        "clm_24125382adc6",
+        "clm_b16c598fd746"
+      ],
+      "premise_refs": [
+        {
+          "claim_id": "clm_24125382adc6",
+          "claim_version": 1
+        },
+        {
+          "claim_id": "clm_b16c598fd746",
+          "claim_version": 1
+        }
+      ],
+      "tool_execution_ids": [],
+      "requirement_refs": [
+        "req_3"
+      ],
+      "assumptions": [],
+      "revision_notes": "Stale due to upstream premise 'clm_b16c598fd746': Upstream premise revised.",
+      "confidence": null,
+      "is_material": true,
+      "created_at": "2026-11-26T20:22:43.847518Z",
+      "updated_at": "2026-11-26T20:23:48.331903Z"
+    }
+  ],
+  "review_verdicts": [
+    {
+      "verdict_id": "vrd_3c1ab38b36ba",
+      "run_id": "run_0edd437ada29",
+      "claim_id": "clm_b16c598fd746",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_numbers",
+      "review_dimension": "numbers",
+      "decision": "needs_revision",
+      "rationale": "Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims.",
+      "evidence_refs": [],
+      "required_correction": "Bind every variable and empirical constant to grounded provenance aliases.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Ungrounded arithmetic inputs or inline constants"
+      ],
+      "created_at": "2026-11-26T20:22:43.854609Z"
+    },
+    {
+      "verdict_id": "vrd_a7c839541fc8",
+      "run_id": "run_0edd437ada29",
+      "claim_id": "clm_a890d25efeaf",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_consistency",
+      "review_dimension": "consistency",
+      "decision": "needs_revision",
+      "rationale": "Depends on premise 'clm_b16c598fd746' v1 whose current state is 'rejected'.",
+      "evidence_refs": [],
+      "required_correction": "Revise or re-ground conclusion on current verified premises.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Unverified, stale, or superseded premise dependency"
+      ],
+      "created_at": "2026-11-26T20:22:43.856152Z"
+    },
+    {
+      "verdict_id": "vrd_d5212ebc9a97",
+      "run_id": "run_0edd437ada29",
+      "claim_id": "clm_b91b7e20e0a3",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "Computation matches requirement and tool output; evidence verified.",
+      "evidence_refs": [
+        "evd_3e627fe5bcf8"
+      ],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-26T20:22:46.697023Z"
+    },
+    {
+      "verdict_id": "vrd_e185b3c8e2fc",
+      "run_id": "run_0edd437ada29",
+      "claim_id": "clm_dfff18424851",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "Cost calculation correct; evidence verified and matches tool execution.",
+      "evidence_refs": [
+        "evd_0f45ffb9cb1c"
+      ],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-26T20:22:46.697310Z"
+    },
+    {
+      "verdict_id": "vrd_6003526f08ab",
+      "run_id": "run_0edd437ada29",
+      "claim_id": "clm_24125382adc6",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "needs_revision",
+      "rationale": "Evidence cited is unverified; must reference verified sources or prior claims.",
+      "evidence_refs": [
+        "evd_c96048a83aed",
+        "evd_73dcb298c7ac"
+      ],
+      "required_correction": "Replace unverified evidence with verified claim references or source data.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Replace unverified evidence with verified claim references or source data."
+      ],
+      "created_at": "2026-11-26T20:22:46.697588Z"
+    },
+    {
+      "verdict_id": "vrd_3b4c05837746",
+      "run_id": "run_0edd437ada29",
+      "claim_id": "clm_24125382adc6",
+      "claim_version": 2,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "Sum of verified cloud ($50,400) and staffing ($489,600) costs matches $540,000 total.",
+      "evidence_refs": [
+        "evd_41e6d53654c1",
+        "evd_0db4f1f0c00c"
+      ],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-26T20:23:50.267392Z"
+    },
+    {
+      "verdict_id": "vrd_5081f5a1f3be",
+      "run_id": "run_0edd437ada29",
+      "claim_id": "clm_b16c598fd746",
+      "claim_version": 2,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "Allocation $600,000 minus approved total $540,000 yields $60,000 remaining.",
+      "evidence_refs": [],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-26T20:23:50.267953Z"
+    }
+  ],
+  "tool_executions": [
+    {
+      "tool_execution_id": "tlx_5e9a6584dbe5",
+      "run_id": "run_0edd437ada29",
+      "tool_name": "arithmetic",
+      "actor": "agt_7ada29_2_fe84",
+      "task_id": "tsk_7ada29_2_3a4b",
+      "expression": "engineers * hours_per_engineer * rate",
+      "variables": {
+        "engineers": "3",
+        "hours_per_engineer": "1920",
+        "rate": "85"
+      },
+      "input_provenance_refs": {
+        "engineers": "up_2",
+        "hours_per_engineer": "up_2",
+        "rate": "up_2"
+      },
+      "provenance_details": {
+        "engineers": {
+          "ref": "up_2",
+          "kind": "prompt_span",
+          "resolved_id": "up_2",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "hours_per_engineer": {
+          "ref": "up_2",
+          "kind": "prompt_span",
+          "resolved_id": "up_2",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "rate": {
+          "ref": "up_2",
+          "kind": "prompt_span",
+          "resolved_id": "up_2",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "489600",
+      "computed_result": "489600",
+      "units": "USD",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-26T20:21:39.452490Z"
+    },
+    {
+      "tool_execution_id": "tlx_719e7c95c8d3",
+      "run_id": "run_0edd437ada29",
+      "tool_name": "arithmetic",
+      "actor": "agt_7ada29_1_74d3",
+      "task_id": "tsk_7ada29_1_50ce",
+      "expression": "(requests/1000 * rate_per_1000) + (monthly_fee * 12)",
+      "variables": {
+        "requests": "240000000",
+        "rate_per_1000": "0.15",
+        "monthly_fee": "1200"
+      },
+      "input_provenance_refs": {
+        "requests": "up_1",
+        "rate_per_1000": "up_1",
+        "monthly_fee": "up_1"
+      },
+      "provenance_details": {
+        "requests": {
+          "ref": "up_1",
+          "kind": "prompt_span",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "rate_per_1000": {
+          "ref": "up_1",
+          "kind": "prompt_span",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "monthly_fee": {
+          "ref": "up_1",
+          "kind": "prompt_span",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "50400",
+      "computed_result": "50400",
+      "units": "USD",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-26T20:21:40.505067Z"
+    },
+    {
+      "tool_execution_id": "tlx_faf448d21344",
+      "run_id": "run_0edd437ada29",
+      "tool_name": "arithmetic",
+      "actor": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "expression": "cloud_cost + staffing_cost",
+      "variables": {
+        "cloud_cost": "50400",
+        "staffing_cost": "489600"
+      },
+      "input_provenance_refs": {
+        "cloud_cost": "clm_dfff18424851",
+        "staffing_cost": "clm_b91b7e20e0a3"
+      },
+      "provenance_details": {
+        "cloud_cost": {
+          "ref": "clm_dfff18424851",
+          "kind": "supported_claim",
+          "resolved_id": "clm_dfff18424851@v1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "staffing_cost": {
+          "ref": "clm_b91b7e20e0a3",
+          "kind": "supported_claim",
+          "resolved_id": "clm_b91b7e20e0a3@v1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "540000",
+      "computed_result": "540000",
+      "units": "USD",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-26T20:22:43.844096Z"
+    },
+    {
+      "tool_execution_id": "tlx_ef741358402e",
+      "run_id": "run_0edd437ada29",
+      "tool_name": "arithmetic",
+      "actor": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "expression": "allocation - total_cost",
+      "variables": {
+        "allocation": "600000",
+        "total_cost": "540000"
+      },
+      "input_provenance_refs": {
+        "allocation": "up_3",
+        "total_cost": "clm_0"
+      },
+      "provenance_details": {
+        "allocation": {
+          "ref": "up_3",
+          "kind": "prompt_span",
+          "resolved_id": "up_3",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "total_cost": {
+          "ref": "clm_0",
+          "kind": "unknown",
+          "grounded": false,
+          "note": "Fabricated or unknown provenance target 'clm_0'."
+        }
+      },
+      "proposed_result": "60000",
+      "computed_result": "60000",
+      "units": "USD",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": false,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-26T20:22:43.845396Z"
+    },
+    {
+      "tool_execution_id": "tlx_240adda0d333",
+      "run_id": "run_0edd437ada29",
+      "tool_name": "arithmetic",
+      "actor": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "expression": "cloud_cost + staff_cost",
+      "variables": {
+        "cloud_cost": "50400",
+        "staff_cost": "489600"
+      },
+      "input_provenance_refs": {
+        "cloud_cost": "const:50400",
+        "staff_cost": "const:489600"
+      },
+      "provenance_details": {
+        "cloud_cost": {
+          "ref": "const:50400",
+          "kind": "constant",
+          "resolved_id": "50400",
+          "grounded": true,
+          "note": "Explicit mathematical constant: 50400"
+        },
+        "staff_cost": {
+          "ref": "const:489600",
+          "kind": "constant",
+          "resolved_id": "489600",
+          "grounded": true,
+          "note": "Explicit mathematical constant: 489600"
+        }
+      },
+      "proposed_result": "540000",
+      "computed_result": "540000",
+      "units": "",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-26T20:23:48.328129Z"
+    },
+    {
+      "tool_execution_id": "tlx_105de1abc775",
+      "run_id": "run_0edd437ada29",
+      "tool_name": "arithmetic",
+      "actor": "agt_7ada29_3_3a2c",
+      "task_id": "tsk_7ada29_3_fadc",
+      "expression": "allocation - total_cost",
+      "variables": {
+        "allocation": "600000",
+        "total_cost": "540000"
+      },
+      "input_provenance_refs": {
+        "allocation": "const:600000",
+        "total_cost": "clm_24125382adc6"
+      },
+      "provenance_details": {
+        "allocation": {
+          "ref": "const:600000",
+          "kind": "constant",
+          "resolved_id": "600000",
+          "grounded": true,
+          "note": "Explicit mathematical constant: 600000"
+        },
+        "total_cost": {
+          "ref": "clm_24125382adc6",
+          "kind": "supported_claim",
+          "resolved_id": "clm_24125382adc6@v2",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "60000",
+      "computed_result": "60000",
+      "units": "",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-26T20:23:48.330741Z"
+    }
+  ],
+  "honesty_gate": {
+    "gate_id": "hgt_9283eb4b86b1",
+    "run_id": "run_0edd437ada29",
+    "passed": false,
+    "release_mode": "partial",
+    "rejected_segments": [],
+    "rejected_claim_refs": [],
+    "reasons": [
+      "Filtered assumption: Auxiliary field introduces unverified number(s): [Decimal('40'), Decimal('48')]."
+    ],
+    "verification_summary": {
+      "material_claim_count": 5,
+      "supported_claim_count": 4,
+      "unresolved_claim_count": 0,
+      "rejected_claim_count": 0,
+      "stale_claim_count": 1,
+      "revision_count": 2,
+      "evidence_types": {
+        "user_prompt": 2,
+        "dependency_finding": 4
+      },
+      "review_completeness": 1.0,
+      "requirement_coverage": 1.0,
+      "requirements_answered": 3,
+      "requirements_partial": 0,
+      "requirements_unresolved": 0,
+      "requirements_missing": 0,
+      "requirement_statuses": [
+        {
+          "requirement_id": "req_1",
+          "text": "Compute annual cloud infrastructure cost for 240,000,000 API requests/year at $0.15 per 1,000 requests plus $1,200/month fixed platform fees.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_dfff18424851",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_2",
+          "text": "Compute annual support staffing cost for 3 engineers at $85/hour for 1,920 billable hours each per year.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_b91b7e20e0a3",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_3",
+          "text": "Determine total annual cost, remaining budget from $600,000, and state whether the plan stays under budget.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_24125382adc6",
+              "claim_version": 2
+            },
+            {
+              "claim_id": "clm_b16c598fd746",
+              "claim_version": 2
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        }
+      ],
+      "execution_completed": true,
+      "release_checks_executed": true,
+      "content_released_safely": false,
+      "coverage_methodology": "internal_claim_linkage_not_independent_grade",
+      "independent_grade": null,
+      "honesty_gate_passed": false,
+      "honesty_gate_reasons": [
+        "Filtered assumption: Auxiliary field introduces unverified number(s): [Decimal('40'), Decimal('48')]."
+      ]
+    },
+    "created_at": "2026-11-26T20:23:50.277698Z"
+  },
+  "final_result": {
+    "run_id": "run_0edd437ada29",
+    "mode": "network",
+    "status": "partial",
+    "prompt": "Evaluate a 12-month cloud migration and staffing plan: (1) Compute annual cloud infrastructure cost for 240,000,000 API requests/year at $0.15 per 1,000 requests plus $1,200/month fixed platform fees; (2) Compute annual support staffing cost for 3 engineers at $85/hour for 1,920 billable hours each per year; (3) Determine the total annual cost and remaining budget out of a $600,000 annual allocation, and state whether the plan stays under budget.",
+    "provider": "openai_compatible",
+    "model": "openai/gpt-oss-120b",
+    "returned_model": "openai/gpt-oss-120b",
+    "answer": "**Verified Findings:**\n- Annual staffing cost = 3 * 1920 * 85 = 489600 USD [clm_b91b7e20e0a3@v1]\n- Annual cloud infrastructure cost is $50,400. [clm_dfff18424851@v1]\n- Total annual cost = 540000 USD. [clm_24125382adc6@v2]\n- Remaining budget = 60000 USD. [clm_b16c598fd746@v2]\n\n**Unresolved / Withheld Items:**\n- Stale pending re-review (clm_a890d25efeaf v1) withheld.",
+    "missing_information": [],
+    "assumptions": [
+      "All months have equal fixed platform fees; no discounts or volume pricing apply."
+    ],
+    "confidence_notes": "Verification: 4/5 material claims supported, 0 unresolved, 0 rejected, 1 stale, 2 revision(s). Execution completed: True; checks safely passed: False; internal requirement linkage: 100% (3 answered, 0 partial, 0 unresolved, 0 missing \u2014 not an independent grade); review completeness: 100%. Honesty Gate: partial (passed=False). Gate filters: Filtered assumption: Auxiliary field introduces unverified number(s): [Decimal('40'), Decimal('48')]. Note: automated review and arithmetic verification constrain unsupported releases but remain fallible and do not guarantee empirical truth.",
+    "referenced_claim_ids": [
+      "clm_b91b7e20e0a3",
+      "clm_dfff18424851",
+      "clm_24125382adc6",
+      "clm_b16c598fd746"
+    ],
+    "specialist_roles": [
+      "Cloud Cost Analyst",
+      "Staffing Cost Analyst",
+      "Budget Aggregator"
+    ],
+    "incomplete_tasks": [],
+    "synthesis_mode": "deterministic_fast_path",
+    "baseline_mode": null,
+    "verification": {
+      "material_claim_count": 5,
+      "supported_claim_count": 4,
+      "unresolved_claim_count": 0,
+      "rejected_claim_count": 0,
+      "stale_claim_count": 1,
+      "revision_count": 2,
+      "evidence_types": {
+        "user_prompt": 2,
+        "dependency_finding": 4
+      },
+      "review_completeness": 1.0,
+      "requirement_coverage": 1.0,
+      "requirements_answered": 3,
+      "requirements_partial": 0,
+      "requirements_unresolved": 0,
+      "requirements_missing": 0,
+      "requirement_statuses": [
+        {
+          "requirement_id": "req_1",
+          "text": "Compute annual cloud infrastructure cost for 240,000,000 API requests/year at $0.15 per 1,000 requests plus $1,200/month fixed platform fees.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_dfff18424851",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_2",
+          "text": "Compute annual support staffing cost for 3 engineers at $85/hour for 1,920 billable hours each per year.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_b91b7e20e0a3",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_3",
+          "text": "Determine total annual cost, remaining budget from $600,000, and state whether the plan stays under budget.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_24125382adc6",
+              "claim_version": 2
+            },
+            {
+              "claim_id": "clm_b16c598fd746",
+              "claim_version": 2
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        }
+      ],
+      "execution_completed": true,
+      "release_checks_executed": true,
+      "content_released_safely": false,
+      "coverage_methodology": "internal_claim_linkage_not_independent_grade",
+      "independent_grade": null,
+      "honesty_gate_passed": false,
+      "honesty_gate_reasons": [
+        "Filtered assumption: Auxiliary field introduces unverified number(s): [Decimal('40'), Decimal('48')]."
+      ]
+    },
+    "usage": {
+      "input_tokens": 11455,
+      "output_tokens": 8389,
+      "reasoning_tokens": 0,
+      "cached_input_tokens": 0,
+      "total_tokens": 19844,
+      "estimated_cost_usd": 0.0,
+      "actual_cost_usd": 0.0,
+      "model_calls": 7,
+      "successful_operations": 7,
+      "retries": 0,
+      "latency_ms": 138514.57912381738,
+      "usage_reported": true,
+      "returned_model": null,
+      "provider_response_id": null,
+      "response_status": null,
+      "incomplete_reason": null
+    },
+    "latency_ms": 136945.04191703163,
+    "error": null,
+    "created_at": "2026-11-26T20:21:33.340644Z",
+    "completed_at": "2026-11-26T20:23:50.282404Z"
+  },
+  "topology": {
+    "nodes": [
+      {
+        "id": "agt_7ada29_1_74d3",
+        "label": "Cloud Cost Analyst",
+        "sublabel": "",
+        "node_type": "specialist",
+        "status": "completed",
+        "model": "openai/gpt-oss-120b",
+        "task_ids": [
+          "tsk_7ada29_1_50ce"
+        ],
+        "tasks": [
+          {
+            "task_id": "tsk_7ada29_1_50ce",
+            "task_ref": "t1",
+            "run_id": "run_0edd437ada29",
+            "plan_id": "pln_c413f9d2063d",
+            "title": "Calculate Annual Cloud Infrastructure Cost",
+            "description": "Use 240,000,000 API requests per year, $0.15 per 1,000 requests, and $1,200 monthly fixed fees to compute the total cloud cost for one year.",
+            "assigned_agent_id": "agt_7ada29_1_74d3",
+            "depends_on": [],
+            "expected_outputs": [
+              "annual_cloud_cost"
+            ],
+            "acceptance_criteria": [
+              "Cost includes both per\u2011request charges and monthly platform fees.",
+              "Result is expressed in USD and rounded to the nearest dollar."
+            ],
+            "status": "completed",
+            "findings": "The annual cloud infrastructure cost for 240,000,000 API requests, at $0.15 per 1,000 requests plus $1,200 monthly fixed platform fees, is $50,400.",
+            "error": null,
+            "created_by": "lead",
+            "created_at": "2026-11-26T20:21:37.252011Z",
+            "started_at": "2026-11-26T20:21:37.332405Z",
+            "completed_at": "2026-11-26T20:21:40.511611Z"
+          }
+        ]
+      },
+      {
+        "id": "agt_7ada29_2_fe84",
+        "label": "Staffing Cost Analyst",
+        "sublabel": "",
+        "node_type": "specialist",
+        "status": "completed",
+        "model": "openai/gpt-oss-120b",
+        "task_ids": [
+          "tsk_7ada29_2_3a4b"
+        ],
+        "tasks": [
+          {
+            "task_id": "tsk_7ada29_2_3a4b",
+            "task_ref": "t2",
+            "run_id": "run_0edd437ada29",
+            "plan_id": "pln_c413f9d2063d",
+            "title": "Calculate Annual Staffing Cost",
+            "description": "Compute the yearly cost for 3 engineers each working 1,920 billable hours at $85 per hour.",
+            "assigned_agent_id": "agt_7ada29_2_fe84",
+            "depends_on": [],
+            "expected_outputs": [
+              "annual_staffing_cost"
+            ],
+            "acceptance_criteria": [
+              "Cost is expressed in USD and rounded to the nearest dollar."
+            ],
+            "status": "completed",
+            "findings": "The annual staffing cost for three engineers working 1,920 billable hours each at $85 per hour is $489,600.",
+            "error": null,
+            "created_by": "lead",
+            "created_at": "2026-11-26T20:21:37.252028Z",
+            "started_at": "2026-11-26T20:21:37.338649Z",
+            "completed_at": "2026-11-26T20:21:39.457610Z"
+          }
+        ]
+      },
+      {
+        "id": "agt_7ada29_3_3a2c",
+        "label": "Budget Aggregator",
+        "sublabel": "",
+        "node_type": "specialist",
+        "status": "completed",
+        "model": "openai/gpt-oss-120b",
+        "task_ids": [
+          "tsk_7ada29_3_fadc"
+        ],
+        "tasks": [
+          {
+            "task_id": "tsk_7ada29_3_fadc",
+            "task_ref": "t3",
+            "run_id": "run_0edd437ada29",
+            "plan_id": "pln_c413f9d2063d",
+            "title": "Aggregate Costs and Determine Budget Status",
+            "description": "Add the cloud infrastructure cost and staffing cost, compare the sum to the $600,000 allocation, and report remaining budget and whether the plan is under or over budget.",
+            "assigned_agent_id": "agt_7ada29_3_3a2c",
+            "depends_on": [
+              "tsk_7ada29_1_50ce",
+              "tsk_7ada29_2_3a4b"
+            ],
+            "expected_outputs": [
+              "total_annual_cost",
+              "remaining_budget",
+              "budget_status"
+            ],
+            "acceptance_criteria": [
+              "Total cost equals the sum of cloud and staffing costs.",
+              "Remaining budget = $600,000 \u2013 total cost.",
+              "Budget status clearly states \"under budget\" if remaining budget \u2265 0, otherwise \"over budget\"."
+            ],
+            "status": "completed",
+            "findings": "Annual cloud infrastructure cost is $50,400 and annual staffing cost is $489,600. Total annual cost = $540,000. Remaining budget from the $600,000 allocation = $60,000. Budget status: under budget.",
+            "error": null,
+            "created_by": "lead",
+            "created_at": "2026-11-26T20:21:37.252044Z",
+            "started_at": "2026-11-26T20:21:40.513805Z",
+            "completed_at": "2026-11-26T20:22:43.848925Z"
+          }
+        ]
+      },
+      {
+        "id": "reviewer_combined",
+        "label": "reviewer_combined",
+        "sublabel": "5 verdict(s)",
+        "node_type": "reviewer",
+        "status": "completed",
+        "model": "openai/gpt-oss-120b",
+        "task_ids": [],
+        "tasks": []
+      },
+      {
+        "id": "reviewer_consistency",
+        "label": "reviewer_consistency",
+        "sublabel": "1 verdict(s)",
+        "node_type": "reviewer",
+        "status": "completed",
+        "model": "openai/gpt-oss-120b",
+        "task_ids": [],
+        "tasks": []
+      },
+      {
+        "id": "reviewer_numbers",
+        "label": "reviewer_numbers",
+        "sublabel": "1 verdict(s)",
+        "node_type": "reviewer",
+        "status": "completed",
+        "model": "openai/gpt-oss-120b",
+        "task_ids": [],
+        "tasks": []
+      },
+      {
+        "id": "honesty_gate",
+        "label": "Honesty Gate",
+        "sublabel": "mode: partial",
+        "node_type": "gate",
+        "status": "blocked",
+        "model": null,
+        "task_ids": [],
+        "tasks": []
+      }
+    ],
+    "edges": [
+      {
+        "source": "agt_7ada29_1_74d3",
+        "target": "agt_7ada29_3_3a2c",
+        "edge_type": "task_dependency",
+        "label": "tsk_7ada29_1_50ce -> tsk_7ada29_3_fadc"
+      },
+      {
+        "source": "agt_7ada29_2_fe84",
+        "target": "agt_7ada29_3_3a2c",
+        "edge_type": "task_dependency",
+        "label": "tsk_7ada29_2_3a4b -> tsk_7ada29_3_fadc"
+      },
+      {
+        "source": "reviewer_combined",
+        "target": "agt_7ada29_3_3a2c",
+        "edge_type": "peer_message",
+        "label": "clarification"
+      },
+      {
+        "source": "reviewer_numbers",
+        "target": "agt_7ada29_3_3a2c",
+        "edge_type": "peer_message",
+        "label": "clarification"
+      }
+    ]
+  }
+}

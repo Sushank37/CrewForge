@@ -1,53 +1,63 @@
 import { describe, expect, it } from "vitest";
+import fullRecordedTrace from "./fixtures/run_0edd437ada29.json";
 import {
   OFFICE_DOOR,
+  REVIEW_BAY,
   SPECIALIST_DESKS,
   applyTraceToOffice,
+  classifyReleaseOutcome,
   createInitialOfficeState,
   stepOfficeSimulation,
 } from "./officeEngine";
 import type { TracePayload } from "../types";
 
-describe("2D Office Animation Engine (run_0edd437ada29 lifecycle)", () => {
-  it("spawns specialists at the door, batches handovers/messages/revisions, and walks smoothly", () => {
-    const trace: TracePayload = {
-      run_id: "run_0edd437ada29",
+describe("2D Office Animation Engine (complete recorded run_0edd437ada29 trace)", () => {
+  it("replays all 48 persisted events, routes messages strictly by persisted IDs, and distinguishes partial release", () => {
+    const trace = fullRecordedTrace as unknown as TracePayload;
+    expect(trace.execution_events.length).toBe(48);
+
+    const s0 = createInitialOfficeState();
+    const s1 = applyTraceToOffice(s0, trace, false, 1000);
+
+    // All 3 dynamic specialists spawn at entrance door targeting their desks
+    expect(s1.actors.agt_7ada29_1_74d3.x).toBe(OFFICE_DOOR.x);
+    expect(s1.actors.agt_7ada29_1_74d3.targetX).toBe(SPECIALIST_DESKS[0].x);
+    expect(s1.actors.agt_7ada29_2_fe84.targetX).toBe(SPECIALIST_DESKS[1].x);
+    expect(s1.actors.agt_7ada29_3_3a2c.targetX).toBe(SPECIALIST_DESKS[2].x);
+
+    // Exactly 2 message packets corresponding to seq 29 & 30 (never invented from messages_delivered)
+    const msgPackets = s1.packets.filter((p) => p.kind === "message");
+    expect(msgPackets.length).toBe(2);
+    for (const pkt of msgPackets) {
+      expect(pkt.fromX).toBe(REVIEW_BAY.x);
+      expect(pkt.toX).toBe(SPECIALIST_DESKS[2].x);
+    }
+
+    // run_0edd437ada29 is a Partial Verified Release (4 supported claims, 1 stale withheld), NOT blocked
+    expect(classifyReleaseOutcome(trace)).toBe("partial");
+    expect(s1.actors.lead.pose).toBe("completed");
+    expect(s1.actors.reviewer.pose).toBe("reviewing");
+
+    // Simulation steps specialists smoothly toward their desks
+    const { next: s2, hasMotion } = stepOfficeSimulation(s1, 0.5, 1500);
+    expect(hasMotion).toBe(true);
+    expect(s2.actors.agt_7ada29_1_74d3.x).toBeGreaterThan(OFFICE_DOOR.x);
+  });
+
+  it("never invents a communication path when message_sent lacks an explicit recipient", () => {
+    const s0 = createInitialOfficeState();
+    const traceMissingRecipient: TracePayload = {
+      run_id: "run_no_recip",
       mode: "network",
       status: "running",
       provider: "openai_compatible",
       model: "openai/gpt-oss-120b",
       is_historical_replay: false,
-      roster: [
-        { agent_id: "agt_7ada29_1_74d3", role: "Cloud Cost Analyst" },
-        { agent_id: "agt_7ada29_2_fe84", role: "Staffing Cost Analyst" },
-        { agent_id: "agt_7ada29_3_3a2c", role: "Budget Aggregator" },
-      ],
-      tasks: [
-        {
-          task_id: "tsk_1",
-          assigned_agent_id: "agt_7ada29_1_74d3",
-          status: "completed",
-        },
-        {
-          task_id: "tsk_2",
-          assigned_agent_id: "agt_7ada29_2_fe84",
-          status: "completed",
-        },
-        {
-          task_id: "tsk_3",
-          assigned_agent_id: "agt_7ada29_3_3a2c",
-          depends_on_task_ids: ["tsk_1", "tsk_2"],
-          status: "running",
-        },
-      ],
+      roster: [{ agent_id: "agt_1", role: "Analyst" }],
+      tasks: [],
       execution_events: [
-        { seq: 1, event_type: "run_started", actor: "lead", message: "Started" },
-        { seq: 4, event_type: "plan_created", actor: "lead", message: "3 specialists" },
-        { seq: 5, event_type: "task_started", actor: "agt_7ada29_1_74d3" },
-        { seq: 6, event_type: "task_started", actor: "agt_7ada29_2_fe84" },
-        { seq: 12, event_type: "task_completed", actor: "agt_7ada29_2_fe84" },
-        { seq: 29, event_type: "message_sent", actor: "reviewer_combined", message: "Sent clarification message to agt_7ada29_3_3a2c." },
-        { seq: 37, event_type: "claim_revised", actor: "agt_7ada29_3_3a2c" },
+        { seq: 1, event_type: "message_sent", actor: "agt_1", payload: {} },
+        { seq: 2, event_type: "messages_delivered", actor: "agt_1", payload: {} },
       ],
       peer_messages: [],
       evidence: [],
@@ -55,27 +65,58 @@ describe("2D Office Animation Engine (run_0edd437ada29 lifecycle)", () => {
       review_verdicts: [],
       tool_executions: [],
     };
+    const s1 = applyTraceToOffice(s0, traceMissingRecipient, true, 1000);
+    expect(s1.packets.filter((p) => p.kind === "message").length).toBe(0);
+  });
 
-    const s0 = createInitialOfficeState();
-    const s1 = applyTraceToOffice(s0, trace, true, 1000, false);
+  it("distinguishes full, partial, and completely blocked release outcomes", () => {
+    const base: TracePayload = {
+      run_id: "run_outcomes",
+      mode: "network",
+      status: "completed",
+      provider: "openai_compatible",
+      model: "openai/gpt-oss-120b",
+      is_historical_replay: false,
+      roster: [],
+      tasks: [],
+      execution_events: [],
+      peer_messages: [],
+      evidence: [],
+      claims: [],
+      review_verdicts: [],
+      tool_executions: [],
+    };
 
-    // All 3 specialists spawn at OFFICE_DOOR and target their respective desks
-    expect(s1.actors.agt_7ada29_1_74d3.x).toBe(OFFICE_DOOR.x);
-    expect(s1.actors.agt_7ada29_1_74d3.targetX).toBe(SPECIALIST_DESKS[0].x);
-    expect(s1.actors.agt_7ada29_2_fe84.targetX).toBe(SPECIALIST_DESKS[1].x);
-    expect(s1.actors.agt_7ada29_3_3a2c.targetX).toBe(SPECIALIST_DESKS[2].x);
+    expect(
+      classifyReleaseOutcome({
+        ...base,
+        honesty_gate: { passed: true, release_mode: "full" },
+      })
+    ).toBe("full");
 
-    // Batch events generated task, result, message, and revision packets without dropping any
-    const kinds = new Set(s1.packets.map((p) => p.kind));
-    expect(kinds.has("task")).toBe(true);
-    expect(kinds.has("result")).toBe(true);
-    expect(kinds.has("message")).toBe(true);
-    expect(kinds.has("revision")).toBe(true);
+    expect(
+      classifyReleaseOutcome({
+        ...base,
+        status: "partial",
+        honesty_gate: {
+          passed: false,
+          release_mode: "partial",
+          verification_summary: { supported_claim_count: 3 },
+        },
+      })
+    ).toBe("partial");
 
-    // Stepping simulation moves specialists toward their desks
-    const { next: s2, hasMotion } = stepOfficeSimulation(s1, 0.5, 1500);
-    expect(hasMotion).toBe(true);
-    expect(s2.actors.agt_7ada29_1_74d3.x).toBeGreaterThan(OFFICE_DOOR.x);
+    expect(
+      classifyReleaseOutcome({
+        ...base,
+        status: "partial",
+        honesty_gate: {
+          passed: false,
+          release_mode: "blocked",
+          verification_summary: { supported_claim_count: 0 },
+        },
+      })
+    ).toBe("blocked");
   });
 
   it("switches characters to honest waiting pose during provider quota waits", () => {
@@ -100,7 +141,7 @@ describe("2D Office Animation Engine (run_0edd437ada29 lifecycle)", () => {
       tool_executions: [],
     };
 
-    const s1 = applyTraceToOffice(s0, waitingTrace, true, 2000, false);
+    const s1 = applyTraceToOffice(s0, waitingTrace, true, 2000);
     expect(s1.actors.lead.pose).toBe("waiting");
     expect(s1.actors.lead.bubble).toContain("42.5s");
   });

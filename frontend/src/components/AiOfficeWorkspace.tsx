@@ -10,9 +10,11 @@ import {
   REVIEW_BAY,
   SPECIALIST_DESKS,
   applyTraceToOffice,
+  classifyReleaseOutcome,
   createInitialOfficeState,
   stepOfficeSimulation,
 } from "../office/officeEngine";
+import type { ReleaseOutcome } from "../office/officeEngine";
 import type { TracePayload } from "../types";
 
 interface AiOfficeProps {
@@ -22,19 +24,13 @@ interface AiOfficeProps {
 }
 
 export function isVerificationBlocked(trace: TracePayload | null): boolean {
-  if (!trace) return false;
-  const status = String(trace.status || "").toLowerCase();
-  if (status === "failed" || status === "cancelled") return true;
-  const gate = trace.honesty_gate;
-  if (gate && (gate.passed === false || String(gate.release_mode).toLowerCase() === "blocked")) {
-    return true;
-  }
-  return false;
+  return classifyReleaseOutcome(trace) === "blocked";
 }
 
 export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
   step: number;
   blocked: boolean;
+  releaseOutcome: ReleaseOutcome;
   headline: string;
   subline: string;
   leadBubble: string;
@@ -44,6 +40,7 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
       return {
         step: 1,
         blocked: false,
+        releaseOutcome: "none",
         headline: "Your AI Team is assembling...",
         subline: "Lead is analyzing the prompt and forming the team.",
         leadBubble: "Analyzing prompt & planning...",
@@ -52,6 +49,7 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
     return {
       step: 0,
       blocked: false,
+      releaseOutcome: "none",
       headline: "CrewForge AI Office",
       subline: "Ask a question below to watch your dynamic team collaborate in real time.",
       leadBubble: "Ready when you are.",
@@ -61,12 +59,14 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
   const events = trace.execution_events || [];
   const types = new Set(events.map((e) => e.event_type));
   const status = String(trace.status || "").toLowerCase();
-  const blocked = isVerificationBlocked(trace);
+  const releaseOutcome = classifyReleaseOutcome(trace);
+  const blocked = releaseOutcome === "blocked";
 
   if (status === "failed" || types.has("run_failed")) {
     return {
       step: 4,
       blocked: true,
+      releaseOutcome: "blocked",
       headline: "Execution Failed",
       subline: "Run failed — inspect the error or Mission Control trace for details.",
       leadBubble: "Execution failed.",
@@ -76,24 +76,30 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
     return {
       step: 4,
       blocked: true,
+      releaseOutcome: "blocked",
       headline: "Verification Blocked Release",
-      subline: "Honesty Gate withheld unverified or rejected claims.",
+      subline: "Honesty Gate blocked release; no verified claims could be delivered.",
       leadBubble: "Release blocked by Honesty Gate.",
     };
   }
   if (status === "completed" || status === "partial" || types.has("run_completed")) {
+    const isPartial = releaseOutcome === "partial";
     return {
       step: 4,
       blocked: false,
-      headline: status === "completed" ? "Mission Accomplished" : "Completed (Partial Release)",
-      subline: `${trace.roster?.length || 1} agents collaborated · ${events.length} persisted events`,
-      leadBubble: status === "completed" ? "Verified & delivered final answer!" : "Released verified subset.",
+      releaseOutcome,
+      headline: isPartial ? "Partial Verified Release" : "Mission Accomplished",
+      subline: isPartial
+        ? `${trace.roster?.length || 1} agents collaborated · verified subset released, unverified claims withheld`
+        : `${trace.roster?.length || 1} agents collaborated · ${events.length} persisted events`,
+      leadBubble: isPartial ? "Released verified subset." : "Verified & delivered final answer!",
     };
   }
   if (types.has("honesty_gate_evaluated") || types.has("synthesis_completed")) {
     return {
       step: 4,
       blocked,
+      releaseOutcome,
       headline: "Finalizing Verified Answer...",
       subline: "Honesty Gate is checking claim provenance and release rules.",
       leadBubble: "Running Honesty Gate...",
@@ -103,6 +109,7 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
     return {
       step: 3,
       blocked: false,
+      releaseOutcome: "none",
       headline: "Reviewing Claims & Evidence...",
       subline: "Independent reviewers are verifying arithmetic and provenance.",
       leadBubble: "Checking reviewer verdicts...",
@@ -112,6 +119,7 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
     return {
       step: 2,
       blocked: false,
+      releaseOutcome: "none",
       headline: "Your AI Team is on it!",
       subline: "Lead has assembled the team and specialists are executing tasks.",
       leadBubble: "Coordinating specialist tasks...",
@@ -120,6 +128,7 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
   return {
     step: 1,
     blocked: false,
+    releaseOutcome: "none",
     headline: "Your AI Team is assembling...",
     subline: "Lead is decomposing the problem into specialist tasks.",
     leadBubble: "Planning DAG & specialists...",
@@ -240,11 +249,11 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
   // Ingest new trace updates (handling batched events cleanly)
   useEffect(() => {
     const t = performance.now();
-    const updated = applyTraceToOffice(simRef.current, trace, isRunning, t, stage.blocked);
+    const updated = applyTraceToOffice(simRef.current, trace, isRunning, t);
     simRef.current = updated;
     setSim(updated);
     setNowMs(t);
-  }, [trace, isRunning, stage.blocked]);
+  }, [trace, isRunning, stage.releaseOutcome]);
 
   // Lightweight requestAnimationFrame loop (auto-pauses when motion settles)
   useEffect(() => {
@@ -300,8 +309,12 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
                 ? trace?.waiting_for_provider
                   ? "pill-warn"
                   : "pill-live"
-                : stage.blocked
+                : stage.releaseOutcome === "blocked"
                 ? "pill-error"
+                : stage.releaseOutcome === "partial"
+                ? "pill-warn"
+                : stage.releaseOutcome === "full"
+                ? "pill-success"
                 : "pill-idle"
             }`}
           >
@@ -310,10 +323,12 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
               ? trace?.waiting_for_provider
                 ? "Waiting for Provider"
                 : "Live Execution"
-              : stage.blocked
-              ? "Verification Blocked"
-              : trace
-              ? String(trace.status).toUpperCase()
+              : stage.releaseOutcome === "blocked"
+              ? "Release Blocked"
+              : stage.releaseOutcome === "partial"
+              ? "Partial Verified Release"
+              : stage.releaseOutcome === "full"
+              ? "Full Verified Release"
               : mode === "baseline"
               ? "Baseline"
               : "Standby"}

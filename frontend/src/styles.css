@@ -417,3 +417,8 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 .cf-pose-reviewing .cf-arm-right {
   animation: cfWorkType 0.9s ease-in-out infinite;
 }
+.pill-success {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.4);
+}
