@@ -33,6 +33,8 @@ export interface ChatDetail extends ChatSummary {
 }
 
 export interface JudgeSettings {
+  billing_mode: "free" | "byok";
+  free_tier_verified: boolean;
   provider: "ollama" | "openai" | "openai_compatible";
   model: string;
   openai_base_url: string;
@@ -62,6 +64,7 @@ export interface McpStatus {
   handshake_error?: string | null;
   session_db_path: string;
   session_budget_db_path?: string;
+  shared_http_config?: Record<string, unknown>;
   stdio_config: Record<string, unknown>;
   http_command: string;
 }

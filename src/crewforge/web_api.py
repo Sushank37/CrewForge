@@ -35,6 +35,8 @@ from crewforge.providers.base import ModelProvider
 from crewforge.storage.database import Database
 
 _ENV_ISOLATION_LOCK = threading.Lock()
+GROQ_FREE_ENDPOINT = "https://api.groq.com/openai/v1"
+GROQ_FREE_MODELS = ("openai/gpt-oss-120b", "openai/gpt-oss-20b")
 
 
 def _utc_iso() -> str:
@@ -59,6 +61,8 @@ class ChatMessageRequest(BaseModel):
 class JudgeSettingsUpdate(BaseModel):
     """Non-secret + transient API key settings submitted from the Settings page."""
 
+    billing_mode: Literal["free", "byok"] | None = None
+    free_tier_verified: bool | None = None
     provider: Literal["ollama", "openai", "openai_compatible"] | None = None
     model: str | None = Field(default=None, min_length=1, max_length=120)
     api_key: str | None = None
@@ -99,6 +103,8 @@ class JudgeSessionManager:
 
         # Distributable product defaults: isolated judge session, no team budget or .env fallback
         self._config: dict[str, Any] = {
+            "billing_mode": "free",
+            "free_tier_verified": False,
             "provider": "ollama",
             "model": "qwen3:4b",
             "openai_base_url": "",
@@ -110,10 +116,10 @@ class JudgeSessionManager:
             "max_tasks": 3,
             "max_concurrency": 3,
             "max_model_calls_per_run": 16,
-            "max_cost_per_run_usd": 0.05,
-            "total_budget_ceiling_usd": 5.00,
-            "custom_input_price_per_1m": None,
-            "custom_output_price_per_1m": None,
+            "max_cost_per_run_usd": 0.0,
+            "total_budget_ceiling_usd": 0.0,
+            "custom_input_price_per_1m": 0.0,
+            "custom_output_price_per_1m": 0.0,
         }
         # Kept strictly in backend process memory — never persisted, never reads .env
         self._api_key: str | None = None
@@ -175,18 +181,46 @@ class JudgeSessionManager:
         data = patch.model_dump(exclude_none=True)
         raw_key = data.pop("api_key", None)
         clear_key = data.pop("clear_api_key", False)
+
+        candidate = {**self._config, **data}
+        if candidate["billing_mode"] == "free":
+            if candidate["provider"] == "openai":
+                raise ValueError(
+                    "Free mode only supports local Ollama or verified Groq free-tier models."
+                )
+            if candidate["provider"] == "openai_compatible":
+                if str(candidate.get("openai_base_url", "")).rstrip("/") != GROQ_FREE_ENDPOINT:
+                    raise ValueError(
+                        f"Free mode hosted endpoint must be {GROQ_FREE_ENDPOINT}."
+                    )
+                if candidate["model"] not in GROQ_FREE_MODELS:
+                    raise ValueError(
+                        f"Free mode hosted model must be one of {GROQ_FREE_MODELS}."
+                    )
+            candidate["allow_paid_runs"] = False
+            candidate["max_cost_per_run_usd"] = 0.0
+            candidate["total_budget_ceiling_usd"] = 0.0
+            candidate["custom_input_price_per_1m"] = 0.0
+            candidate["custom_output_price_per_1m"] = 0.0
+
         if clear_key:
             self._api_key = None
         elif isinstance(raw_key, str) and raw_key.strip():
             self._api_key = raw_key.strip()
-        for k, v in data.items():
-            if k in self._config:
-                self._config[k] = v
+        self._config = candidate
         return self.get_public_settings()
 
     def build_runtime_settings(self) -> CrewForgeSettings:
         """Build an isolated CrewForgeSettings instance without .env or host env fallback."""
         prov = ProviderType(self._config["provider"])
+        is_free_mode = self._config.get("billing_mode", "free") == "free"
+        if is_free_mode and prov == ProviderType.OPENAI_COMPATIBLE and not self._config.get(
+            "free_tier_verified"
+        ):
+            raise ValueError(
+                "Free mode requires confirming a verified Groq free-tier account in Settings."
+            )
+
         is_cloud = prov in (ProviderType.OPENAI, ProviderType.OPENAI_COMPATIBLE)
         max_out = int(self._config["max_output_tokens"])
         model_name = str(self._config["model"])
@@ -194,7 +228,9 @@ class JudgeSessionManager:
         pricing: dict[str, ModelPricing] = dict(DEFAULT_MODEL_PRICING)
         custom_in = self._config.get("custom_input_price_per_1m")
         custom_out = self._config.get("custom_output_price_per_1m")
-        if custom_in is not None and custom_out is not None:
+        if is_free_mode:
+            pricing[model_name] = ModelPricing(input_per_1m=0.0, output_per_1m=0.0)
+        elif custom_in is not None and custom_out is not None:
             pricing[model_name] = ModelPricing(
                 input_per_1m=float(custom_in),
                 output_per_1m=float(custom_out),
@@ -556,9 +592,19 @@ class JudgeSessionManager:
             "handshake_error": handshake_error,
             "session_db_path": str(self.db_path),
             "session_budget_db_path": str(self.budget_db_path),
+            "shared_http_config": {
+                "mcpServers": {
+                    "crewforge-shared": {
+                        "url": mcp_url,
+                        "headers": {
+                            "Authorization": f"Bearer {auth_token or '<SESSION_TOKEN>'}",
+                        },
+                    }
+                }
+            },
             "stdio_config": {
                 "mcpServers": {
-                    "crewforge": {
+                    "crewforge-standalone": {
                         "command": "uv",
                         "args": ["run", "--directory", "/path/to/CrewForge", "crewforge-mcp"],
                         "env": {

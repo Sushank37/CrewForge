@@ -72,6 +72,84 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         {/* Model & API */}
         <section className="card">
           <h2>Model &amp; API Configuration</h2>
+
+          <div className="field">
+            <span>Billing Mode</span>
+            <div className="input-row">
+              <button
+                type="button"
+                className={settings.billing_mode === "free" ? "btn-primary btn-sm" : "btn-ghost btn-sm"}
+                onClick={() =>
+                  setSettings({
+                    ...settings,
+                    billing_mode: "free",
+                    allow_paid_runs: false,
+                    max_cost_per_run_usd: 0,
+                    total_budget_ceiling_usd: 0,
+                    custom_input_price_per_1m: 0,
+                    custom_output_price_per_1m: 0,
+                    ...(settings.provider === "openai"
+                      ? {
+                          provider: "openai_compatible",
+                          openai_base_url: "https://api.groq.com/openai/v1",
+                          model: "openai/gpt-oss-120b",
+                        }
+                      : {}),
+                  })
+                }
+              >
+                Free Mode ($0.00 Limit)
+              </button>
+              <button
+                type="button"
+                className={settings.billing_mode === "byok" ? "btn-primary btn-sm" : "btn-ghost btn-sm"}
+                onClick={() =>
+                  setSettings({
+                    ...settings,
+                    billing_mode: "byok",
+                    max_cost_per_run_usd: settings.max_cost_per_run_usd || 0.05,
+                    total_budget_ceiling_usd: settings.total_budget_ceiling_usd || 5.0,
+                  })
+                }
+              >
+                Bring Your Own API Key (BYOK)
+              </button>
+            </div>
+          </div>
+
+          {settings.billing_mode === "free" && (
+            <div className="input-row">
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                onClick={() =>
+                  setSettings({
+                    ...settings,
+                    provider: "openai_compatible",
+                    openai_base_url: "https://api.groq.com/openai/v1",
+                    model: "openai/gpt-oss-120b",
+                  })
+                }
+              >
+                Preset: Groq Free (gpt-oss-120b)
+              </button>
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                onClick={() =>
+                  setSettings({
+                    ...settings,
+                    provider: "openai_compatible",
+                    openai_base_url: "https://api.groq.com/openai/v1",
+                    model: "openai/gpt-oss-20b",
+                  })
+                }
+              >
+                Preset: Groq Alt (gpt-oss-20b)
+              </button>
+            </div>
+          )}
+
           <label className="field">
             <span>Provider</span>
             <select
@@ -81,10 +159,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               }
             >
               <option value="ollama">Ollama (Local)</option>
-              <option value="openai">OpenAI</option>
-              <option value="openai_compatible">OpenAI-Compatible Endpoint</option>
+              {settings.billing_mode === "byok" && <option value="openai">OpenAI</option>}
+              <option value="openai_compatible">
+                {settings.billing_mode === "free" ? "Groq Free-Tier (OpenAI-Compatible)" : "OpenAI-Compatible Endpoint"}
+              </option>
             </select>
           </label>
+
+          {settings.billing_mode === "free" && settings.provider === "openai_compatible" && (
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={settings.free_tier_verified}
+                onChange={(e) => setSettings({ ...settings, free_tier_verified: e.target.checked })}
+              />
+              <span>Confirm this is a verified Groq free-tier account ($0.00 spending cap)</span>
+            </label>
+          )}
 
           <label className="field">
             <span>Model</span>
@@ -312,6 +403,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           disabled={saving}
           onClick={() =>
             save({
+              billing_mode: settings.billing_mode,
+              free_tier_verified: settings.free_tier_verified,
               provider: settings.provider,
               model: settings.model,
               openai_base_url: settings.openai_base_url,

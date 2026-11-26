@@ -31,9 +31,10 @@ def test_judge_isolation_from_team_budget_and_env(
     assert rt.openai_api_key is None
     assert rt.allow_paid_runs is False
 
-    # Custom pricing for arbitrary paid model
+    # Custom pricing for arbitrary paid model (requires BYOK mode)
     mgr.update_settings(
         JudgeSettingsUpdate(
+            billing_mode="byok",
             provider="openai",
             model="custom-judge-model-v1",
             api_key="sk-judge-only-key-4321",
@@ -47,6 +48,50 @@ def test_judge_isolation_from_team_budget_and_env(
     assert rt2.openai_api_key.get_secret_value() == "sk-judge-only-key-4321"
     assert rt2.pricing_json["custom-judge-model-v1"].input_per_1m == 1.25
     assert rt2.pricing_json["custom-judge-model-v1"].output_per_1m == 5.50
+
+
+def test_groq_free_mode_enforcement_and_host_rebinding_protection(tmp_path: Path) -> None:
+    from crewforge.providers.openai_provider import OpenAIProvider
+
+    mgr = JudgeSessionManager(
+        db_path=tmp_path / "judge_session.db",
+        budget_db_path=tmp_path / "judge_budget.db",
+    )
+    # Free mode rejects paid OpenAI provider
+    with pytest.raises(ValueError, match="Free mode"):
+        mgr.update_settings(JudgeSettingsUpdate(billing_mode="free", provider="openai"))
+
+    # Groq free-tier preset requires verified checkbox before building runtime settings
+    mgr.update_settings(
+        JudgeSettingsUpdate(
+            billing_mode="free",
+            provider="openai_compatible",
+            openai_base_url="https://api.groq.com/openai/v1",
+            model="openai/gpt-oss-120b",
+            api_key="gsk_test_free_tier_key_0000",
+        )
+    )
+    with pytest.raises(ValueError, match="verified Groq free-tier"):
+        mgr.build_runtime_settings()
+
+    mgr.update_settings(JudgeSettingsUpdate(free_tier_verified=True))
+    rt = mgr.build_runtime_settings()
+    assert rt.allow_paid_runs is False
+    assert rt.max_cost_per_run_usd == 0.0
+    assert rt.total_budget_ceiling_usd == 0.0
+    prov = OpenAIProvider.from_settings(rt)
+    assert prov.is_paid_provider is False
+
+    # Host header DNS rebinding protection
+    app = create_dashboard_app(
+        db_path=tmp_path / "judge_session.db",
+        budget_db_path=tmp_path / "judge_budget.db",
+        replay_dir=Path("demo/traces"),
+        benchmark_path=Path("demo/v2_reconciled_scores.json"),
+    )
+    with TestClient(app) as client:
+        evil = client.get("/api/health", headers={"Host": "evil.attacker.com:8765"})
+        assert evil.status_code == 403
 
 
 def test_local_auth_origin_and_size_limits(tmp_path: Path) -> None:
@@ -68,7 +113,11 @@ def test_local_auth_origin_and_size_limits(tmp_path: Path) -> None:
         upd = client.post(
             "/api/settings",
             headers=headers,
-            json={"api_key": "sk-test-secret-judge-key-987654", "provider": "openai"},
+            json={
+                "billing_mode": "byok",
+                "api_key": "sk-test-secret-judge-key-987654",
+                "provider": "openai",
+            },
         )
         assert upd.status_code == 200
         assert "sk-test-secret-judge-key-987654" not in upd.text
@@ -231,3 +280,74 @@ def test_chat_and_shared_budget_isolation_offline(tmp_path: Path) -> None:
     if team_bytes_before is not None:
         assert team_budget.read_bytes() == team_bytes_before
     assert os.environ.get("CREWFORGE_ALLOW_PAID_RUNS") != "true"
+
+
+def test_groq_bounded_rate_limit_backoff_without_model_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Groq free-tier provider retries 429 up to 2 times without switching models."""
+    import asyncio
+
+    from crewforge.providers.base import ProviderRateLimitError
+    from crewforge.providers.openai_provider import OpenAIProvider
+
+    provider = OpenAIProvider(
+        api_key="gsk-test-key",
+        model="openai/gpt-oss-120b",
+        base_url="https://api.groq.com/openai/v1",
+        use_chat_completions=True,
+        is_free_tier=True,
+        provider_label="openai_compatible",
+    )
+    assert provider._is_groq is True
+
+    sleep_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    attempts = 0
+
+    async def flaky_call() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise ProviderRateLimitError(
+                "rate limited",
+                provider=provider.provider_name,
+                model=provider._model,
+            )
+        return "ok"
+
+    result, retries, _latency = asyncio.run(
+        provider._run_with_rate_limit_backoff(flaky_call, timeout_seconds=5.0, retries_cap=0)
+    )
+    assert result == "ok"
+    assert retries == 0
+    assert attempts == 3
+    assert sleep_delays == [2.0, 4.0]
+    assert provider._model == "openai/gpt-oss-120b"
+
+    # Exceeding the 2-retry cap must raise ProviderRateLimitError rather than switching models
+    sleep_delays.clear()
+    fail_attempts = 0
+
+    async def always_rate_limited() -> str:
+        nonlocal fail_attempts
+        fail_attempts += 1
+        raise ProviderRateLimitError(
+            "still rate limited",
+            provider=provider.provider_name,
+            model=provider._model,
+        )
+
+    with pytest.raises(ProviderRateLimitError):
+        asyncio.run(
+            provider._run_with_rate_limit_backoff(
+                always_rate_limited, timeout_seconds=5.0, retries_cap=0
+            )
+        )
+    assert fail_attempts == 3
+    assert sleep_delays == [2.0, 4.0]

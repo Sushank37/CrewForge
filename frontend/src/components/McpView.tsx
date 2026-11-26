@@ -34,6 +34,7 @@ export const McpView: React.FC = () => {
   }
 
   const stdioJson = JSON.stringify(status.stdio_config, null, 2);
+  const sharedHttpJson = JSON.stringify(status.shared_http_config || {}, null, 2);
 
   return (
     <div className="page-container">
@@ -41,8 +42,10 @@ export const McpView: React.FC = () => {
         <div>
           <h1>MCP Connection</h1>
           <p className="muted">
-            CrewForge exposes <code>solve</code>, <code>baseline</code>, and <code>trace</code> over
-            stdio and localhost Streamable HTTP using the exact same execution engine and SQLite database.
+            CrewForge exposes <code>solve</code>, <code>baseline</code>, and <code>trace</code>.
+            <strong> Shared HTTP Mode</strong> (<code>/mcp</code> on this server) shares your live Settings,
+            RAM API key, and isolated judge DBs. <strong>Standalone Stdio Mode</strong> launches an
+            external process using its own environment variables and shares only the SQLite DB paths.
           </p>
         </div>
         <button type="button" className="btn-ghost btn-sm" onClick={load}>
@@ -71,13 +74,27 @@ export const McpView: React.FC = () => {
             )}
           </div>
           <div className="alert-info">
-            Localhost-only by default. Do not expose an unauthenticated MCP server on a public tunnel.
+            Authenticated localhost-only endpoint. Do not expose an unauthenticated MCP server on a public tunnel.
           </div>
         </section>
 
         <section className="card">
           <div className="card-header-row">
-            <h2>Stdio MCP Client Config</h2>
+            <h2>Shared HTTP MCP Config (Authenticated)</h2>
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              onClick={() => copyText("shared-http", sharedHttpJson)}
+            >
+              {copied === "shared-http" ? "Copied!" : "Copy JSON"}
+            </button>
+          </div>
+          <pre className="code-pre">{sharedHttpJson}</pre>
+        </section>
+
+        <section className="card">
+          <div className="card-header-row">
+            <h2>Standalone Stdio MCP Config</h2>
             <button
               type="button"
               className="btn-ghost btn-sm"
@@ -87,20 +104,6 @@ export const McpView: React.FC = () => {
             </button>
           </div>
           <pre className="code-pre">{stdioJson}</pre>
-        </section>
-
-        <section className="card">
-          <div className="card-header-row">
-            <h2>Local Streamable HTTP Command</h2>
-            <button
-              type="button"
-              className="btn-ghost btn-sm"
-              onClick={() => copyText("http", status.http_command)}
-            >
-              {copied === "http" ? "Copied!" : "Copy Command"}
-            </button>
-          </div>
-          <pre className="code-pre">{status.http_command}</pre>
         </section>
       </div>
     </div>

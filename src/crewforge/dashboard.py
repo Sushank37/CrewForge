@@ -18,7 +18,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from crewforge.config import CrewForgeSettings
+from crewforge.config import CrewForgeSettings, sanitize_error_message
 from crewforge.dashboard_api import (
     BenchmarkStore,
     DashboardNotFoundError,
@@ -40,6 +40,7 @@ _FRONTEND_DIST_DIR = _ROOT_DIR / "frontend" / "dist"
 _LEGACY_UI_DIR = Path(__file__).resolve().parent / "dashboard_ui"
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_ALLOWED_HOST_HEADERS = _LOCAL_HOSTS | {"testserver"}
 _MAX_REQUEST_BYTES = 524_288  # 512 KB
 
 _FAVICON_SVG = (
@@ -59,6 +60,13 @@ class _LocalSecurityMiddleware(BaseHTTPMiddleware):
         self._require_auth = require_auth
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # 0. Host header validation (DNS rebinding protection)
+        raw_host = request.headers.get("host", "")
+        if raw_host:
+            parsed_host = urlparse(f"http://{raw_host}").hostname
+            if parsed_host not in _ALLOWED_HOST_HEADERS:
+                return JSONResponse({"error": "Invalid Host header."}, status_code=403)
+
         # 1. Request size limit
         content_length = request.headers.get("content-length")
         if content_length:
@@ -225,7 +233,7 @@ def create_dashboard_app(
             patch = JudgeSettingsUpdate.model_validate(body)
             return JSONResponse(session_mgr.update_settings(patch))
         except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
 
     async def list_chats(_request: Request) -> JSONResponse:
         return JSONResponse({"chats": session_mgr.list_chats()})
@@ -262,7 +270,7 @@ def create_dashboard_app(
         except KeyError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
         except Exception as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
 
     async def cancel_run(request: Request) -> JSONResponse:
         run_id = request.path_params["run_id"]

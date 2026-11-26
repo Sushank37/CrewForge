@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 import openai
 from openai import AsyncOpenAI
@@ -49,6 +51,7 @@ class OpenAIProvider(ModelProvider):
         base_url: str | None = None,
         reasoning_effort: str | None = None,
         use_chat_completions: bool = False,
+        is_free_tier: bool = False,
         provider_label: str = "openai",
         timeout_seconds: float = 60.0,
         max_retries: int = 0,
@@ -71,6 +74,9 @@ class OpenAIProvider(ModelProvider):
         self._provider_label = provider_label
         self._reasoning_effort = reasoning_effort
         self._use_chat_completions = use_chat_completions
+        self._is_free_tier = is_free_tier
+        parsed_host = (urlparse(base_url).hostname or "").lower() if base_url else ""
+        self._is_groq = parsed_host == "api.groq.com"
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._default_max_output_tokens = default_max_output_tokens
@@ -92,12 +98,26 @@ class OpenAIProvider(ModelProvider):
             else None
         )
         is_compat = settings.provider == ProviderType.OPENAI_COMPATIBLE
+        parsed_host = (
+            (urlparse(settings.openai_base_url).hostname or "").lower()
+            if settings.openai_base_url
+            else ""
+        )
+        pricing = settings.pricing_json.get(settings.model)
+        is_free_tier = bool(
+            is_compat
+            and parsed_host == "api.groq.com"
+            and pricing is not None
+            and pricing.input_per_1m == 0.0
+            and pricing.output_per_1m == 0.0
+        )
         return cls(
             model=settings.model,
             api_key=secret,
             base_url=settings.openai_base_url,
             reasoning_effort=None if is_compat else settings.openai_reasoning_effort,
             use_chat_completions=is_compat,
+            is_free_tier=is_free_tier,
             provider_label=settings.provider.value,
             timeout_seconds=settings.request_timeout_seconds,
             max_retries=0,
@@ -114,7 +134,41 @@ class OpenAIProvider(ModelProvider):
 
     @property
     def is_paid_provider(self) -> bool:
-        return True
+        return not self._is_free_tier
+
+    async def _run_with_rate_limit_backoff(
+        self,
+        fn: Any,
+        *,
+        timeout_seconds: float,
+        retries_cap: int,
+    ) -> tuple[Any, int, float]:
+        """Run provider call with bounded 429 rate-limit backoff (never switches models)."""
+        max_rl_retries = 2 if self._is_groq else 0
+        attempt = 0
+        while True:
+            try:
+                return await execute_with_retry(
+                    fn,
+                    provider=self.provider_name,
+                    model=self._model,
+                    timeout_seconds=timeout_seconds,
+                    max_retries=retries_cap,
+                )
+            except ProviderRateLimitError:
+                if attempt >= max_rl_retries:
+                    raise
+                delay = min(15.0, 2.0 * (attempt + 1))
+                attempt += 1
+                logger.warning(
+                    "Rate limited by %s (%s); bounded backoff %.1fs (attempt %d/%d).",
+                    self.provider_name,
+                    self._model,
+                    delay,
+                    attempt,
+                    max_rl_retries,
+                )
+                await asyncio.sleep(delay)
 
     @property
     def supports_reasoning_effort(self) -> bool:
@@ -464,16 +518,25 @@ class OpenAIProvider(ModelProvider):
                 except Exception as exc:
                     raise self._translate_sdk_error(exc) from exc
 
-            response, retries, latency_ms = await execute_with_retry(
+            response, retries, latency_ms = await self._run_with_rate_limit_backoff(
                 _chat_struct_call,
-                provider=self.provider_name,
-                model=self._model,
                 timeout_seconds=timeout,
-                max_retries=retries_cap,
+                retries_cap=retries_cap,
             )
             choices = getattr(response, "choices", None) or []
+            finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
             raw_text = getattr(choices[0].message, "content", "") if choices else ""
             usage = self._extract_usage(response, retries, latency_ms, fallback_model=self._model)
+            if finish_reason == "length":
+                raise ProviderResponseError(
+                    "OpenAI-compatible structured response truncated at max_tokens limit.",
+                    code="truncated_response",
+                    provider=self.provider_name,
+                    model=self._model,
+                    billing_outcome="billed" if usage.usage_reported else "unknown",
+                    retries_attempted=retries,
+                    usage=usage,
+                )
             try:
                 parsed = response_model.model_validate_json(raw_text)
             except ValidationError as exc:
