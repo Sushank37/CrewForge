@@ -22,6 +22,7 @@ dev = [
 [project.scripts]
 crewforge = "crewforge.cli:main"
 crewforge-mcp = "crewforge.mcp_server:main"
+crewforge-dashboard = "crewforge.dashboard:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,523 @@
+{
+  "grading_method": "ChatGPT-assisted blind semantic grading",
+  "benchmark_note": "10 internally authored held-out cases across 5 domains, not official hackathon questions.",
+  "engine_commit": "612f64e4c4b55e8ea0b1121ef92e548e1a330d4e",
+  "model": "gpt-6-luna",
+  "summary": {
+    "baseline_mean": 96.5,
+    "baseline_median": 99.0,
+    "network_mean": 55.5,
+    "network_median": 63.0,
+    "network_wins": 1,
+    "network_losses": 9,
+    "ties": 0,
+    "baseline_unsupported_assertions": 1,
+    "network_unsupported_assertions": 6,
+    "baseline_total_cost_usd": 0.0098374,
+    "network_total_cost_usd": 0.0330012,
+    "baseline_mean_latency_s": 14.25,
+    "baseline_median_latency_s": 14.46,
+    "network_mean_latency_s": 40.79,
+    "network_median_latency_s": 40.96
+  },
+  "domain_scores": {
+    "financial": {
+      "baseline_scores": [
+        99,
+        97
+      ],
+      "baseline_mean": 98,
+      "network_scores": [
+        74,
+        57
+      ],
+      "network_mean": 65.5
+    },
+    "incident_response": {
+      "baseline_scores": [
+        98,
+        98
+      ],
+      "baseline_mean": 98,
+      "network_scores": [
+        69,
+        16
+      ],
+      "network_mean": 42.5
+    },
+    "causation": {
+      "baseline_scores": [
+        100,
+        100
+      ],
+      "baseline_mean": 100,
+      "network_scores": [
+        47,
+        75
+      ],
+      "network_mean": 61
+    },
+    "document_grounded": {
+      "baseline_scores": [
+        100,
+        99
+      ],
+      "baseline_mean": 99.5,
+      "network_scores": [
+        10,
+        20
+      ],
+      "network_mean": 15
+    },
+    "strategic_planning": {
+      "baseline_scores": [
+        100,
+        74
+      ],
+      "baseline_mean": 87,
+      "network_scores": [
+        87,
+        100
+      ],
+      "network_mean": 93.5
+    }
+  },
+  "dimension_averages": {
+    "factual_correctness": {
+      "baseline_mean": 29.2,
+      "network_mean": 18
+    },
+    "requirement_coverage": {
+      "baseline_mean": 24.5,
+      "network_mean": 13.7
+    },
+    "evidence_grounding": {
+      "baseline_mean": 19.1,
+      "network_mean": 11.1
+    },
+    "internal_consistency": {
+      "baseline_mean": 14.5,
+      "network_mean": 10.6
+    },
+    "usefulness_and_uncertainty": {
+      "baseline_mean": 9.7,
+      "network_mean": 5.1
+    }
+  },
+  "per_case": [
+    {
+      "prompt_id": "v2_fin_01",
+      "domain": "financial",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "B",
+        "status": "completed",
+        "final_score": 99,
+        "raw_sum": 99,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 2,
+        "cost_usd": 0.0007848999999999999,
+        "latency_s": 16.82,
+        "dimensions": {
+          "factual_correctness": 30,
+          "requirement_coverage": 25,
+          "evidence_grounding": 19,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      },
+      "network": {
+        "answer_label": "A",
+        "status": "completed",
+        "final_score": 74,
+        "raw_sum": 74,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 7,
+        "cost_usd": 0.0032848,
+        "latency_s": 38.65,
+        "dimensions": {
+          "factual_correctness": 23,
+          "requirement_coverage": 20,
+          "evidence_grounding": 12,
+          "internal_consistency": 13,
+          "usefulness_and_uncertainty": 6
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_fin_02",
+      "domain": "financial",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "B",
+        "status": "completed",
+        "final_score": 97,
+        "raw_sum": 97,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 2,
+        "cost_usd": 0.0009048000000000001,
+        "latency_s": 12.66,
+        "dimensions": {
+          "factual_correctness": 29,
+          "requirement_coverage": 25,
+          "evidence_grounding": 18,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      },
+      "network": {
+        "answer_label": "A",
+        "status": "completed",
+        "final_score": 57,
+        "raw_sum": 57,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 5,
+        "cost_usd": 0.0026527,
+        "latency_s": 32.42,
+        "dimensions": {
+          "factual_correctness": 17,
+          "requirement_coverage": 14,
+          "evidence_grounding": 10,
+          "internal_consistency": 12,
+          "usefulness_and_uncertainty": 4
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_swe_01",
+      "domain": "incident_response",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "B",
+        "status": "completed",
+        "final_score": 98,
+        "raw_sum": 98,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 2,
+        "cost_usd": 0.0011125,
+        "latency_s": 14.0,
+        "dimensions": {
+          "factual_correctness": 30,
+          "requirement_coverage": 25,
+          "evidence_grounding": 18,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      },
+      "network": {
+        "answer_label": "A",
+        "status": "partial",
+        "final_score": 69,
+        "raw_sum": 69,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 4,
+        "cost_usd": 0.002246,
+        "latency_s": 29.24,
+        "dimensions": {
+          "factual_correctness": 20,
+          "requirement_coverage": 17,
+          "evidence_grounding": 13,
+          "internal_consistency": 13,
+          "usefulness_and_uncertainty": 6
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_swe_02",
+      "domain": "incident_response",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "B",
+        "status": "completed",
+        "final_score": 98,
+        "raw_sum": 98,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 1,
+        "cost_usd": 0.0005608,
+        "latency_s": 9.6,
+        "dimensions": {
+          "factual_correctness": 29,
+          "requirement_coverage": 24,
+          "evidence_grounding": 20,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      },
+      "network": {
+        "answer_label": "A",
+        "status": "partial",
+        "final_score": 16,
+        "raw_sum": 16,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 4,
+        "cost_usd": 0.0023075,
+        "latency_s": 27.56,
+        "dimensions": {
+          "factual_correctness": 4,
+          "requirement_coverage": 2,
+          "evidence_grounding": 3,
+          "internal_consistency": 4,
+          "usefulness_and_uncertainty": 3
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_sci_01",
+      "domain": "causation",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "A",
+        "status": "completed",
+        "final_score": 100,
+        "raw_sum": 100,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 2,
+        "cost_usd": 0.0012902,
+        "latency_s": 18.5,
+        "dimensions": {
+          "factual_correctness": 30,
+          "requirement_coverage": 25,
+          "evidence_grounding": 20,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      },
+      "network": {
+        "answer_label": "B",
+        "status": "partial",
+        "final_score": 47,
+        "raw_sum": 47,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 7,
+        "cost_usd": 0.0043211,
+        "latency_s": 56.37,
+        "dimensions": {
+          "factual_correctness": 13,
+          "requirement_coverage": 9,
+          "evidence_grounding": 10,
+          "internal_consistency": 11,
+          "usefulness_and_uncertainty": 4
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_sci_02",
+      "domain": "causation",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "A",
+        "status": "completed",
+        "final_score": 100,
+        "raw_sum": 100,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 2,
+        "cost_usd": 0.0008638000000000001,
+        "latency_s": 12.45,
+        "dimensions": {
+          "factual_correctness": 30,
+          "requirement_coverage": 25,
+          "evidence_grounding": 20,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      },
+      "network": {
+        "answer_label": "B",
+        "status": "completed",
+        "final_score": 75,
+        "raw_sum": 75,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 5,
+        "cost_usd": 0.0028362,
+        "latency_s": 34.24,
+        "dimensions": {
+          "factual_correctness": 26,
+          "requirement_coverage": 16,
+          "evidence_grounding": 15,
+          "internal_consistency": 13,
+          "usefulness_and_uncertainty": 5
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_doc_01",
+      "domain": "document_grounded",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "B",
+        "status": "completed",
+        "final_score": 100,
+        "raw_sum": 100,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 1,
+        "cost_usd": 0.0003571,
+        "latency_s": 5.33,
+        "dimensions": {
+          "factual_correctness": 30,
+          "requirement_coverage": 25,
+          "evidence_grounding": 20,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      },
+      "network": {
+        "answer_label": "A",
+        "status": "completed",
+        "final_score": 10,
+        "raw_sum": 30,
+        "penalty": 20,
+        "unsupported_material_assertion_count": 4,
+        "calls": 8,
+        "cost_usd": 0.0042039,
+        "latency_s": 53.64,
+        "dimensions": {
+          "factual_correctness": 10,
+          "requirement_coverage": 7,
+          "evidence_grounding": 5,
+          "internal_consistency": 6,
+          "usefulness_and_uncertainty": 2
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_doc_02",
+      "domain": "document_grounded",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "A",
+        "status": "completed",
+        "final_score": 99,
+        "raw_sum": 99,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 2,
+        "cost_usd": 0.0016397,
+        "latency_s": 21.13,
+        "dimensions": {
+          "factual_correctness": 30,
+          "requirement_coverage": 25,
+          "evidence_grounding": 20,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 9
+        }
+      },
+      "network": {
+        "answer_label": "B",
+        "status": "partial",
+        "final_score": 20,
+        "raw_sum": 30,
+        "penalty": 10,
+        "unsupported_material_assertion_count": 2,
+        "calls": 7,
+        "cost_usd": 0.0034001,
+        "latency_s": 43.26,
+        "dimensions": {
+          "factual_correctness": 10,
+          "requirement_coverage": 7,
+          "evidence_grounding": 6,
+          "internal_consistency": 4,
+          "usefulness_and_uncertainty": 3
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_str_01",
+      "domain": "strategic_planning",
+      "winner": "baseline",
+      "baseline": {
+        "answer_label": "B",
+        "status": "completed",
+        "final_score": 100,
+        "raw_sum": 100,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 2,
+        "cost_usd": 0.0012809,
+        "latency_s": 17.14,
+        "dimensions": {
+          "factual_correctness": 30,
+          "requirement_coverage": 25,
+          "evidence_grounding": 20,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      },
+      "network": {
+        "answer_label": "A",
+        "status": "completed",
+        "final_score": 87,
+        "raw_sum": 87,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 6,
+        "cost_usd": 0.0034042,
+        "latency_s": 43.33,
+        "dimensions": {
+          "factual_correctness": 27,
+          "requirement_coverage": 20,
+          "evidence_grounding": 17,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 8
+        }
+      }
+    },
+    {
+      "prompt_id": "v2_str_02",
+      "domain": "strategic_planning",
+      "winner": "network",
+      "baseline": {
+        "answer_label": "A",
+        "status": "completed",
+        "final_score": 74,
+        "raw_sum": 79,
+        "penalty": 5,
+        "unsupported_material_assertion_count": 1,
+        "calls": 2,
+        "cost_usd": 0.0010427000000000001,
+        "latency_s": 14.91,
+        "dimensions": {
+          "factual_correctness": 24,
+          "requirement_coverage": 21,
+          "evidence_grounding": 16,
+          "internal_consistency": 10,
+          "usefulness_and_uncertainty": 8
+        }
+      },
+      "network": {
+        "answer_label": "B",
+        "status": "completed",
+        "final_score": 100,
+        "raw_sum": 100,
+        "penalty": 0,
+        "unsupported_material_assertion_count": 0,
+        "calls": 6,
+        "cost_usd": 0.0043447,
+        "latency_s": 49.15,
+        "dimensions": {
+          "factual_correctness": 30,
+          "requirement_coverage": 25,
+          "evidence_grounding": 20,
+          "internal_consistency": 15,
+          "usefulness_and_uncertainty": 10
+        }
+      }
+    }
+  ],
+  "david_vs_goliath": {
+    "status": "Not executed \u2014 local readiness blocker.",
+    "detail": "Qwen3-4B failed planner validation twice by generating four tasks against a maximum of three (canary_a). Zero Astra inference calls; zero additional paid expenditure."
+  }
+}

@@ -1,0 +1,1960 @@
+{
+  "export_version": "1.1",
+  "exported_at": "2026-11-26T15:10:04.841358+00:00",
+  "is_historical_replay": true,
+  "run_id": "run_08160b7fa1bd",
+  "mode": "network",
+  "status": "completed",
+  "provider": "openai",
+  "model": "gpt-6-luna",
+  "returned_model": "gpt-6-luna",
+  "prompt": "A fulfillment center processes 450 standard orders per hour during an 8-hour regular shift at $180/hour operating cost. Today, 4,400 orders arrive. Overtime runs at 320 orders/hour at $270/hour. Calculate regular-shift capacity, remaining backlog after regular hours, overtime hours needed (exact and rounded up to whole hours if billed in whole hours), and total operating cost under whole-hour overtime billing. State what staffing or cutoff-SLA information is missing before deciding whether to authorize overtime.",
+  "error": null,
+  "created_at": "2026-11-25T19:05:38.615098+00:00",
+  "completed_at": "2026-11-25T19:06:11.699499+00:00",
+  "latency_ms": 33085.05829202477,
+  "usage": {
+    "input_tokens": 8518,
+    "output_tokens": 4004,
+    "reasoning_tokens": 0,
+    "cached_input_tokens": 0,
+    "total_tokens": 12522,
+    "estimated_cost_usd": 0.0231972,
+    "actual_cost_usd": 0.0028538,
+    "model_calls": 6,
+    "successful_operations": 6,
+    "retries": 0,
+    "latency_ms": 38239.84333476983,
+    "usage_reported": true,
+    "returned_model": null,
+    "provider_response_id": null,
+    "response_status": null,
+    "incomplete_reason": null
+  },
+  "roster": [
+    {
+      "agent_id": "agt_7fa1bd_1_df1c",
+      "agent_ref": "a1",
+      "run_id": "run_08160b7fa1bd",
+      "role": "Operations calculation specialist",
+      "instructions": "Calculate capacity, backlog, overtime hours, and total cost from the supplied figures; show concise arithmetic and distinguish operational hours from billed hours.",
+      "capabilities": [
+        "calculation",
+        "reasoning"
+      ],
+      "model_override": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:05:46.816957Z"
+    },
+    {
+      "agent_id": "agt_7fa1bd_2_48f5",
+      "agent_ref": "a2",
+      "run_id": "run_08160b7fa1bd",
+      "role": "Staffing and service-level requirements analyst",
+      "instructions": "Identify the staffing, coverage, and cutoff/SLA details needed before deciding whether overtime is feasible and appropriate. Do not assume facts not provided.",
+      "capabilities": [
+        "analysis",
+        "reasoning"
+      ],
+      "model_override": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:05:46.816971Z"
+    }
+  ],
+  "execution_plan": {
+    "plan_id": "pln_bf496b4d500c",
+    "run_id": "run_08160b7fa1bd",
+    "goal": "Calculate regular capacity, remaining backlog, overtime requirements and cost under whole-hour billing, and identify missing information needed to authorize overtime.",
+    "user_requirements": [
+      "Use the given order volumes, processing rates, shift length, and hourly costs.",
+      "Report regular-shift capacity, backlog after regular hours, exact and whole-hour-rounded overtime, and total operating cost with whole-hour overtime billing.",
+      "State staffing or cutoff-SLA information missing before authorizing overtime."
+    ],
+    "acceptance_criteria": [
+      "Calculations use consistent units and distinguish exact overtime from billed whole hours.",
+      "Total cost includes regular-shift operating cost and overtime billed in whole hours.",
+      "Missing staffing and cutoff/SLA details are clearly stated without assuming them."
+    ],
+    "agents": [
+      {
+        "agent_id": "agt_7fa1bd_1_df1c",
+        "agent_ref": "a1",
+        "run_id": "run_08160b7fa1bd",
+        "role": "Operations calculation specialist",
+        "instructions": "Calculate capacity, backlog, overtime hours, and total cost from the supplied figures; show concise arithmetic and distinguish operational hours from billed hours.",
+        "capabilities": [
+          "calculation",
+          "reasoning"
+        ],
+        "model_override": null,
+        "created_by": "lead",
+        "created_at": "2026-11-25T19:05:46.816957Z"
+      },
+      {
+        "agent_id": "agt_7fa1bd_2_48f5",
+        "agent_ref": "a2",
+        "run_id": "run_08160b7fa1bd",
+        "role": "Staffing and service-level requirements analyst",
+        "instructions": "Identify the staffing, coverage, and cutoff/SLA details needed before deciding whether overtime is feasible and appropriate. Do not assume facts not provided.",
+        "capabilities": [
+          "analysis",
+          "reasoning"
+        ],
+        "model_override": null,
+        "created_by": "lead",
+        "created_at": "2026-11-25T19:05:46.816971Z"
+      }
+    ],
+    "tasks": [
+      {
+        "task_id": "tsk_7fa1bd_1_5f89",
+        "task_ref": "t1",
+        "run_id": "run_08160b7fa1bd",
+        "plan_id": "pln_bf496b4d500c",
+        "title": "Calculate capacity, overtime, and cost",
+        "description": "Derive regular capacity, remaining orders, exact overtime duration, whole-hour billed overtime, and total operating cost.",
+        "assigned_agent_id": "agt_7fa1bd_1_df1c",
+        "depends_on": [],
+        "expected_outputs": [
+          "Concise calculations for all requested quantities",
+          "Total cost under whole-hour overtime billing"
+        ],
+        "acceptance_criteria": [
+          "Correctly applies regular and overtime rates and hours.",
+          "Clearly distinguishes exact overtime hours from rounded billed hours."
+        ],
+        "status": "completed",
+        "findings": "Regular capacity: 450 orders/hour × 8 hours = 3,600 orders. Backlog: 4,400 − 3,600 = 800 orders. Exact overtime: 800 ÷ 320 = 2.5 operational hours; whole-hour billing requires 3 billed hours. Regular cost: 8 × $180 = $1,440; overtime billed cost: 3 × $270 = $810; total operating cost: $2,250. Before authorizing overtime, confirm available staffing/coverage for the required hours and the applicable order cutoff, SLA deadlines, and whether the 3-hour billed window meets them.",
+        "error": null,
+        "created_by": "lead",
+        "created_at": "2026-11-25T19:05:46.816993Z",
+        "started_at": "2026-11-25T19:05:46.818342Z",
+        "completed_at": "2026-11-25T19:05:56.101059Z"
+      },
+      {
+        "task_id": "tsk_7fa1bd_2_df1d",
+        "task_ref": "t2",
+        "run_id": "run_08160b7fa1bd",
+        "plan_id": "pln_bf496b4d500c",
+        "title": "Identify authorization information gaps",
+        "description": "List missing staffing and cutoff/SLA information relevant to authorizing overtime.",
+        "assigned_agent_id": "agt_7fa1bd_2_48f5",
+        "depends_on": [],
+        "expected_outputs": [
+          "Concise list of missing staffing and cutoff/SLA details"
+        ],
+        "acceptance_criteria": [
+          "Identifies practical information needed to assess feasibility and service impact.",
+          "Does not invent operational facts or make an unsupported authorization decision."
+        ],
+        "status": "completed",
+        "findings": "Before authorizing overtime, verify whether enough qualified staff are available for the required hours, including any role or shift coverage gaps and applicable scheduling, availability, or approval constraints. Clarify which orders must be completed by what cutoff or service deadline, whether overtime processing can meet that deadline (including any dispatch or carrier handoff window), and what backlog or delay is acceptable if overtime is not used.",
+        "error": null,
+        "created_by": "lead",
+        "created_at": "2026-11-25T19:05:46.816999Z",
+        "started_at": "2026-11-25T19:05:46.819051Z",
+        "completed_at": "2026-11-25T19:05:52.089698Z"
+      }
+    ],
+    "assumptions": [],
+    "missing_information": [
+      "Actual staffing availability, qualifications, and maximum permissible overtime are unspecified.",
+      "Order cutoff, promised processing or dispatch deadlines, and applicable SLA consequences are unspecified."
+    ],
+    "created_by": "lead",
+    "created_at": "2026-11-25T19:05:46.817033Z"
+  },
+  "tasks": [
+    {
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "task_ref": "t1",
+      "run_id": "run_08160b7fa1bd",
+      "plan_id": "pln_bf496b4d500c",
+      "title": "Calculate capacity, overtime, and cost",
+      "description": "Derive regular capacity, remaining orders, exact overtime duration, whole-hour billed overtime, and total operating cost.",
+      "assigned_agent_id": "agt_7fa1bd_1_df1c",
+      "depends_on": [],
+      "expected_outputs": [
+        "Concise calculations for all requested quantities",
+        "Total cost under whole-hour overtime billing"
+      ],
+      "acceptance_criteria": [
+        "Correctly applies regular and overtime rates and hours.",
+        "Clearly distinguishes exact overtime hours from rounded billed hours."
+      ],
+      "status": "completed",
+      "findings": "Regular capacity: 450 orders/hour × 8 hours = 3,600 orders. Backlog: 4,400 − 3,600 = 800 orders. Exact overtime: 800 ÷ 320 = 2.5 operational hours; whole-hour billing requires 3 billed hours. Regular cost: 8 × $180 = $1,440; overtime billed cost: 3 × $270 = $810; total operating cost: $2,250. Before authorizing overtime, confirm available staffing/coverage for the required hours and the applicable order cutoff, SLA deadlines, and whether the 3-hour billed window meets them.",
+      "error": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:05:46.816993Z",
+      "started_at": "2026-11-25T19:05:46.818342Z",
+      "completed_at": "2026-11-25T19:05:56.101059Z"
+    },
+    {
+      "task_id": "tsk_7fa1bd_2_df1d",
+      "task_ref": "t2",
+      "run_id": "run_08160b7fa1bd",
+      "plan_id": "pln_bf496b4d500c",
+      "title": "Identify authorization information gaps",
+      "description": "List missing staffing and cutoff/SLA information relevant to authorizing overtime.",
+      "assigned_agent_id": "agt_7fa1bd_2_48f5",
+      "depends_on": [],
+      "expected_outputs": [
+        "Concise list of missing staffing and cutoff/SLA details"
+      ],
+      "acceptance_criteria": [
+        "Identifies practical information needed to assess feasibility and service impact.",
+        "Does not invent operational facts or make an unsupported authorization decision."
+      ],
+      "status": "completed",
+      "findings": "Before authorizing overtime, verify whether enough qualified staff are available for the required hours, including any role or shift coverage gaps and applicable scheduling, availability, or approval constraints. Clarify which orders must be completed by what cutoff or service deadline, whether overtime processing can meet that deadline (including any dispatch or carrier handoff window), and what backlog or delay is acceptable if overtime is not used.",
+      "error": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:05:46.816999Z",
+      "started_at": "2026-11-25T19:05:46.819051Z",
+      "completed_at": "2026-11-25T19:05:52.089698Z"
+    }
+  ],
+  "task_transitions": [
+    {
+      "transition_id": "trn_bd66a3396611",
+      "run_id": "run_08160b7fa1bd",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "from_status": null,
+      "to_status": "pending",
+      "reason": "Plan initialized",
+      "created_at": "2026-11-25T19:05:46.816993+00:00"
+    },
+    {
+      "transition_id": "trn_1e8a6b517208",
+      "run_id": "run_08160b7fa1bd",
+      "task_id": "tsk_7fa1bd_2_df1d",
+      "from_status": null,
+      "to_status": "pending",
+      "reason": "Plan initialized",
+      "created_at": "2026-11-25T19:05:46.816999+00:00"
+    },
+    {
+      "transition_id": "trn_5844b88bb8ca",
+      "run_id": "run_08160b7fa1bd",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "from_status": "pending",
+      "to_status": "running",
+      "reason": "Dependencies satisfied.",
+      "created_at": "2026-11-25T19:05:46.818342+00:00"
+    },
+    {
+      "transition_id": "trn_d374cbd872b3",
+      "run_id": "run_08160b7fa1bd",
+      "task_id": "tsk_7fa1bd_2_df1d",
+      "from_status": "pending",
+      "to_status": "running",
+      "reason": "Dependencies satisfied.",
+      "created_at": "2026-11-25T19:05:46.819051+00:00"
+    },
+    {
+      "transition_id": "trn_27a79ad0b7e8",
+      "run_id": "run_08160b7fa1bd",
+      "task_id": "tsk_7fa1bd_2_df1d",
+      "from_status": "running",
+      "to_status": "completed",
+      "reason": "Task completed.",
+      "created_at": "2026-11-25T19:05:52.089698+00:00"
+    },
+    {
+      "transition_id": "trn_c5ab43f39007",
+      "run_id": "run_08160b7fa1bd",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "from_status": "running",
+      "to_status": "completed",
+      "reason": "Task completed.",
+      "created_at": "2026-11-25T19:05:56.101059+00:00"
+    }
+  ],
+  "execution_events": [
+    {
+      "event_id": "evt_0d5518649a73",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 1,
+      "event_type": "run_started",
+      "actor": "lead",
+      "message": "Started dynamic multi-agent network run.",
+      "payload": {
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "max_concurrency": 3,
+        "max_workers": 3,
+        "max_tasks": 3,
+        "run_deadline_seconds": 480.0
+      },
+      "created_at": "2026-11-25T19:05:38.616267Z"
+    },
+    {
+      "event_id": "evt_5860d36daff4",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 2,
+      "event_type": "budget_reserved",
+      "actor": "lead",
+      "message": "Reserved budget for planner attempt #1.",
+      "payload": {
+        "operation": "planner",
+        "attempt": 1,
+        "reservation_id": "res_a64db38544dd",
+        "reserved_cost_usd": 0.0032558,
+        "estimated_input_tokens": 1419,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-25T19:05:38.619963Z"
+    },
+    {
+      "event_id": "evt_f16ef8f42c2b",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 3,
+      "event_type": "model_call_completed",
+      "actor": "lead",
+      "message": "Completed planner attempt #1.",
+      "payload": {
+        "operation": "planner",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 860,
+        "output_tokens": 499,
+        "reasoning_tokens": 0,
+        "cached_input_tokens": 0,
+        "total_tokens": 1359,
+        "actual_cost_usd": 0.0003355,
+        "usage_reported": true,
+        "provider_response_id": "resp_0ff2a072adc99d87006b07318422e487d0ace3e2b0932c792a",
+        "response_status": "completed",
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 8194.385375012644
+      },
+      "created_at": "2026-11-25T19:05:46.816501Z"
+    },
+    {
+      "event_id": "evt_32e5f16586a8",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 4,
+      "event_type": "plan_created",
+      "actor": "lead",
+      "message": "Persisted execution plan with 2 specialist(s) and 2 task(s).",
+      "payload": {
+        "plan_id": "pln_bf496b4d500c",
+        "roles": [
+          "Operations calculation specialist",
+          "Staffing and service-level requirements analyst"
+        ],
+        "task_refs": [
+          "t1",
+          "t2"
+        ]
+      },
+      "created_at": "2026-11-25T19:05:46.817924Z"
+    },
+    {
+      "event_id": "evt_d95b90f5610a",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 5,
+      "event_type": "task_started",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Started task t1: Calculate capacity, overtime, and cost",
+      "payload": {
+        "task_id": "tsk_7fa1bd_1_5f89",
+        "agent_id": "agt_7fa1bd_1_df1c"
+      },
+      "created_at": "2026-11-25T19:05:46.818485Z"
+    },
+    {
+      "event_id": "evt_ad431cb7254f",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 6,
+      "event_type": "task_started",
+      "actor": "agt_7fa1bd_2_48f5",
+      "message": "Started task t2: Identify authorization information gaps",
+      "payload": {
+        "task_id": "tsk_7fa1bd_2_df1d",
+        "agent_id": "agt_7fa1bd_2_48f5"
+      },
+      "created_at": "2026-11-25T19:05:46.819285Z"
+    },
+    {
+      "event_id": "evt_f34430a868ec",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 7,
+      "event_type": "budget_reserved",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Reserved budget for worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "reservation_id": "res_a88356d5d9a4",
+        "reserved_cost_usd": 0.0044833,
+        "estimated_input_tokens": 3047,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-25T19:05:46.826007Z"
+    },
+    {
+      "event_id": "evt_916345a49b41",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 8,
+      "event_type": "budget_reserved",
+      "actor": "agt_7fa1bd_2_48f5",
+      "message": "Reserved budget for worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "reservation_id": "res_192209fe9314",
+        "reserved_cost_usd": 0.0044803,
+        "estimated_input_tokens": 3023,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-25T19:05:46.831018Z"
+    },
+    {
+      "event_id": "evt_a0f500597d66",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 9,
+      "event_type": "model_call_completed",
+      "actor": "agt_7fa1bd_2_48f5",
+      "message": "Completed worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 1949,
+        "output_tokens": 507,
+        "reasoning_tokens": 152,
+        "cached_input_tokens": 0,
+        "total_tokens": 2456,
+        "actual_cost_usd": 0.0004484,
+        "usage_reported": true,
+        "provider_response_id": "resp_0c2cab996571b491006b07318af2a887d08d942924c6c02e9b",
+        "response_status": "completed",
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 5241.380708990619
+      },
+      "created_at": "2026-11-25T19:05:52.075387Z"
+    },
+    {
+      "event_id": "evt_a1bf99b725d9",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 10,
+      "event_type": "claims_recorded",
+      "actor": "agt_7fa1bd_2_48f5",
+      "message": "Recorded 2 claim(s) and 1 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_7fa1bd_2_df1d",
+        "claim_ids": [
+          "clm_aa63655eae34",
+          "clm_b4bd20c93f9e"
+        ],
+        "evidence_ids": [
+          "evd_1145dacafad9"
+        ],
+        "tool_execution_ids": []
+      },
+      "created_at": "2026-11-25T19:05:52.089109Z"
+    },
+    {
+      "event_id": "evt_e270bf6b45ff",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 11,
+      "event_type": "task_completed",
+      "actor": "agt_7fa1bd_2_48f5",
+      "message": "Completed task t2: Identify authorization information gaps",
+      "payload": {
+        "task_id": "tsk_7fa1bd_2_df1d",
+        "claims_count": 2,
+        "messages_sent": 0
+      },
+      "created_at": "2026-11-25T19:05:52.089913Z"
+    },
+    {
+      "event_id": "evt_cf1ce03d125f",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 12,
+      "event_type": "model_call_completed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Completed worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 1961,
+        "output_tokens": 1345,
+        "reasoning_tokens": 257,
+        "cached_input_tokens": 0,
+        "total_tokens": 3306,
+        "actual_cost_usd": 0.0008686,
+        "usage_reported": true,
+        "provider_response_id": "resp_02dc053f32e77233006b07318ae97487d0b76f2badc19ce489",
+        "response_status": "completed",
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 9264.330708887428
+      },
+      "created_at": "2026-11-25T19:05:56.095476Z"
+    },
+    {
+      "event_id": "evt_b83a51dd959b",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 13,
+      "event_type": "tool_executed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Arithmetic tool succeeded: 450*8 -> 3600",
+      "payload": {
+        "tool_execution_id": "tlx_581c111f47e3",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "3600"
+      },
+      "created_at": "2026-11-25T19:05:56.098261Z"
+    },
+    {
+      "event_id": "evt_357d65e5877a",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 14,
+      "event_type": "tool_executed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Arithmetic tool succeeded: 4400-3600 -> 800",
+      "payload": {
+        "tool_execution_id": "tlx_01de78bc4c95",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": false,
+        "has_ungrounded_literals": false,
+        "computed_result": "800"
+      },
+      "created_at": "2026-11-25T19:05:56.098627Z"
+    },
+    {
+      "event_id": "evt_ff385220ad25",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 15,
+      "event_type": "tool_executed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Arithmetic tool succeeded: 8*180+3*270 -> 2250",
+      "payload": {
+        "tool_execution_id": "tlx_ba182fe39f2c",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": false,
+        "has_ungrounded_literals": false,
+        "computed_result": "2250"
+      },
+      "created_at": "2026-11-25T19:05:56.099100Z"
+    },
+    {
+      "event_id": "evt_021e9cf59c03",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 16,
+      "event_type": "claims_recorded",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Recorded 3 claim(s) and 4 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_7fa1bd_1_5f89",
+        "claim_ids": [
+          "clm_56642b6a20fb",
+          "clm_0bf2746b2eb9",
+          "clm_a1c222008cc5"
+        ],
+        "evidence_ids": [
+          "evd_bf26ee3e5647",
+          "evd_8637001f488c",
+          "evd_9c1685a04956",
+          "evd_fe306a90f126"
+        ],
+        "tool_execution_ids": [
+          "tlx_581c111f47e3",
+          "tlx_01de78bc4c95",
+          "tlx_ba182fe39f2c"
+        ]
+      },
+      "created_at": "2026-11-25T19:05:56.100654Z"
+    },
+    {
+      "event_id": "evt_703a9ecd83e7",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 17,
+      "event_type": "task_completed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Completed task t1: Calculate capacity, overtime, and cost",
+      "payload": {
+        "task_id": "tsk_7fa1bd_1_5f89",
+        "claims_count": 3,
+        "messages_sent": 0
+      },
+      "created_at": "2026-11-25T19:05:56.101192Z"
+    },
+    {
+      "event_id": "evt_4ef90e783f80",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 18,
+      "event_type": "budget_reserved",
+      "actor": "reviewer_combined",
+      "message": "Reserved budget for review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "reservation_id": "res_8e9fc2d1cc86",
+        "reserved_cost_usd": 0.0032488,
+        "estimated_input_tokens": 1363,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-25T19:05:56.107845Z"
+    },
+    {
+      "event_id": "evt_c8dde64c34db",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 19,
+      "event_type": "model_call_completed",
+      "actor": "reviewer_combined",
+      "message": "Completed review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 881,
+        "output_tokens": 244,
+        "reasoning_tokens": 76,
+        "cached_input_tokens": 0,
+        "total_tokens": 1125,
+        "actual_cost_usd": 0.0002101,
+        "usage_reported": true,
+        "provider_response_id": "resp_08e22144d72f7558006b0731942ea487d0940ed40d1ddfdb13",
+        "response_status": "completed",
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 3562.6419589389116
+      },
+      "created_at": "2026-11-25T19:05:59.672594Z"
+    },
+    {
+      "event_id": "evt_1c4f5f05bd2d",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 20,
+      "event_type": "review_completed",
+      "actor": "reviewer_pool",
+      "message": "Completed review round: 3 verdict(s), 2 blocking claim(s).",
+      "payload": {
+        "reviewer_calls": 1,
+        "blocking_claim_ids": [
+          "clm_0bf2746b2eb9",
+          "clm_a1c222008cc5"
+        ]
+      },
+      "created_at": "2026-11-25T19:05:59.673471Z"
+    },
+    {
+      "event_id": "evt_54a13d1d0209",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 21,
+      "event_type": "message_sent",
+      "actor": "reviewer_numbers",
+      "message": "Sent clarification message to agt_7fa1bd_1_df1c.",
+      "payload": {
+        "message_id": "msg_c80d73ace231",
+        "recipient_id": "agt_7fa1bd_1_df1c",
+        "related_claim_ids": [
+          "clm_0bf2746b2eb9"
+        ]
+      },
+      "created_at": "2026-11-25T19:05:59.675190Z"
+    },
+    {
+      "event_id": "evt_c36e709186f1",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 22,
+      "event_type": "message_sent",
+      "actor": "reviewer_numbers",
+      "message": "Sent clarification message to agt_7fa1bd_1_df1c.",
+      "payload": {
+        "message_id": "msg_1054c1da2b1f",
+        "recipient_id": "agt_7fa1bd_1_df1c",
+        "related_claim_ids": [
+          "clm_a1c222008cc5"
+        ]
+      },
+      "created_at": "2026-11-25T19:05:59.675533Z"
+    },
+    {
+      "event_id": "evt_eea9baa712fe",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 23,
+      "event_type": "messages_delivered",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Delivered 2 inbound message(s) to agt_7fa1bd_1_df1c.",
+      "payload": {
+        "message_ids": [
+          "msg_c80d73ace231",
+          "msg_1054c1da2b1f"
+        ]
+      },
+      "created_at": "2026-11-25T19:05:59.675804Z"
+    },
+    {
+      "event_id": "evt_2ff8a5ec1bfb",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 24,
+      "event_type": "budget_reserved",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Reserved budget for revision attempt #1.",
+      "payload": {
+        "operation": "revision",
+        "attempt": 1,
+        "reservation_id": "res_a806df9c8dc3",
+        "reserved_cost_usd": 0.0044654,
+        "estimated_input_tokens": 2904,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-25T19:05:59.679353Z"
+    },
+    {
+      "event_id": "evt_95f3494dc9fd",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 25,
+      "event_type": "model_call_completed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Completed revision attempt #1.",
+      "payload": {
+        "operation": "revision",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 1887,
+        "output_tokens": 1133,
+        "reasoning_tokens": 297,
+        "cached_input_tokens": 0,
+        "total_tokens": 3020,
+        "actual_cost_usd": 0.0007552,
+        "usage_reported": true,
+        "provider_response_id": "resp_0535cede5ab13aff006b073197c4b887d089697333798b679f",
+        "response_status": "completed",
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 8290.857957908884
+      },
+      "created_at": "2026-11-25T19:06:07.973996Z"
+    },
+    {
+      "event_id": "evt_5e91821a6ecc",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 26,
+      "event_type": "messages_consumed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Consumed 2 inbound message(s) in model context.",
+      "payload": {
+        "message_ids": [
+          "msg_c80d73ace231",
+          "msg_1054c1da2b1f"
+        ]
+      },
+      "created_at": "2026-11-25T19:06:07.975190Z"
+    },
+    {
+      "event_id": "evt_1174f09f7957",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 27,
+      "event_type": "claims_recorded",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Recorded 0 claim(s) and 5 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_7fa1bd_1_5f89",
+        "claim_ids": [],
+        "evidence_ids": [
+          "evd_457b606a7dec",
+          "evd_c0248ca1ca63",
+          "evd_88c75675aed8",
+          "evd_4aeba4feacbd",
+          "evd_32f17e0581df"
+        ],
+        "tool_execution_ids": []
+      },
+      "created_at": "2026-11-25T19:06:07.979432Z"
+    },
+    {
+      "event_id": "evt_9a71cf667c21",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 28,
+      "event_type": "tool_executed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Arithmetic tool succeeded: arrivals-(rate*shift_hours) -> 800",
+      "payload": {
+        "tool_execution_id": "tlx_71774399fbef",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "800"
+      },
+      "created_at": "2026-11-25T19:06:07.982359Z"
+    },
+    {
+      "event_id": "evt_fff4b66f9123",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 29,
+      "event_type": "claim_revised",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Recorded claim clm_0bf2746b2eb9 version 2.",
+      "payload": {
+        "claim_id": "clm_0bf2746b2eb9",
+        "version": 2,
+        "parent_claim_id": "clm_0bf2746b2eb9"
+      },
+      "created_at": "2026-11-25T19:06:07.982995Z"
+    },
+    {
+      "event_id": "evt_d1e62b5d371f",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 30,
+      "event_type": "tool_executed",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Arithmetic tool failed: shift_hours*regular_rate+ceil((arrivals-rate*shift_hours)/overtime_rate)*overtime_rate_cost -> Disallowed function 'ceil'.",
+      "payload": {
+        "tool_execution_id": "tlx_42d965ed1c47",
+        "success": false,
+        "matches_proposed": false,
+        "inputs_grounded": false,
+        "has_ungrounded_literals": false,
+        "computed_result": null
+      },
+      "created_at": "2026-11-25T19:06:07.986076Z"
+    },
+    {
+      "event_id": "evt_b05f1319a1f5",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 31,
+      "event_type": "claim_revised",
+      "actor": "agt_7fa1bd_1_df1c",
+      "message": "Recorded claim clm_a1c222008cc5 version 2.",
+      "payload": {
+        "claim_id": "clm_a1c222008cc5",
+        "version": 2,
+        "parent_claim_id": "clm_a1c222008cc5"
+      },
+      "created_at": "2026-11-25T19:06:07.986680Z"
+    },
+    {
+      "event_id": "evt_e07e3213f9cf",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 32,
+      "event_type": "budget_reserved",
+      "actor": "reviewer_combined",
+      "message": "Reserved budget for review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "reservation_id": "res_387564e19335",
+        "reserved_cost_usd": 0.0032635999999999997,
+        "estimated_input_tokens": 1481,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-25T19:06:07.995401Z"
+    },
+    {
+      "event_id": "evt_e5fc95c66c14",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 33,
+      "event_type": "model_call_completed",
+      "actor": "reviewer_combined",
+      "message": "Completed review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 980,
+        "output_tokens": 276,
+        "reasoning_tokens": 91,
+        "cached_input_tokens": 0,
+        "total_tokens": 1256,
+        "actual_cost_usd": 0.000236,
+        "usage_reported": true,
+        "provider_response_id": "resp_0389292d7aea5f22006b0731a0133487d08f0c09e5c499174f",
+        "response_status": "completed",
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 3686.2466250313446
+      },
+      "created_at": "2026-11-25T19:06:11.686669Z"
+    },
+    {
+      "event_id": "evt_90cdd8b83f00",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 34,
+      "event_type": "review_completed",
+      "actor": "reviewer_pool",
+      "message": "Completed review round: 2 verdict(s), 1 blocking claim(s).",
+      "payload": {
+        "reviewer_calls": 1,
+        "blocking_claim_ids": [
+          "clm_a1c222008cc5"
+        ]
+      },
+      "created_at": "2026-11-25T19:06:11.689114Z"
+    },
+    {
+      "event_id": "evt_e7513d22ca5e",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 35,
+      "event_type": "synthesis_fast_path",
+      "actor": "lead",
+      "message": "Used deterministic claim-locked synthesis fast path without extra model call.",
+      "payload": {
+        "lead_messages_consumed": 0
+      },
+      "created_at": "2026-11-25T19:06:11.693133Z"
+    },
+    {
+      "event_id": "evt_a7f8a348a3b6",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 36,
+      "event_type": "honesty_gate_evaluated",
+      "actor": "honesty_gate",
+      "message": "Honesty Gate release_mode=full, passed=True.",
+      "payload": {
+        "gate_id": "hgt_434a555a5bda",
+        "release_mode": "full",
+        "rejected_segments_count": 0,
+        "rejected_claim_refs_count": 0
+      },
+      "created_at": "2026-11-25T19:06:11.695884Z"
+    },
+    {
+      "event_id": "evt_e63e17743a88",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 37,
+      "event_type": "stages_executed_summary",
+      "actor": "orchestrator",
+      "message": "Stages executed: planner, dag_workers, peer_messaging, independent_review, targeted_repair, honesty_gate_and_synthesis",
+      "payload": {
+        "stages_executed": [
+          "planner",
+          "dag_workers",
+          "peer_messaging",
+          "independent_review",
+          "targeted_repair",
+          "honesty_gate_and_synthesis"
+        ],
+        "stage_telemetry": {
+          "planner": {
+            "configured": true,
+            "status": "completed"
+          },
+          "dag_workers": {
+            "configured": true,
+            "completed_tasks": 2,
+            "failed_or_blocked_tasks": 0,
+            "status": "completed"
+          },
+          "peer_messaging": {
+            "configured": true,
+            "delivered_messages": 2,
+            "followup_calls": 0,
+            "status": "completed"
+          },
+          "independent_review": {
+            "configured": true,
+            "reviewer_calls": 2,
+            "verdict_count": 5,
+            "status": "completed"
+          },
+          "targeted_repair": {
+            "configured": true,
+            "revision_attempts": 1,
+            "persisted_claim_versions": 2,
+            "accepted_revisions": 1,
+            "status": "completed"
+          },
+          "honesty_gate_and_synthesis": {
+            "configured": true,
+            "synthesis_mode": "deterministic_fast_path",
+            "release_mode": "full",
+            "status": "completed"
+          }
+        }
+      },
+      "created_at": "2026-11-25T19:06:11.698891Z"
+    },
+    {
+      "event_id": "evt_684cc484034f",
+      "run_id": "run_08160b7fa1bd",
+      "seq": 38,
+      "event_type": "run_completed",
+      "actor": "lead",
+      "message": "Network run finished with status=completed.",
+      "payload": {
+        "status": "completed",
+        "release_mode": "full",
+        "latency_ms": 33085.05829202477
+      },
+      "created_at": "2026-11-25T19:06:11.699542Z"
+    }
+  ],
+  "peer_messages": [
+    {
+      "message_id": "msg_c80d73ace231",
+      "run_id": "run_08160b7fa1bd",
+      "sender_id": "reviewer_numbers",
+      "recipient_id": "agt_7fa1bd_1_df1c",
+      "message_type": "clarification",
+      "content": "Revision requested for clm_0bf2746b2eb9 v1: Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims. Correction: Bind every variable and empirical constant to grounded provenance aliases.",
+      "related_claim_ids": [
+        "clm_0bf2746b2eb9"
+      ],
+      "delivery_status": "consumed",
+      "created_at": "2026-11-25T19:05:59.674729Z"
+    },
+    {
+      "message_id": "msg_1054c1da2b1f",
+      "run_id": "run_08160b7fa1bd",
+      "sender_id": "reviewer_numbers",
+      "recipient_id": "agt_7fa1bd_1_df1c",
+      "message_type": "clarification",
+      "content": "Revision requested for clm_a1c222008cc5 v1: Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims. Correction: Bind every variable and empirical constant to grounded provenance aliases.",
+      "related_claim_ids": [
+        "clm_a1c222008cc5"
+      ],
+      "delivery_status": "consumed",
+      "created_at": "2026-11-25T19:05:59.675394Z"
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "evd_1145dacafad9",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_5",
+      "excerpt": "State what staffing or cutoff-SLA information is missing before deciding whether to authorize overtime.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_2_df1d",
+      "created_by": "agt_7fa1bd_2_48f5",
+      "created_at": "2026-11-25T19:05:52.088242Z"
+    },
+    {
+      "evidence_id": "evd_bf26ee3e5647",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_1",
+      "excerpt": "A fulfillment center processes 450 standard orders per hour during an 8-hour regular shift at $180/hour operating cost.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:05:56.099372Z"
+    },
+    {
+      "evidence_id": "evd_8637001f488c",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_2",
+      "excerpt": "Today, 4,400 orders arrive.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:05:56.099528Z"
+    },
+    {
+      "evidence_id": "evd_9c1685a04956",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_3",
+      "excerpt": "Overtime runs at 320 orders/hour at $270/hour.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:05:56.099680Z"
+    },
+    {
+      "evidence_id": "evd_fe306a90f126",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "calculation",
+      "source_ref": "calculation",
+      "excerpt": "450 × 8 = 3,600 orders; 4,400 − 3,600 = 800 orders; 800 ÷ 320 = 2.5 operational hours, rounded up to 3 billed hours; 8 × $180 + 3 × $270 = $2,250.",
+      "reliability": "high",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:05:56.100082Z"
+    },
+    {
+      "evidence_id": "evd_457b606a7dec",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_1",
+      "excerpt": "Today, 4,400 orders arrive.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:06:07.977748Z"
+    },
+    {
+      "evidence_id": "evd_c0248ca1ca63",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_1",
+      "excerpt": "A fulfillment center processes 450 standard orders per hour during an 8-hour regular shift at $180/hour operating cost.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:06:07.978201Z"
+    },
+    {
+      "evidence_id": "evd_88c75675aed8",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_1",
+      "excerpt": "Overtime runs at 320 orders/hour at $270/hour.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:06:07.978545Z"
+    },
+    {
+      "evidence_id": "evd_4aeba4feacbd",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_1",
+      "excerpt": "Calculate regular-shift capacity, remaining backlog after regular hours, overtime hours needed (exact and rounded up to whole hours if billed in whole hours), and total operating cost under whole-hour overtime billing.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:06:07.978894Z"
+    },
+    {
+      "evidence_id": "evd_32f17e0581df",
+      "run_id": "run_08160b7fa1bd",
+      "source_type": "user_prompt",
+      "source_ref": "up_1",
+      "excerpt": "State what staffing or cutoff-SLA information is missing before deciding whether to authorize overtime.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "created_by": "agt_7fa1bd_1_df1c",
+      "created_at": "2026-11-25T19:06:07.979185Z"
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "clm_aa63655eae34",
+      "run_id": "run_08160b7fa1bd",
+      "statement": "Confirm staff availability and required role coverage for overtime, along with any relevant scheduling, approval, or other staffing constraints.",
+      "category": "recommendation",
+      "status": "asserted",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7fa1bd_2_48f5",
+      "task_id": "tsk_7fa1bd_2_df1d",
+      "evidence_ids": [
+        "evd_1145dacafad9"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [],
+      "requirement_refs": [
+        "req_1",
+        "req_3"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": null,
+      "is_material": false,
+      "created_at": "2026-11-25T19:05:52.088624Z",
+      "updated_at": "2026-11-25T19:05:52.088625Z"
+    },
+    {
+      "claim_id": "clm_b4bd20c93f9e",
+      "run_id": "run_08160b7fa1bd",
+      "statement": "Clarify order cutoff and service deadlines, dispatch or carrier handoff timing, and acceptable backlog or delay before deciding whether overtime is needed.",
+      "category": "recommendation",
+      "status": "asserted",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7fa1bd_2_48f5",
+      "task_id": "tsk_7fa1bd_2_df1d",
+      "evidence_ids": [
+        "evd_1145dacafad9"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [],
+      "requirement_refs": [
+        "req_3"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": null,
+      "is_material": false,
+      "created_at": "2026-11-25T19:05:52.088928Z",
+      "updated_at": "2026-11-25T19:05:52.088929Z"
+    },
+    {
+      "claim_id": "clm_56642b6a20fb",
+      "run_id": "run_08160b7fa1bd",
+      "statement": "Regular-shift capacity is 3,600 orders.",
+      "category": "computation",
+      "status": "supported",
+      "verification_status": "computationally_verified",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "evidence_ids": [
+        "evd_bf26ee3e5647"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_581c111f47e3"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:05:56.100252Z",
+      "updated_at": "2026-11-25T19:05:59.673364Z"
+    },
+    {
+      "claim_id": "clm_0bf2746b2eb9",
+      "run_id": "run_08160b7fa1bd",
+      "statement": "The remaining backlog after regular hours is 800 orders.",
+      "category": "computation",
+      "status": "rejected",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "evidence_ids": [
+        "evd_8637001f488c",
+        "evd_9c1685a04956"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_01de78bc4c95"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:05:56.100424Z",
+      "updated_at": "2026-11-25T19:05:56.104128Z"
+    },
+    {
+      "claim_id": "clm_0bf2746b2eb9",
+      "run_id": "run_08160b7fa1bd",
+      "statement": "The remaining backlog after regular hours is 800 orders.",
+      "category": "computation",
+      "status": "supported",
+      "verification_status": "computationally_verified",
+      "version": 2,
+      "parent_claim_id": "clm_0bf2746b2eb9",
+      "author_agent_id": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "evidence_ids": [
+        "evd_8637001f488c",
+        "evd_9c1685a04956",
+        "evd_457b606a7dec",
+        "evd_c0248ca1ca63"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_71774399fbef"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": "Bound each input to the user-request source; 4400 - (450 × 8) = 800.",
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:05:56.100424Z",
+      "updated_at": "2026-11-25T19:06:11.688868Z"
+    },
+    {
+      "claim_id": "clm_a1c222008cc5",
+      "run_id": "run_08160b7fa1bd",
+      "statement": "Whole-hour overtime billing yields a total operating cost of $2,250, consisting of $1,440 regular cost and $810 overtime cost.",
+      "category": "computation",
+      "status": "rejected",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "evidence_ids": [
+        "evd_bf26ee3e5647",
+        "evd_fe306a90f126"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_ba182fe39f2c"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:05:56.100539Z",
+      "updated_at": "2026-11-25T19:05:56.104538Z"
+    },
+    {
+      "claim_id": "clm_a1c222008cc5",
+      "run_id": "run_08160b7fa1bd",
+      "statement": "Whole-hour overtime billing yields a total operating cost of $2,250, consisting of $1,440 regular cost and $810 overtime cost.",
+      "category": "computation",
+      "status": "rejected",
+      "verification_status": "contradicted",
+      "version": 2,
+      "parent_claim_id": "clm_a1c222008cc5",
+      "author_agent_id": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "evidence_ids": [
+        "evd_bf26ee3e5647",
+        "evd_fe306a90f126",
+        "evd_457b606a7dec",
+        "evd_c0248ca1ca63",
+        "evd_88c75675aed8",
+        "evd_4aeba4feacbd",
+        "evd_32f17e0581df"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_42d965ed1c47"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [
+        "Overtime is billed in whole hours, rounding required hours up."
+      ],
+      "revision_notes": "Regular cost: 8 × 180 = 1440. Backlog is 800; 800 / 320 = 2.5 operational hours, rounded up to 3 billed hours. Overtime cost: 3 × 270 = 810; total = 2250.",
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:05:56.100539Z",
+      "updated_at": "2026-11-25T19:06:07.990381Z"
+    }
+  ],
+  "review_verdicts": [
+    {
+      "verdict_id": "vrd_1fc703f57f25",
+      "run_id": "run_08160b7fa1bd",
+      "claim_id": "clm_0bf2746b2eb9",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_numbers",
+      "review_dimension": "numbers",
+      "decision": "needs_revision",
+      "rationale": "Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims.",
+      "evidence_refs": [],
+      "required_correction": "Bind every variable and empirical constant to grounded provenance aliases.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Ungrounded arithmetic inputs or inline constants"
+      ],
+      "created_at": "2026-11-25T19:05:56.103799Z"
+    },
+    {
+      "verdict_id": "vrd_6170d2344c30",
+      "run_id": "run_08160b7fa1bd",
+      "claim_id": "clm_a1c222008cc5",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_numbers",
+      "review_dimension": "numbers",
+      "decision": "needs_revision",
+      "rationale": "Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims.",
+      "evidence_refs": [],
+      "required_correction": "Bind every variable and empirical constant to grounded provenance aliases.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Ungrounded arithmetic inputs or inline constants"
+      ],
+      "created_at": "2026-11-25T19:05:56.104419Z"
+    },
+    {
+      "verdict_id": "vrd_aec65efce153",
+      "run_id": "run_08160b7fa1bd",
+      "claim_id": "clm_56642b6a20fb",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "450 orders/hour × 8 hours = 3,600 orders; inputs and units match the prompt.",
+      "evidence_refs": [
+        "evd_bf26ee3e5647"
+      ],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-25T19:05:59.672877Z"
+    },
+    {
+      "verdict_id": "vrd_46edf841e329",
+      "run_id": "run_08160b7fa1bd",
+      "claim_id": "clm_a1c222008cc5",
+      "claim_version": 2,
+      "reviewer_id": "reviewer_numbers",
+      "review_dimension": "numbers",
+      "decision": "reject",
+      "rationale": "Deterministic arithmetic tool failed: Disallowed function 'ceil'.",
+      "evidence_refs": [],
+      "required_correction": "Provide a valid, safe arithmetic expression.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Arithmetic evaluation error"
+      ],
+      "created_at": "2026-11-25T19:06:07.990142Z"
+    },
+    {
+      "verdict_id": "vrd_57960f1a2af4",
+      "run_id": "run_08160b7fa1bd",
+      "claim_id": "clm_0bf2746b2eb9",
+      "claim_version": 2,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "Regular capacity is 450×8=3,600 orders; 4,400−3,600=800 orders remain. Tool result and units match.",
+      "evidence_refs": [
+        "evd_8637001f488c",
+        "evd_c0248ca1ca63"
+      ],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-25T19:06:11.687528Z"
+    }
+  ],
+  "tool_executions": [
+    {
+      "tool_execution_id": "tlx_581c111f47e3",
+      "run_id": "run_08160b7fa1bd",
+      "tool_name": "arithmetic",
+      "actor": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "expression": "450*8",
+      "variables": {
+        "rate": "450",
+        "hours": "8"
+      },
+      "input_provenance_refs": {
+        "rate": "up_1",
+        "hours": "up_1"
+      },
+      "provenance_details": {
+        "rate": {
+          "ref": "up_1",
+          "kind": "prompt_span",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "hours": {
+          "ref": "up_1",
+          "kind": "prompt_span",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "3600",
+      "computed_result": "3600",
+      "units": "orders",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-25T19:05:56.097812Z"
+    },
+    {
+      "tool_execution_id": "tlx_01de78bc4c95",
+      "run_id": "run_08160b7fa1bd",
+      "tool_name": "arithmetic",
+      "actor": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "expression": "4400-3600",
+      "variables": {
+        "arrivals": "4400",
+        "capacity": "3600"
+      },
+      "input_provenance_refs": {
+        "arrivals": "up_2",
+        "capacity": "clm_capacity"
+      },
+      "provenance_details": {
+        "arrivals": {
+          "ref": "up_2",
+          "kind": "prompt_span",
+          "resolved_id": "up_2",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "capacity": {
+          "ref": "clm_capacity",
+          "kind": "unknown",
+          "grounded": false,
+          "note": "Fabricated or unknown provenance target 'clm_capacity'."
+        }
+      },
+      "proposed_result": "800",
+      "computed_result": "800",
+      "units": "orders",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": false,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-25T19:05:56.098484Z"
+    },
+    {
+      "tool_execution_id": "tlx_ba182fe39f2c",
+      "run_id": "run_08160b7fa1bd",
+      "tool_name": "arithmetic",
+      "actor": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "expression": "8*180+3*270",
+      "variables": {
+        "regular_hours": "8",
+        "regular_rate": "180",
+        "billed_overtime_hours": "3",
+        "overtime_rate": "270"
+      },
+      "input_provenance_refs": {
+        "regular_hours": "up_1",
+        "regular_rate": "up_1",
+        "billed_overtime_hours": "up_4",
+        "overtime_rate": "up_3"
+      },
+      "provenance_details": {
+        "regular_hours": {
+          "ref": "up_1",
+          "kind": "prompt_span",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "regular_rate": {
+          "ref": "up_1",
+          "kind": "prompt_span",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "billed_overtime_hours": {
+          "ref": "up_4",
+          "kind": "prompt_span",
+          "resolved_id": "up_4",
+          "grounded": false,
+          "note": "Value '3' for variable 'billed_overtime_hours' not found in referenced target."
+        },
+        "overtime_rate": {
+          "ref": "up_3",
+          "kind": "prompt_span",
+          "resolved_id": "up_3",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "2250",
+      "computed_result": "2250",
+      "units": "dollars",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": false,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-25T19:05:56.098959Z"
+    },
+    {
+      "tool_execution_id": "tlx_71774399fbef",
+      "run_id": "run_08160b7fa1bd",
+      "tool_name": "arithmetic",
+      "actor": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "expression": "arrivals-(rate*shift_hours)",
+      "variables": {
+        "arrivals": "4400",
+        "rate": "450",
+        "shift_hours": "8"
+      },
+      "input_provenance_refs": {
+        "arrivals": "up_1",
+        "rate": "up_1",
+        "shift_hours": "up_1"
+      },
+      "provenance_details": {
+        "arrivals": {
+          "ref": "up_1",
+          "kind": "verified_evidence",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "rate": {
+          "ref": "up_1",
+          "kind": "verified_evidence",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "shift_hours": {
+          "ref": "up_1",
+          "kind": "verified_evidence",
+          "resolved_id": "up_1",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "800",
+      "computed_result": "800",
+      "units": "orders",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-25T19:06:07.982065Z"
+    },
+    {
+      "tool_execution_id": "tlx_42d965ed1c47",
+      "run_id": "run_08160b7fa1bd",
+      "tool_name": "arithmetic",
+      "actor": "agt_7fa1bd_1_df1c",
+      "task_id": "tsk_7fa1bd_1_5f89",
+      "expression": "shift_hours*regular_rate+ceil((arrivals-rate*shift_hours)/overtime_rate)*overtime_rate_cost",
+      "variables": {
+        "shift_hours": "8",
+        "regular_rate": "180",
+        "arrivals": "4400",
+        "rate": "450",
+        "overtime_rate": "320",
+        "overtime_rate_cost": "270"
+      },
+      "input_provenance_refs": {
+        "shift_hours": "up_1",
+        "regular_rate": "up_1",
+        "arrivals": "up_1",
+        "rate": "up_1",
+        "overtime_rate": "up_1",
+        "overtime_rate_cost": "up_1"
+      },
+      "provenance_details": {},
+      "proposed_result": "2250",
+      "computed_result": null,
+      "units": "dollars",
+      "assumptions": [
+        "Overtime is billed in whole hours, rounding required hours up."
+      ],
+      "matches_proposed": false,
+      "inputs_grounded": false,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": false,
+      "error": "Disallowed function 'ceil'.",
+      "created_at": "2026-11-25T19:06:07.985793Z"
+    }
+  ],
+  "honesty_gate": {
+    "gate_id": "hgt_434a555a5bda",
+    "run_id": "run_08160b7fa1bd",
+    "passed": true,
+    "release_mode": "full",
+    "rejected_segments": [],
+    "rejected_claim_refs": [],
+    "reasons": [],
+    "verification_summary": {
+      "material_claim_count": 3,
+      "supported_claim_count": 2,
+      "unresolved_claim_count": 0,
+      "rejected_claim_count": 1,
+      "stale_claim_count": 0,
+      "revision_count": 2,
+      "evidence_types": {
+        "user_prompt": 9,
+        "calculation": 1
+      },
+      "review_completeness": 1.0,
+      "requirement_coverage": 0.8333,
+      "requirements_answered": 2,
+      "requirements_partial": 1,
+      "requirements_unresolved": 0,
+      "requirements_missing": 0,
+      "requirement_statuses": [
+        {
+          "requirement_id": "req_1",
+          "text": "Use the given order volumes, processing rates, shift length, and hourly costs.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_56642b6a20fb",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_0bf2746b2eb9",
+              "claim_version": 2
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_2",
+          "text": "Report regular-shift capacity, backlog after regular hours, exact and whole-hour-rounded overtime, and total operating cost with whole-hour overtime billing.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_56642b6a20fb",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_0bf2746b2eb9",
+              "claim_version": 2
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_3",
+          "text": "State staffing or cutoff-SLA information missing before authorizing overtime.",
+          "status": "partially_answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_aa63655eae34",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_b4bd20c93f9e",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Addressed conditionally or via reviewed advisory action only."
+        }
+      ],
+      "execution_completed": true,
+      "release_checks_executed": true,
+      "content_released_safely": true,
+      "coverage_methodology": "internal_claim_linkage_not_independent_grade",
+      "independent_grade": null,
+      "honesty_gate_passed": true,
+      "honesty_gate_reasons": []
+    },
+    "created_at": "2026-11-25T19:06:11.695280Z"
+  },
+  "final_result": {
+    "run_id": "run_08160b7fa1bd",
+    "mode": "network",
+    "status": "completed",
+    "prompt": "A fulfillment center processes 450 standard orders per hour during an 8-hour regular shift at $180/hour operating cost. Today, 4,400 orders arrive. Overtime runs at 320 orders/hour at $270/hour. Calculate regular-shift capacity, remaining backlog after regular hours, overtime hours needed (exact and rounded up to whole hours if billed in whole hours), and total operating cost under whole-hour overtime billing. State what staffing or cutoff-SLA information is missing before deciding whether to authorize overtime.",
+    "provider": "openai",
+    "model": "gpt-6-luna",
+    "returned_model": "gpt-6-luna",
+    "answer": "**Verified Findings:**\n- Regular-shift capacity is 3,600 orders. [clm_56642b6a20fb@v1]\n- The remaining backlog after regular hours is 800 orders. [clm_0bf2746b2eb9@v2]\n\n**Proposed Actions (Advisory):**\n- Confirm staff availability and required role coverage for overtime, along with any relevant scheduling, approval, or other staffing constraints. [advisory; clm_aa63655eae34@v1]\n- Clarify order cutoff and service deadlines, dispatch or carrier handoff timing, and acceptable backlog or delay before deciding whether overtime is needed. [advisory; clm_b4bd20c93f9e@v1]\n\n**Unresolved / Withheld Items:**\n- Rejected claim (clm_a1c222008cc5 v2) withheld from verified output.",
+    "missing_information": [
+      "Actual staffing availability, qualifications, and maximum permissible overtime are unspecified.",
+      "Order cutoff, promised processing or dispatch deadlines, and applicable SLA consequences are unspecified.",
+      "Staff availability, required roles/coverage, and applicable scheduling or approval constraints.",
+      "Order cutoff and service deadlines, dispatch/carrier handoff timing, and acceptable backlog or delay.",
+      "Whether enough staff are available and authorized to cover overtime.",
+      "The order cutoff, relevant SLA deadlines, and whether overtime processing can meet them."
+    ],
+    "assumptions": [],
+    "confidence_notes": "Verification: 2/3 material claims supported, 0 unresolved, 1 rejected, 0 stale, 2 revision(s). Execution completed: True; checks safely passed: True; internal requirement linkage: 83% (2 answered, 1 partial, 0 unresolved, 0 missing — not an independent grade); review completeness: 100%. Honesty Gate: full (passed=True). Note: automated review and arithmetic verification constrain unsupported releases but remain fallible and do not guarantee empirical truth.",
+    "referenced_claim_ids": [
+      "clm_56642b6a20fb",
+      "clm_0bf2746b2eb9",
+      "clm_aa63655eae34",
+      "clm_b4bd20c93f9e"
+    ],
+    "specialist_roles": [
+      "Operations calculation specialist",
+      "Staffing and service-level requirements analyst"
+    ],
+    "incomplete_tasks": [],
+    "synthesis_mode": "deterministic_fast_path",
+    "baseline_mode": null,
+    "verification": {
+      "material_claim_count": 3,
+      "supported_claim_count": 2,
+      "unresolved_claim_count": 0,
+      "rejected_claim_count": 1,
+      "stale_claim_count": 0,
+      "revision_count": 2,
+      "evidence_types": {
+        "user_prompt": 9,
+        "calculation": 1
+      },
+      "review_completeness": 1.0,
+      "requirement_coverage": 0.8333,
+      "requirements_answered": 2,
+      "requirements_partial": 1,
+      "requirements_unresolved": 0,
+      "requirements_missing": 0,
+      "requirement_statuses": [
+        {
+          "requirement_id": "req_1",
+          "text": "Use the given order volumes, processing rates, shift length, and hourly costs.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_56642b6a20fb",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_0bf2746b2eb9",
+              "claim_version": 2
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_2",
+          "text": "Report regular-shift capacity, backlog after regular hours, exact and whole-hour-rounded overtime, and total operating cost with whole-hour overtime billing.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_56642b6a20fb",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_0bf2746b2eb9",
+              "claim_version": 2
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_3",
+          "text": "State staffing or cutoff-SLA information missing before authorizing overtime.",
+          "status": "partially_answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_aa63655eae34",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_b4bd20c93f9e",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Addressed conditionally or via reviewed advisory action only."
+        }
+      ],
+      "execution_completed": true,
+      "release_checks_executed": true,
+      "content_released_safely": true,
+      "coverage_methodology": "internal_claim_linkage_not_independent_grade",
+      "independent_grade": null,
+      "honesty_gate_passed": true,
+      "honesty_gate_reasons": []
+    },
+    "usage": {
+      "input_tokens": 8518,
+      "output_tokens": 4004,
+      "reasoning_tokens": 0,
+      "cached_input_tokens": 0,
+      "total_tokens": 12522,
+      "estimated_cost_usd": 0.0231972,
+      "actual_cost_usd": 0.0028538,
+      "model_calls": 6,
+      "successful_operations": 6,
+      "retries": 0,
+      "latency_ms": 38239.84333476983,
+      "usage_reported": true,
+      "returned_model": null,
+      "provider_response_id": null,
+      "response_status": null,
+      "incomplete_reason": null
+    },
+    "latency_ms": 33085.05829202477,
+    "error": null,
+    "created_at": "2026-11-25T19:05:38.614819Z",
+    "completed_at": "2026-11-25T19:06:11.699499Z"
+  }
+}

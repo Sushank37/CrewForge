@@ -161,3 +161,36 @@ uv run crewforge-mcp --transport streamable-http --host 127.0.0.1 --port 8000
 - **Explicit Global Output Ceiling:** `max_output_tokens` acts as a hard ceiling across all operation overrides in `CrewForgeSettings.output_limit_for_operation()` and `ModelExecutor`.
 - **Bounded Truncation Recovery:** At most one compact regeneration attempt per network run (and equivalent in `BaselineRunner`) on explicit `truncated_response` / `incomplete_response` errors, with separate budget reservation and no ceiling raise.
 - **Document Lineage & Reviewer Visibility:** Preserves primary `doc_1..doc_N` provenance aliases, normalizes retrieved-document citations, surfaces `source_ref` to independent reviewers, preserves unrelated `SUPPORTED` claims during synthesis, and emits `stages_executed_summary` after Honesty Gate completion.
+
+## CrewForge Mission Control (Observability Dashboard)
+
+CrewForge Mission Control is a read-only localhost observability dashboard (`127.0.0.1:8765`) for inspecting multi-agent execution, dynamic agent topology, claim/evidence lineage, independent reviewer verdicts, Honesty Gate decisions, historical trace replay, and reconciled benchmark results.
+
+### One-Command Dashboard Startup
+
+```bash
+.venv/bin/crewforge-dashboard
+```
+
+By default, this binds to `127.0.0.1:8765`, loads historical Phase 5E demo traces from `demo/traces/`, loads reconciled V2 benchmark results from `demo/v2_reconciled_scores.json`, and polls `.crewforge/demo_live.db` in read-only mode.
+
+### Live Monitoring Alongside MCP Server
+
+Start both the MCP server and Mission Control against the same dedicated demo database:
+
+```bash
+# Terminal 1 — MCP server writing to demo_live.db
+CREWFORGE_DB_PATH=.crewforge/demo_live.db .venv/bin/crewforge-mcp --transport streamable-http --host 127.0.0.1 --port 8000
+
+# Terminal 2 — Mission Control reading demo_live.db (read-only)
+.venv/bin/crewforge-dashboard --db-path .crewforge/demo_live.db --host 127.0.0.1 --port 8765
+```
+
+### Judge-Facing Walkthrough
+
+1. **Historical Replay (default view):** Opens with the genuine Phase 5E cloud canary (`phase5e_canary_a.json`, `run_08160b7fa1bd`). Use **Play / Pause**, **Step**, **Restart**, speed (`0.5x`–`4x`), or the **Timeline Scrubber** to step through events in recorded order; future claims, verdicts, and the Honesty Gate release remain hidden until their corresponding events.
+2. **Dynamic Agent Topology:** Click any persisted node (Lead, Specialist, Reviewer, or Honesty Gate) in the SVG graph to inspect assigned tasks and activity. Solid blue edges show task dependencies; dashed teal edges show peer messages.
+3. **Verification Inspector & Honesty Gate:** Click any claim in the Claim Ledger to inspect its requirement links, supporting evidence (`source_ref`, `source_type`), deterministic arithmetic results, reviewer verdicts, and version history.
+4. **Live Monitor:** Switch to **Live Monitor** to poll the configured demo SQLite database for newly created runs.
+5. **Benchmark V2:** Switch to **Benchmark V2** to inspect the complete ChatGPT-assisted blind semantic grading results (`96.50` baseline vs `55.50` network, `1/10` network wins, 5 domain breakdowns, cost/latency, and David vs Goliath status: `Not executed — local readiness blocker.`).
+

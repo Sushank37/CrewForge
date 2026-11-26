@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CrewForge Mission Control</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">CF</div>
+      <div>
+        <div class="brand-title">CrewForge <span class="brand-sub">Mission Control</span></div>
+        <div class="brand-meta">Team: Git Commit &middot; Challenge: Chain of Command — Multi-Agent Systems &middot; Engine: <code>612f64e</code></div>
+      </div>
+    </div>
+
+    <nav class="mode-tabs" aria-label="Dashboard Modes">
+      <button id="tab-replay" class="tab-btn active" data-tab="replay">Historical Replay</button>
+      <button id="tab-live" class="tab-btn" data-tab="live">Live Monitor</button>
+      <button id="tab-benchmark" class="tab-btn" data-tab="benchmark">Benchmark V2</button>
+    </nav>
+
+    <div class="topbar-right">
+      <span id="mode-indicator" class="pill pill-amber">HISTORICAL REPLAY</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- EXECUTION VIEW (shared by Historical Replay & Live Monitor) -->
+    <section id="view-execution">
+      <!-- Source Selector & Replay Bar -->
+      <div class="panel control-bar">
+        <div id="replay-controls" class="control-group">
+          <label for="replay-select" class="ctrl-label">Demo Trace</label>
+          <select id="replay-select" class="select-input"></select>
+          <div class="replay-transport">
+            <button id="btn-restart" class="btn btn-sm" title="Restart">&#x23EE; Restart</button>
+            <button id="btn-play" class="btn btn-sm btn-primary" title="Play/Pause">&#x25B6; Play</button>
+            <button id="btn-step" class="btn btn-sm" title="Step Forward">Step &#x23ED;</button>
+            <select id="replay-speed" class="select-input select-sm" title="Playback Speed">
+              <option value="0.5">0.5x</option>
+              <option value="1" selected>1x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+            </select>
+          </div>
+          <div class="scrubber-wrap">
+            <input id="replay-scrubber" type="range" min="0" max="0" value="0" />
+            <span id="replay-counter" class="mono-sm">0 / 0 events</span>
+          </div>
+        </div>
+
+        <div id="live-controls" class="control-group hidden">
+          <label for="live-select" class="ctrl-label">Live Demo DB Run</label>
+          <select id="live-select" class="select-input"></select>
+          <button id="btn-refresh-live" class="btn btn-sm">Refresh</button>
+          <span id="live-db-status" class="mono-sm muted">Polling read-only demo DB...</span>
+        </div>
+      </div>
+
+      <div id="replay-banner" class="banner banner-amber">
+        <strong>HISTORICAL REPLAY</strong> — Reconstructing persisted Phase 5E trace in recorded event order. Future claims, verdicts, and final answer remain hidden until their corresponding events.
+      </div>
+
+      <!-- Run Overview Cards -->
+      <section class="panel" aria-label="Run Overview">
+        <div class="panel-header">
+          <h2>Run Overview</h2>
+          <span id="ov-status-badge" class="pill">—</span>
+        </div>
+        <div id="run-overview-grid" class="kpi-grid"></div>
+      </section>
+
+      <!-- Main Two-Column Grid: Topology + Timeline -->
+      <div class="grid-2">
+        <!-- Dynamic Agent Topology -->
+        <section class="panel" aria-label="Dynamic Agent Topology">
+          <div class="panel-header">
+            <h2>Dynamic Agent Topology</h2>
+            <div class="legend">
+              <span class="leg-item"><span class="dot dot-blue"></span>Lead</span>
+              <span class="leg-item"><span class="dot dot-teal"></span>Specialist</span>
+              <span class="leg-item"><span class="dot dot-amber"></span>Reviewer</span>
+              <span class="leg-item"><span class="dot dot-green"></span>Gate</span>
+              <span class="leg-item"><span class="line-solid"></span>Task Dep</span>
+              <span class="leg-item"><span class="line-dashed"></span>Peer Msg</span>
+            </div>
+          </div>
+          <div id="topology-canvas" class="topology-wrap"></div>
+          <div id="agent-drawer" class="drawer hidden"></div>
+        </section>
+
+        <!-- Execution Timeline -->
+        <section class="panel" aria-label="Execution Timeline">
+          <div class="panel-header">
+            <h2>Execution Timeline</h2>
+            <span id="timeline-count" class="mono-sm muted">0 events</span>
+          </div>
+          <div id="timeline-filters" class="filter-bar"></div>
+          <div id="timeline-list" class="timeline-list"></div>
+        </section>
+      </div>
+
+      <!-- Verification Inspector & Honesty Gate -->
+      <div class="grid-2">
+        <!-- Claim Ledger -->
+        <section class="panel" aria-label="Verification Inspector">
+          <div class="panel-header">
+            <h2>Verification Inspector — Claim Ledger</h2>
+            <span id="claims-summary" class="mono-sm muted">0 claims</span>
+          </div>
+          <div id="claims-list" class="claims-list"></div>
+          <div id="claim-detail" class="drawer hidden"></div>
+        </section>
+
+        <!-- Honesty Gate Panel -->
+        <section class="panel" aria-label="Honesty Gate">
+          <div class="panel-header">
+            <h2>Honesty Gate &amp; Final Release</h2>
+            <span id="gate-mode-pill" class="pill">—</span>
+          </div>
+          <div id="honesty-gate-body" class="gate-body"></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- BENCHMARK V2 VIEW -->
+    <section id="view-benchmark" class="hidden">
+      <div id="benchmark-body"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

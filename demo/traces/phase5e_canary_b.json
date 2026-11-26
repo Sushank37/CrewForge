@@ -1,0 +1,2092 @@
+{
+  "export_version": "1.1",
+  "exported_at": "2026-11-26T15:10:04.851551+00:00",
+  "is_historical_replay": true,
+  "run_id": "run_808cff6805b4",
+  "mode": "network",
+  "status": "completed",
+  "provider": "openai",
+  "model": "gpt-6-luna",
+  "returned_model": "gpt-6-luna",
+  "prompt": "Using the attached Cloud API Support Tier Policy only, calculate eligible unplanned downtime, monthly uptime percentage, and the potential service-credit amount. Explain whether a cash refund is available, whether the filing deadline can be dated today, and what remains uncertain before final claim approval.",
+  "error": null,
+  "created_at": "2026-11-25T19:08:23.209670+00:00",
+  "completed_at": "2026-11-25T19:09:07.890781+00:00",
+  "latency_ms": 44682.04887502361,
+  "usage": {
+    "input_tokens": 11437,
+    "output_tokens": 5367,
+    "reasoning_tokens": 0,
+    "cached_input_tokens": 0,
+    "total_tokens": 16804,
+    "estimated_cost_usd": 0.0278394,
+    "actual_cost_usd": 0.0038272000000000002,
+    "model_calls": 7,
+    "successful_operations": 7,
+    "retries": 0,
+    "latency_ms": 49957.16725115199,
+    "usage_reported": true,
+    "returned_model": null,
+    "provider_response_id": null,
+    "response_status": null,
+    "incomplete_reason": null
+  },
+  "roster": [
+    {
+      "agent_id": "agt_6805b4_1_6767",
+      "agent_ref": "a1",
+      "run_id": "run_808cff6805b4",
+      "role": "Policy calculation analyst",
+      "instructions": "Calculate eligible downtime, monthly uptime, and the potential service credit strictly from the supplied policy and incident summary.",
+      "capabilities": [
+        "calculation",
+        "reasoning"
+      ],
+      "model_override": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:08:32.790078Z"
+    },
+    {
+      "agent_id": "agt_6805b4_2_2dec",
+      "agent_ref": "a2",
+      "run_id": "run_808cff6805b4",
+      "role": "Claim terms analyst",
+      "instructions": "Interpret the policy's refund and filing-deadline terms, and identify incident facts missing for final claim approval. Use only the supplied policy.",
+      "capabilities": [
+        "analysis",
+        "reasoning"
+      ],
+      "model_override": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:08:32.790089Z"
+    }
+  ],
+  "execution_plan": {
+    "plan_id": "pln_3b24eef80ac7",
+    "run_id": "run_808cff6805b4",
+    "goal": "Using only the Cloud API Support Tier Policy, determine eligible unplanned downtime, monthly uptime, potential service credit, refund availability, filing-deadline status, and unresolved approval uncertainties.",
+    "user_requirements": [
+      "Use only the supplied Cloud API Support Tier Policy.",
+      "Calculate eligible unplanned downtime, monthly uptime percentage, and potential service-credit amount.",
+      "Explain whether a cash refund is available.",
+      "Assess whether the filing deadline can be dated today.",
+      "Identify what remains uncertain before final claim approval."
+    ],
+    "acceptance_criteria": [
+      "Exclude planned maintenance announced at least 72 hours ahead from downtime.",
+      "Show the uptime calculation using the policy's 43,200-minute month.",
+      "Apply the stated credit tier to eligible unplanned downtime and the $12,000 monthly contract.",
+      "Explain the 14-day deadline in relation to the missing incident closure date.",
+      "Distinguish known policy facts from unresolved incident information."
+    ],
+    "agents": [
+      {
+        "agent_id": "agt_6805b4_1_6767",
+        "agent_ref": "a1",
+        "run_id": "run_808cff6805b4",
+        "role": "Policy calculation analyst",
+        "instructions": "Calculate eligible downtime, monthly uptime, and the potential service credit strictly from the supplied policy and incident summary.",
+        "capabilities": [
+          "calculation",
+          "reasoning"
+        ],
+        "model_override": null,
+        "created_by": "lead",
+        "created_at": "2026-11-25T19:08:32.790078Z"
+      },
+      {
+        "agent_id": "agt_6805b4_2_2dec",
+        "agent_ref": "a2",
+        "run_id": "run_808cff6805b4",
+        "role": "Claim terms analyst",
+        "instructions": "Interpret the policy's refund and filing-deadline terms, and identify incident facts missing for final claim approval. Use only the supplied policy.",
+        "capabilities": [
+          "analysis",
+          "reasoning"
+        ],
+        "model_override": null,
+        "created_by": "lead",
+        "created_at": "2026-11-25T19:08:32.790089Z"
+      }
+    ],
+    "tasks": [
+      {
+        "task_id": "tsk_6805b4_1_740d",
+        "task_ref": "t1",
+        "run_id": "run_808cff6805b4",
+        "plan_id": "pln_3b24eef80ac7",
+        "title": "Calculate downtime, uptime, and potential credit",
+        "description": "Apply the planned-maintenance exclusion and policy thresholds to the incident summary; calculate uptime across the stated 43,200-minute month and the applicable credit on the contract.",
+        "assigned_agent_id": "agt_6805b4_1_6767",
+        "depends_on": [],
+        "expected_outputs": [
+          "Eligible unplanned downtime and calculation",
+          "Monthly uptime percentage and calculation",
+          "Applicable potential service-credit amount and tier"
+        ],
+        "acceptance_criteria": [
+          "The 20 minutes of qualifying planned maintenance are excluded from the 95-minute outage.",
+          "Calculations use 43,200 minutes and the $12,000 monthly contract.",
+          "The credit tier is selected using eligible unplanned downtime."
+        ],
+        "status": "completed",
+        "findings": "Eligible unplanned downtime is 75 minutes (95 total outage minutes minus 20 minutes of planned maintenance announced 96 hours ahead). Monthly uptime is 99.8264%, below the 99.90% guarantee. The 75-minute duration falls in the 44–120-minute tier, giving a potential $1,200 credit. The policy allows credits only on future invoices, not as cash refunds. The 14-day claim deadline runs from incident closure, but closure date is not logged, so it cannot be dated today from the supplied information. Root cause and closure date remain unresolved.",
+        "error": null,
+        "created_by": "lead",
+        "created_at": "2026-11-25T19:08:32.790114Z",
+        "started_at": "2026-11-25T19:08:32.792044Z",
+        "completed_at": "2026-11-25T19:08:41.081580Z"
+      },
+      {
+        "task_id": "tsk_6805b4_2_c3a3",
+        "task_ref": "t2",
+        "run_id": "run_808cff6805b4",
+        "plan_id": "pln_3b24eef80ac7",
+        "title": "Assess refund, deadline, and approval uncertainties",
+        "description": "Explain whether the policy permits cash refunds, whether the 14-day claim deadline can be calendared from the available facts, and what remains unresolved for claim approval.",
+        "assigned_agent_id": "agt_6805b4_2_2dec",
+        "depends_on": [],
+        "expected_outputs": [
+          "Refund availability under the policy",
+          "Deadline status and the information needed to date it",
+          "List of unresolved incident facts relevant to approval"
+        ],
+        "acceptance_criteria": [
+          "Reflects that credits apply to future invoices and never as cash refunds.",
+          "Does not invent a closure date or deadline date.",
+          "Identifies the unlogged root cause and closure date as unresolved."
+        ],
+        "status": "completed",
+        "findings": "The policy provides service credits only toward future invoices and explicitly rules out cash refunds. Claims are due within 14 days of incident closure, but the closure date is not logged, so the deadline cannot yet be calendared. Root cause and closure date remain unresolved incident facts relevant to final claim approval.",
+        "error": null,
+        "created_by": "lead",
+        "created_at": "2026-11-25T19:08:32.790120Z",
+        "started_at": "2026-11-25T19:08:32.792711Z",
+        "completed_at": "2026-11-25T19:08:38.192243Z"
+      }
+    ],
+    "assumptions": [],
+    "missing_information": [
+      "Incident closure date is not logged, so the 14-day filing deadline cannot yet be assigned a calendar date.",
+      "Root cause is not logged; the policy does not specify whether or how root cause affects claim approval."
+    ],
+    "created_by": "lead",
+    "created_at": "2026-11-25T19:08:32.790135Z"
+  },
+  "tasks": [
+    {
+      "task_id": "tsk_6805b4_1_740d",
+      "task_ref": "t1",
+      "run_id": "run_808cff6805b4",
+      "plan_id": "pln_3b24eef80ac7",
+      "title": "Calculate downtime, uptime, and potential credit",
+      "description": "Apply the planned-maintenance exclusion and policy thresholds to the incident summary; calculate uptime across the stated 43,200-minute month and the applicable credit on the contract.",
+      "assigned_agent_id": "agt_6805b4_1_6767",
+      "depends_on": [],
+      "expected_outputs": [
+        "Eligible unplanned downtime and calculation",
+        "Monthly uptime percentage and calculation",
+        "Applicable potential service-credit amount and tier"
+      ],
+      "acceptance_criteria": [
+        "The 20 minutes of qualifying planned maintenance are excluded from the 95-minute outage.",
+        "Calculations use 43,200 minutes and the $12,000 monthly contract.",
+        "The credit tier is selected using eligible unplanned downtime."
+      ],
+      "status": "completed",
+      "findings": "Eligible unplanned downtime is 75 minutes (95 total outage minutes minus 20 minutes of planned maintenance announced 96 hours ahead). Monthly uptime is 99.8264%, below the 99.90% guarantee. The 75-minute duration falls in the 44–120-minute tier, giving a potential $1,200 credit. The policy allows credits only on future invoices, not as cash refunds. The 14-day claim deadline runs from incident closure, but closure date is not logged, so it cannot be dated today from the supplied information. Root cause and closure date remain unresolved.",
+      "error": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:08:32.790114Z",
+      "started_at": "2026-11-25T19:08:32.792044Z",
+      "completed_at": "2026-11-25T19:08:41.081580Z"
+    },
+    {
+      "task_id": "tsk_6805b4_2_c3a3",
+      "task_ref": "t2",
+      "run_id": "run_808cff6805b4",
+      "plan_id": "pln_3b24eef80ac7",
+      "title": "Assess refund, deadline, and approval uncertainties",
+      "description": "Explain whether the policy permits cash refunds, whether the 14-day claim deadline can be calendared from the available facts, and what remains unresolved for claim approval.",
+      "assigned_agent_id": "agt_6805b4_2_2dec",
+      "depends_on": [],
+      "expected_outputs": [
+        "Refund availability under the policy",
+        "Deadline status and the information needed to date it",
+        "List of unresolved incident facts relevant to approval"
+      ],
+      "acceptance_criteria": [
+        "Reflects that credits apply to future invoices and never as cash refunds.",
+        "Does not invent a closure date or deadline date.",
+        "Identifies the unlogged root cause and closure date as unresolved."
+      ],
+      "status": "completed",
+      "findings": "The policy provides service credits only toward future invoices and explicitly rules out cash refunds. Claims are due within 14 days of incident closure, but the closure date is not logged, so the deadline cannot yet be calendared. Root cause and closure date remain unresolved incident facts relevant to final claim approval.",
+      "error": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:08:32.790120Z",
+      "started_at": "2026-11-25T19:08:32.792711Z",
+      "completed_at": "2026-11-25T19:08:38.192243Z"
+    }
+  ],
+  "task_transitions": [
+    {
+      "transition_id": "trn_756ee378241b",
+      "run_id": "run_808cff6805b4",
+      "task_id": "tsk_6805b4_1_740d",
+      "from_status": null,
+      "to_status": "pending",
+      "reason": "Plan initialized",
+      "created_at": "2026-11-25T19:08:32.790114+00:00"
+    },
+    {
+      "transition_id": "trn_fa1ad3704615",
+      "run_id": "run_808cff6805b4",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "from_status": null,
+      "to_status": "pending",
+      "reason": "Plan initialized",
+      "created_at": "2026-11-25T19:08:32.790120+00:00"
+    },
+    {
+      "transition_id": "trn_a21458201971",
+      "run_id": "run_808cff6805b4",
+      "task_id": "tsk_6805b4_1_740d",
+      "from_status": "pending",
+      "to_status": "running",
+      "reason": "Dependencies satisfied.",
+      "created_at": "2026-11-25T19:08:32.792044+00:00"
+    },
+    {
+      "transition_id": "trn_16f3ab32aa67",
+      "run_id": "run_808cff6805b4",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "from_status": "pending",
+      "to_status": "running",
+      "reason": "Dependencies satisfied.",
+      "created_at": "2026-11-25T19:08:32.792711+00:00"
+    },
+    {
+      "transition_id": "trn_01b47e3c753e",
+      "run_id": "run_808cff6805b4",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "from_status": "running",
+      "to_status": "completed",
+      "reason": "Task completed.",
+      "created_at": "2026-11-25T19:08:38.192243+00:00"
+    },
+    {
+      "transition_id": "trn_9da6fd14b281",
+      "run_id": "run_808cff6805b4",
+      "task_id": "tsk_6805b4_1_740d",
+      "from_status": "running",
+      "to_status": "completed",
+      "reason": "Task completed.",
+      "created_at": "2026-11-25T19:08:41.081580+00:00"
+    }
+  ],
+  "execution_events": [
+    {
+      "event_id": "evt_bad320340c76",
+      "run_id": "run_808cff6805b4",
+      "seq": 1,
+      "event_type": "run_started",
+      "actor": "lead",
+      "message": "Started dynamic multi-agent network run.",
+      "payload": {
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "max_concurrency": 3,
+        "max_workers": 3,
+        "max_tasks": 3,
+        "run_deadline_seconds": 480.0
+      },
+      "created_at": "2026-11-25T19:08:23.210319Z"
+    },
+    {
+      "event_id": "evt_7bcc4360f985",
+      "run_id": "run_808cff6805b4",
+      "seq": 2,
+      "event_type": "documents_ingested",
+      "actor": "lead",
+      "message": "Ingested 1 verified reference excerpt(s).",
+      "payload": {
+        "evidence_ids": [
+          "evd_99d3bc5eaaaf"
+        ],
+        "sources": [
+          "canary_sla.md"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:23.212164Z"
+    },
+    {
+      "event_id": "evt_18f98a7967b9",
+      "run_id": "run_808cff6805b4",
+      "seq": 3,
+      "event_type": "budget_reserved",
+      "actor": "lead",
+      "message": "Reserved budget for planner attempt #1.",
+      "payload": {
+        "operation": "planner",
+        "attempt": 1,
+        "reservation_id": "res_11add0f61ed7",
+        "reserved_cost_usd": 0.0032793,
+        "estimated_input_tokens": 1607,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-25T19:08:23.215800Z"
+    },
+    {
+      "event_id": "evt_de867dceaebd",
+      "run_id": "run_808cff6805b4",
+      "seq": 4,
+      "event_type": "model_call_completed",
+      "actor": "lead",
+      "message": "Completed planner attempt #1.",
+      "payload": {
+        "operation": "planner",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 990,
+        "output_tokens": 947,
+        "reasoning_tokens": 149,
+        "cached_input_tokens": 0,
+        "total_tokens": 1937,
+        "actual_cost_usd": 0.0005725,
+        "usage_reported": true,
+        "provider_response_id": "resp_05f9be2554008fbb006b073227f16887d089f60d13fce6b834",
+        "response_status": "completed",
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 9571.678458014503
+      },
+      "created_at": "2026-11-25T19:08:32.789641Z"
+    },
+    {
+      "event_id": "evt_3e453e6f6fd0",
+      "run_id": "run_808cff6805b4",
+      "seq": 5,
+      "event_type": "plan_created",
+      "actor": "lead",
+      "message": "Persisted execution plan with 2 specialist(s) and 2 task(s).",
+      "payload": {
+        "plan_id": "pln_3b24eef80ac7",
+        "roles": [
+          "Policy calculation analyst",
+          "Claim terms analyst"
+        ],
+        "task_refs": [
+          "t1",
+          "t2"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:32.791063Z"
+    },
+    {
+      "event_id": "evt_e68dc0b35e28",
+      "run_id": "run_808cff6805b4",
+      "seq": 6,
+      "event_type": "task_started",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Started task t1: Calculate downtime, uptime, and potential credit",
+      "payload": {
+        "task_id": "tsk_6805b4_1_740d",
+        "agent_id": "agt_6805b4_1_6767"
+      },
+      "created_at": "2026-11-25T19:08:32.792279Z"
+    },
+    {
+      "event_id": "evt_d02b2aed1cd1",
+      "run_id": "run_808cff6805b4",
+      "seq": 7,
+      "event_type": "task_started",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Started task t2: Assess refund, deadline, and approval uncertainties",
+      "payload": {
+        "task_id": "tsk_6805b4_2_c3a3",
+        "agent_id": "agt_6805b4_2_2dec"
+      },
+      "created_at": "2026-11-25T19:08:32.793091Z"
+    },
+    {
+      "event_id": "evt_9ebe4cab59c7",
+      "run_id": "run_808cff6805b4",
+      "seq": 8,
+      "event_type": "budget_reserved",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Reserved budget for worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "reservation_id": "res_5e31fbc04c84",
+        "reserved_cost_usd": 0.0045023,
+        "estimated_input_tokens": 3199,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-25T19:08:32.799354Z"
+    },
+    {
+      "event_id": "evt_7d0273651fb1",
+      "run_id": "run_808cff6805b4",
+      "seq": 9,
+      "event_type": "budget_reserved",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Reserved budget for worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "reservation_id": "res_31b5243639bc",
+        "reserved_cost_usd": 0.004502600000000001,
+        "estimated_input_tokens": 3201,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-25T19:08:32.802255Z"
+    },
+    {
+      "event_id": "evt_c43b933a91f1",
+      "run_id": "run_808cff6805b4",
+      "seq": 10,
+      "event_type": "model_call_completed",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Completed worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 2061,
+        "output_tokens": 530,
+        "reasoning_tokens": 59,
+        "cached_input_tokens": 0,
+        "total_tokens": 2591,
+        "actual_cost_usd": 0.0004711,
+        "usage_reported": true,
+        "provider_response_id": "resp_0fad18d2c54a70a8006b073231193c87d0bb545a74b464be99",
+        "response_status": "completed",
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 5383.586707990617
+      },
+      "created_at": "2026-11-25T19:08:38.188702Z"
+    },
+    {
+      "event_id": "evt_0516aee4cce0",
+      "run_id": "run_808cff6805b4",
+      "seq": 11,
+      "event_type": "claims_recorded",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Recorded 3 claim(s) and 3 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_6805b4_2_c3a3",
+        "claim_ids": [
+          "clm_c736141810a1",
+          "clm_42fc1462a99f",
+          "clm_4c3e46e93785"
+        ],
+        "evidence_ids": [
+          "evd_27463eeccecb",
+          "evd_c44e3625bb70",
+          "evd_3b451528c433"
+        ],
+        "tool_execution_ids": []
+      },
+      "created_at": "2026-11-25T19:08:38.191680Z"
+    },
+    {
+      "event_id": "evt_5bced62ea1e6",
+      "run_id": "run_808cff6805b4",
+      "seq": 12,
+      "event_type": "task_completed",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Completed task t2: Assess refund, deadline, and approval uncertainties",
+      "payload": {
+        "task_id": "tsk_6805b4_2_c3a3",
+        "claims_count": 3,
+        "messages_sent": 0
+      },
+      "created_at": "2026-11-25T19:08:38.192479Z"
+    },
+    {
+      "event_id": "evt_370a353d5576",
+      "run_id": "run_808cff6805b4",
+      "seq": 13,
+      "event_type": "model_call_completed",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Completed worker attempt #1.",
+      "payload": {
+        "operation": "worker",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 2052,
+        "output_tokens": 1081,
+        "reasoning_tokens": 195,
+        "cached_input_tokens": 0,
+        "total_tokens": 3133,
+        "actual_cost_usd": 0.0007457000000000001,
+        "usage_reported": true,
+        "provider_response_id": "resp_01e7928e290e7291006b073230e26087d08e7672fcaab4589a",
+        "response_status": "completed",
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 8261.319959070534
+      },
+      "created_at": "2026-11-25T19:08:41.068801Z"
+    },
+    {
+      "event_id": "evt_81c8bc550204",
+      "run_id": "run_808cff6805b4",
+      "seq": 14,
+      "event_type": "tool_executed",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Arithmetic tool succeeded: 95-20 -> 75",
+      "payload": {
+        "tool_execution_id": "tlx_b555f08d25b9",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "75"
+      },
+      "created_at": "2026-11-25T19:08:41.076054Z"
+    },
+    {
+      "event_id": "evt_24f71ad1aacb",
+      "run_id": "run_808cff6805b4",
+      "seq": 15,
+      "event_type": "tool_executed",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Arithmetic tool succeeded: (43200-75)/43200*100 -> 99.82638888888888888888888889",
+      "payload": {
+        "tool_execution_id": "tlx_b1ef7574f0bb",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": false,
+        "has_ungrounded_literals": false,
+        "computed_result": "99.82638888888888888888888889"
+      },
+      "created_at": "2026-11-25T19:08:41.077568Z"
+    },
+    {
+      "event_id": "evt_24b81d204d83",
+      "run_id": "run_808cff6805b4",
+      "seq": 16,
+      "event_type": "tool_executed",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Arithmetic tool succeeded: 12000*0.10 -> 1200",
+      "payload": {
+        "tool_execution_id": "tlx_f50766b622cc",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": true,
+        "has_ungrounded_literals": false,
+        "computed_result": "1200"
+      },
+      "created_at": "2026-11-25T19:08:41.078512Z"
+    },
+    {
+      "event_id": "evt_2b663e0ed2a5",
+      "run_id": "run_808cff6805b4",
+      "seq": 17,
+      "event_type": "claims_recorded",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Recorded 3 claim(s) and 6 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_6805b4_1_740d",
+        "claim_ids": [
+          "clm_7a1c0ce318c5",
+          "clm_1d462aa8083d",
+          "clm_052d57cceb41"
+        ],
+        "evidence_ids": [
+          "evd_c4c418390e35",
+          "evd_b176627d44de",
+          "evd_b2cd9842078d",
+          "evd_913fbee4bafd",
+          "evd_b011e3962c0b",
+          "evd_183dfc2fe358"
+        ],
+        "tool_execution_ids": [
+          "tlx_b555f08d25b9",
+          "tlx_b1ef7574f0bb",
+          "tlx_f50766b622cc"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:41.081198Z"
+    },
+    {
+      "event_id": "evt_805463671991",
+      "run_id": "run_808cff6805b4",
+      "seq": 18,
+      "event_type": "task_completed",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Completed task t1: Calculate downtime, uptime, and potential credit",
+      "payload": {
+        "task_id": "tsk_6805b4_1_740d",
+        "claims_count": 3,
+        "messages_sent": 0
+      },
+      "created_at": "2026-11-25T19:08:41.081748Z"
+    },
+    {
+      "event_id": "evt_e243988b643f",
+      "run_id": "run_808cff6805b4",
+      "seq": 19,
+      "event_type": "budget_reserved",
+      "actor": "reviewer_combined",
+      "message": "Reserved budget for review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "reservation_id": "res_4e08ef6f556b",
+        "reserved_cost_usd": 0.0033264,
+        "estimated_input_tokens": 1984,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-25T19:08:41.090371Z"
+    },
+    {
+      "event_id": "evt_df700baa5025",
+      "run_id": "run_808cff6805b4",
+      "seq": 20,
+      "event_type": "model_call_completed",
+      "actor": "reviewer_combined",
+      "message": "Completed review attempt #1.",
+      "payload": {
+        "operation": "review",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 1437,
+        "output_tokens": 757,
+        "reasoning_tokens": 328,
+        "cached_input_tokens": 0,
+        "total_tokens": 2194,
+        "actual_cost_usd": 0.0005222,
+        "usage_reported": true,
+        "provider_response_id": "resp_03c61af9aba5cac8006b07323958e887d0adad99e56b15a075",
+        "response_status": "completed",
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 7234.931166982278
+      },
+      "created_at": "2026-11-25T19:08:48.329030Z"
+    },
+    {
+      "event_id": "evt_99fd33fd5ff2",
+      "run_id": "run_808cff6805b4",
+      "seq": 21,
+      "event_type": "review_completed",
+      "actor": "reviewer_pool",
+      "message": "Completed review round: 5 verdict(s), 2 blocking claim(s).",
+      "payload": {
+        "reviewer_calls": 1,
+        "blocking_claim_ids": [
+          "clm_1d462aa8083d",
+          "clm_42fc1462a99f"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:48.332275Z"
+    },
+    {
+      "event_id": "evt_af9c3447e87d",
+      "run_id": "run_808cff6805b4",
+      "seq": 22,
+      "event_type": "message_sent",
+      "actor": "reviewer_combined",
+      "message": "Sent clarification message to agt_6805b4_2_2dec.",
+      "payload": {
+        "message_id": "msg_b13e4df2f795",
+        "recipient_id": "agt_6805b4_2_2dec",
+        "related_claim_ids": [
+          "clm_42fc1462a99f"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:48.334978Z"
+    },
+    {
+      "event_id": "evt_2b534037980a",
+      "run_id": "run_808cff6805b4",
+      "seq": 23,
+      "event_type": "messages_delivered",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Delivered 1 inbound message(s) to agt_6805b4_2_2dec.",
+      "payload": {
+        "message_ids": [
+          "msg_b13e4df2f795"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:48.335482Z"
+    },
+    {
+      "event_id": "evt_5c4282bcb1ca",
+      "run_id": "run_808cff6805b4",
+      "seq": 24,
+      "event_type": "budget_reserved",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Reserved budget for revision attempt #1.",
+      "payload": {
+        "operation": "revision",
+        "attempt": 1,
+        "reservation_id": "res_85d46ec06df6",
+        "reserved_cost_usd": 0.0044243,
+        "estimated_input_tokens": 2575,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-25T19:08:48.341039Z"
+    },
+    {
+      "event_id": "evt_d66662b0550c",
+      "run_id": "run_808cff6805b4",
+      "seq": 25,
+      "event_type": "model_call_completed",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Completed revision attempt #1.",
+      "payload": {
+        "operation": "revision",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 1616,
+        "output_tokens": 459,
+        "reasoning_tokens": 178,
+        "cached_input_tokens": 0,
+        "total_tokens": 2075,
+        "actual_cost_usd": 0.0003911,
+        "usage_reported": true,
+        "provider_response_id": "resp_075e0ce95167c5ad006b0732406f8887d0bad6162aacdef715",
+        "response_status": "completed",
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 5409.608375048265
+      },
+      "created_at": "2026-11-25T19:08:53.753065Z"
+    },
+    {
+      "event_id": "evt_1cee9aef0668",
+      "run_id": "run_808cff6805b4",
+      "seq": 26,
+      "event_type": "messages_consumed",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Consumed 1 inbound message(s) in model context.",
+      "payload": {
+        "message_ids": [
+          "msg_b13e4df2f795"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:53.753475Z"
+    },
+    {
+      "event_id": "evt_3976fb1b74e9",
+      "run_id": "run_808cff6805b4",
+      "seq": 27,
+      "event_type": "claims_recorded",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Recorded 0 claim(s) and 1 evidence record(s).",
+      "payload": {
+        "task_id": "tsk_6805b4_2_c3a3",
+        "claim_ids": [],
+        "evidence_ids": [
+          "evd_42580462bf56"
+        ],
+        "tool_execution_ids": []
+      },
+      "created_at": "2026-11-25T19:08:53.754756Z"
+    },
+    {
+      "event_id": "evt_846efe7764b9",
+      "run_id": "run_808cff6805b4",
+      "seq": 28,
+      "event_type": "claim_revised",
+      "actor": "agt_6805b4_2_2dec",
+      "message": "Recorded claim clm_42fc1462a99f version 2.",
+      "payload": {
+        "claim_id": "clm_42fc1462a99f",
+        "version": 2,
+        "parent_claim_id": "clm_42fc1462a99f"
+      },
+      "created_at": "2026-11-25T19:08:53.755275Z"
+    },
+    {
+      "event_id": "evt_6a5dddd862c5",
+      "run_id": "run_808cff6805b4",
+      "seq": 29,
+      "event_type": "message_sent",
+      "actor": "reviewer_numbers",
+      "message": "Sent clarification message to agt_6805b4_1_6767.",
+      "payload": {
+        "message_id": "msg_80d6cc0afbe8",
+        "recipient_id": "agt_6805b4_1_6767",
+        "related_claim_ids": [
+          "clm_1d462aa8083d"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:53.755942Z"
+    },
+    {
+      "event_id": "evt_72cee4182fe5",
+      "run_id": "run_808cff6805b4",
+      "seq": 30,
+      "event_type": "messages_delivered",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Delivered 1 inbound message(s) to agt_6805b4_1_6767.",
+      "payload": {
+        "message_ids": [
+          "msg_80d6cc0afbe8"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:53.756186Z"
+    },
+    {
+      "event_id": "evt_ba3bbad38900",
+      "run_id": "run_808cff6805b4",
+      "seq": 31,
+      "event_type": "budget_reserved",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Reserved budget for revision attempt #1.",
+      "payload": {
+        "operation": "revision",
+        "attempt": 1,
+        "reservation_id": "res_c4a8dbe2f7e9",
+        "reserved_cost_usd": 0.0044231,
+        "estimated_input_tokens": 2565,
+        "max_output_tokens": 8192,
+        "effective_max_output_tokens": 8192
+      },
+      "created_at": "2026-11-25T19:08:53.759153Z"
+    },
+    {
+      "event_id": "evt_1dd20c356d79",
+      "run_id": "run_808cff6805b4",
+      "seq": 32,
+      "event_type": "model_call_completed",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Completed revision attempt #1.",
+      "payload": {
+        "operation": "revision",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 1630,
+        "output_tokens": 507,
+        "reasoning_tokens": 216,
+        "cached_input_tokens": 0,
+        "total_tokens": 2137,
+        "actual_cost_usd": 0.0004165,
+        "usage_reported": true,
+        "provider_response_id": "resp_0f79935b97490c8e006b073245db7487d09d4c2a69d49a3511",
+        "response_status": "completed",
+        "effective_max_output_tokens": 8192,
+        "latency_ms": 5427.217666991055
+      },
+      "created_at": "2026-11-25T19:08:59.190836Z"
+    },
+    {
+      "event_id": "evt_7d82f5c3d69b",
+      "run_id": "run_808cff6805b4",
+      "seq": 33,
+      "event_type": "messages_consumed",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Consumed 1 inbound message(s) in model context.",
+      "payload": {
+        "message_ids": [
+          "msg_80d6cc0afbe8"
+        ]
+      },
+      "created_at": "2026-11-25T19:08:59.191654Z"
+    },
+    {
+      "event_id": "evt_46828b1f7eef",
+      "run_id": "run_808cff6805b4",
+      "seq": 34,
+      "event_type": "tool_executed",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Arithmetic tool succeeded: (month_minutes-downtime_minutes)/month_minutes*100 -> 99.82638888888888888888888889",
+      "payload": {
+        "tool_execution_id": "tlx_29d89c891908",
+        "success": true,
+        "matches_proposed": true,
+        "inputs_grounded": false,
+        "has_ungrounded_literals": false,
+        "computed_result": "99.82638888888888888888888889"
+      },
+      "created_at": "2026-11-25T19:08:59.196949Z"
+    },
+    {
+      "event_id": "evt_fdf77fe7965f",
+      "run_id": "run_808cff6805b4",
+      "seq": 35,
+      "event_type": "claim_revised",
+      "actor": "agt_6805b4_1_6767",
+      "message": "Recorded claim clm_1d462aa8083d version 2.",
+      "payload": {
+        "claim_id": "clm_1d462aa8083d",
+        "version": 2,
+        "parent_claim_id": "clm_1d462aa8083d"
+      },
+      "created_at": "2026-11-25T19:08:59.197574Z"
+    },
+    {
+      "event_id": "evt_3d4c2e36f212",
+      "run_id": "run_808cff6805b4",
+      "seq": 36,
+      "event_type": "budget_reserved",
+      "actor": "lead",
+      "message": "Reserved budget for synthesis attempt #1.",
+      "payload": {
+        "operation": "synthesis",
+        "attempt": 1,
+        "reservation_id": "res_a423de2c214e",
+        "reserved_cost_usd": 0.0033814,
+        "estimated_input_tokens": 2424,
+        "max_output_tokens": 6144,
+        "effective_max_output_tokens": 6144
+      },
+      "created_at": "2026-11-25T19:08:59.210036Z"
+    },
+    {
+      "event_id": "evt_263c9701bd53",
+      "run_id": "run_808cff6805b4",
+      "seq": 37,
+      "event_type": "model_call_completed",
+      "actor": "lead",
+      "message": "Completed synthesis attempt #1.",
+      "payload": {
+        "operation": "synthesis",
+        "attempt": 1,
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "returned_model": "gpt-6-luna",
+        "input_tokens": 1651,
+        "output_tokens": 1086,
+        "reasoning_tokens": 308,
+        "cached_input_tokens": 0,
+        "total_tokens": 2737,
+        "actual_cost_usd": 0.0007081,
+        "usage_reported": true,
+        "provider_response_id": "resp_078c2a0ce4988b9f006b07324b4f6087d0a42c08d2915c2d5f",
+        "response_status": "completed",
+        "effective_max_output_tokens": 6144,
+        "latency_ms": 8668.824917054735
+      },
+      "created_at": "2026-11-25T19:09:07.883660Z"
+    },
+    {
+      "event_id": "evt_2910eb0b7aee",
+      "run_id": "run_808cff6805b4",
+      "seq": 38,
+      "event_type": "synthesis_completed",
+      "actor": "lead",
+      "message": "Lead synthesis completed; passing output to deterministic Honesty Gate.",
+      "payload": {
+        "lead_messages_consumed": 0
+      },
+      "created_at": "2026-11-25T19:09:07.884169Z"
+    },
+    {
+      "event_id": "evt_4cca2d21c4b7",
+      "run_id": "run_808cff6805b4",
+      "seq": 39,
+      "event_type": "honesty_gate_evaluated",
+      "actor": "honesty_gate",
+      "message": "Honesty Gate release_mode=full, passed=True.",
+      "payload": {
+        "gate_id": "hgt_1f5d6f4d3a9e",
+        "release_mode": "full",
+        "rejected_segments_count": 0,
+        "rejected_claim_refs_count": 0
+      },
+      "created_at": "2026-11-25T19:09:07.887152Z"
+    },
+    {
+      "event_id": "evt_4c1d9ffbdec4",
+      "run_id": "run_808cff6805b4",
+      "seq": 40,
+      "event_type": "stages_executed_summary",
+      "actor": "orchestrator",
+      "message": "Stages executed: planner, dag_workers, peer_messaging, independent_review, targeted_repair, honesty_gate_and_synthesis",
+      "payload": {
+        "stages_executed": [
+          "planner",
+          "dag_workers",
+          "peer_messaging",
+          "independent_review",
+          "targeted_repair",
+          "honesty_gate_and_synthesis"
+        ],
+        "stage_telemetry": {
+          "planner": {
+            "configured": true,
+            "status": "completed"
+          },
+          "dag_workers": {
+            "configured": true,
+            "completed_tasks": 2,
+            "failed_or_blocked_tasks": 0,
+            "status": "completed"
+          },
+          "peer_messaging": {
+            "configured": true,
+            "delivered_messages": 2,
+            "followup_calls": 0,
+            "status": "completed"
+          },
+          "independent_review": {
+            "configured": true,
+            "reviewer_calls": 1,
+            "verdict_count": 6,
+            "status": "completed"
+          },
+          "targeted_repair": {
+            "configured": true,
+            "revision_attempts": 2,
+            "persisted_claim_versions": 2,
+            "accepted_revisions": 0,
+            "status": "completed"
+          },
+          "honesty_gate_and_synthesis": {
+            "configured": true,
+            "synthesis_mode": "model_synthesis",
+            "release_mode": "full",
+            "status": "completed"
+          }
+        }
+      },
+      "created_at": "2026-11-25T19:09:07.890077Z"
+    },
+    {
+      "event_id": "evt_926ff0d6c1ab",
+      "run_id": "run_808cff6805b4",
+      "seq": 41,
+      "event_type": "run_completed",
+      "actor": "lead",
+      "message": "Network run finished with status=completed.",
+      "payload": {
+        "status": "completed",
+        "release_mode": "full",
+        "latency_ms": 44682.04887502361
+      },
+      "created_at": "2026-11-25T19:09:07.890822Z"
+    }
+  ],
+  "peer_messages": [
+    {
+      "message_id": "msg_b13e4df2f795",
+      "run_id": "run_808cff6805b4",
+      "sender_id": "reviewer_combined",
+      "recipient_id": "agt_6805b4_2_2dec",
+      "message_type": "clarification",
+      "content": "Revision requested for clm_42fc1462a99f v1: The conclusion follows if closure is unlogged, but its only supporting excerpt is marked unverified. Correction: Verify the policy and closure-status evidence before relying on this conclusion.",
+      "related_claim_ids": [
+        "clm_42fc1462a99f"
+      ],
+      "delivery_status": "consumed",
+      "created_at": "2026-11-25T19:08:48.334521Z"
+    },
+    {
+      "message_id": "msg_80d6cc0afbe8",
+      "run_id": "run_808cff6805b4",
+      "sender_id": "reviewer_numbers",
+      "recipient_id": "agt_6805b4_1_6767",
+      "message_type": "clarification",
+      "content": "Revision requested for clm_1d462aa8083d v1: Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims. Correction: Bind every variable and empirical constant to grounded provenance aliases.",
+      "related_claim_ids": [
+        "clm_1d462aa8083d"
+      ],
+      "delivery_status": "consumed",
+      "created_at": "2026-11-25T19:08:53.755793Z"
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "evd_99d3bc5eaaaf",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_retrieved",
+      "source_ref": "canary_sla.md",
+      "excerpt": "# Cloud API Support Tier Policy (Synthetic Canary)\nRule S1: Standard tier guarantees 99.90% monthly uptime across 43,200 minutes. Planned maintenance announced 72 hours ahead is excluded from downtime.\nRule S2: Unplanned downtime between 44 and 120 minutes triggers a 10% service credit on the $12,000 monthly contract; above 120 minutes triggers a 25% credit.\nRule S3: Credits apply only to future invoices and never as cash refunds; claims must be submitted within 14 days of incident closure.\nIncident Summary: Total outage was 95 minutes, of which 20 minutes were planned maintenance announced 96 hours in advance. Root cause and closure date are not yet logged.",
+      "reliability": "high",
+      "verified_in_input": true,
+      "content_hash": "37da85e15f16c514934c2c856aeddd9d7b28d579f6bca9219e60949d39706bf7",
+      "retrieved_at": "2026-11-25T19:08:23.209141+00:00",
+      "source_location": "canary_sla.md#chars:0-666",
+      "retrieval_status": "ok",
+      "task_id": null,
+      "created_by": "lead",
+      "created_at": "2026-11-25T19:08:23.211782Z"
+    },
+    {
+      "evidence_id": "evd_27463eeccecb",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_retrieved",
+      "source_ref": "doc_1",
+      "excerpt": "Credits apply only to future invoices and never as cash refunds",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "ok",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "created_by": "agt_6805b4_2_2dec",
+      "created_at": "2026-11-25T19:08:38.189918Z"
+    },
+    {
+      "evidence_id": "evd_c44e3625bb70",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_retrieved",
+      "source_ref": "doc_1",
+      "excerpt": "claims must be submitted within 14 days of incident closure. ... closure date is not yet logged.",
+      "reliability": "unverified",
+      "verified_in_input": false,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "created_by": "agt_6805b4_2_2dec",
+      "created_at": "2026-11-25T19:08:38.190223Z"
+    },
+    {
+      "evidence_id": "evd_3b451528c433",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_retrieved",
+      "source_ref": "doc_1",
+      "excerpt": "Root cause and closure date are not yet logged.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "ok",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "created_by": "agt_6805b4_2_2dec",
+      "created_at": "2026-11-25T19:08:38.190433Z"
+    },
+    {
+      "evidence_id": "evd_c4c418390e35",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_retrieved",
+      "source_ref": "doc_1",
+      "excerpt": "Total outage was 95 minutes, of which 20 minutes were planned maintenance announced 96 hours in advance.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "ok",
+      "task_id": "tsk_6805b4_1_740d",
+      "created_by": "agt_6805b4_1_6767",
+      "created_at": "2026-11-25T19:08:41.079021Z"
+    },
+    {
+      "evidence_id": "evd_b176627d44de",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_retrieved",
+      "source_ref": "doc_1",
+      "excerpt": "Planned maintenance announced 72 hours ahead is excluded from downtime.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "ok",
+      "task_id": "tsk_6805b4_1_740d",
+      "created_by": "agt_6805b4_1_6767",
+      "created_at": "2026-11-25T19:08:41.079359Z"
+    },
+    {
+      "evidence_id": "evd_b2cd9842078d",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_retrieved",
+      "source_ref": "doc_1",
+      "excerpt": "Standard tier guarantees 99.90% monthly uptime across 43,200 minutes.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "ok",
+      "task_id": "tsk_6805b4_1_740d",
+      "created_by": "agt_6805b4_1_6767",
+      "created_at": "2026-11-25T19:08:41.079686Z"
+    },
+    {
+      "evidence_id": "evd_913fbee4bafd",
+      "run_id": "run_808cff6805b4",
+      "source_type": "calculation",
+      "source_ref": "calculation",
+      "excerpt": "(43200-75)/43200*100 = 99.8263888889%",
+      "reliability": "high",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_6805b4_1_740d",
+      "created_by": "agt_6805b4_1_6767",
+      "created_at": "2026-11-25T19:08:41.079894Z"
+    },
+    {
+      "evidence_id": "evd_b011e3962c0b",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_retrieved",
+      "source_ref": "doc_1",
+      "excerpt": "Unplanned downtime between 44 and 120 minutes triggers a 10% service credit on the $12,000 monthly contract; above 120 minutes triggers a 25% credit.",
+      "reliability": "medium",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "ok",
+      "task_id": "tsk_6805b4_1_740d",
+      "created_by": "agt_6805b4_1_6767",
+      "created_at": "2026-11-25T19:08:41.080179Z"
+    },
+    {
+      "evidence_id": "evd_183dfc2fe358",
+      "run_id": "run_808cff6805b4",
+      "source_type": "calculation",
+      "source_ref": "calculation",
+      "excerpt": "12000*0.10 = 1200",
+      "reliability": "high",
+      "verified_in_input": true,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "not_applicable",
+      "task_id": "tsk_6805b4_1_740d",
+      "created_by": "agt_6805b4_1_6767",
+      "created_at": "2026-11-25T19:08:41.080326Z"
+    },
+    {
+      "evidence_id": "evd_42580462bf56",
+      "run_id": "run_808cff6805b4",
+      "source_type": "external_unverified",
+      "source_ref": "evd_c44e3625bb70",
+      "excerpt": "claims must be submitted within 14 days of incident closure. ... closure date is not yet logged.",
+      "reliability": "unverified",
+      "verified_in_input": false,
+      "content_hash": null,
+      "retrieved_at": null,
+      "source_location": null,
+      "retrieval_status": "unavailable",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "created_by": "agt_6805b4_2_2dec",
+      "created_at": "2026-11-25T19:08:53.754607Z"
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "clm_c736141810a1",
+      "run_id": "run_808cff6805b4",
+      "statement": "The policy does not permit cash refunds; service credits apply only to future invoices.",
+      "category": "given_fact",
+      "status": "supported",
+      "verification_status": "provenance_validated",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_6805b4_2_2dec",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "evidence_ids": [
+        "evd_27463eeccecb"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [],
+      "requirement_refs": [
+        "req_1",
+        "req_3"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:08:38.190604Z",
+      "updated_at": "2026-11-25T19:08:48.331189Z"
+    },
+    {
+      "claim_id": "clm_42fc1462a99f",
+      "run_id": "run_808cff6805b4",
+      "statement": "The 14-day filing deadline cannot be dated from the available facts because the incident closure date is not logged; that date is needed to calendar the deadline.",
+      "category": "logical_inference",
+      "status": "rejected",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_6805b4_2_2dec",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "evidence_ids": [
+        "evd_c44e3625bb70"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [],
+      "requirement_refs": [
+        "req_1",
+        "req_4"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:08:38.190961Z",
+      "updated_at": "2026-11-25T19:08:48.331398Z"
+    },
+    {
+      "claim_id": "clm_42fc1462a99f",
+      "run_id": "run_808cff6805b4",
+      "statement": "The filing deadline cannot be dated from the currently available evidence: it states that filing is due within 14 days of incident closure and that the closure date is not logged, but this evidence is marked unverified. Verify both facts before relying on the conclusion.",
+      "category": "uncertainty",
+      "status": "unresolved",
+      "verification_status": "unsupported",
+      "version": 2,
+      "parent_claim_id": "clm_42fc1462a99f",
+      "author_agent_id": "agt_6805b4_2_2dec",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "evidence_ids": [
+        "evd_c44e3625bb70",
+        "evd_42580462bf56"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [],
+      "requirement_refs": [
+        "req_1",
+        "req_4"
+      ],
+      "assumptions": [],
+      "revision_notes": "Qualify the conclusion because its supporting excerpt is explicitly unverified.",
+      "confidence": 0.55,
+      "is_material": false,
+      "created_at": "2026-11-25T19:08:38.190961Z",
+      "updated_at": "2026-11-25T19:08:53.755103Z"
+    },
+    {
+      "claim_id": "clm_4c3e46e93785",
+      "run_id": "run_808cff6805b4",
+      "statement": "Root cause and incident closure date remain unresolved and should be established before final claim approval.",
+      "category": "uncertainty",
+      "status": "unresolved",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_6805b4_2_2dec",
+      "task_id": "tsk_6805b4_2_c3a3",
+      "evidence_ids": [
+        "evd_3b451528c433"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [],
+      "requirement_refs": [
+        "req_1",
+        "req_5"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": false,
+      "created_at": "2026-11-25T19:08:38.191389Z",
+      "updated_at": "2026-11-25T19:08:38.191390Z"
+    },
+    {
+      "claim_id": "clm_7a1c0ce318c5",
+      "run_id": "run_808cff6805b4",
+      "statement": "Eligible unplanned downtime is 75 minutes after excluding the planned maintenance.",
+      "category": "computation",
+      "status": "supported",
+      "verification_status": "computationally_verified",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_6805b4_1_6767",
+      "task_id": "tsk_6805b4_1_740d",
+      "evidence_ids": [
+        "evd_c4c418390e35",
+        "evd_b176627d44de"
+      ],
+      "depends_on_claim_ids": [],
+      "premise_refs": [],
+      "tool_execution_ids": [
+        "tlx_b555f08d25b9"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:08:41.080479Z",
+      "updated_at": "2026-11-25T19:08:48.331974Z"
+    },
+    {
+      "claim_id": "clm_1d462aa8083d",
+      "run_id": "run_808cff6805b4",
+      "statement": "Monthly uptime is approximately 99.8264% using 75 eligible downtime minutes in a 43,200-minute month.",
+      "category": "computation",
+      "status": "rejected",
+      "verification_status": "unsupported",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_6805b4_1_6767",
+      "task_id": "tsk_6805b4_1_740d",
+      "evidence_ids": [
+        "evd_b2cd9842078d",
+        "evd_913fbee4bafd"
+      ],
+      "depends_on_claim_ids": [
+        "clm_7a1c0ce318c5"
+      ],
+      "premise_refs": [
+        {
+          "claim_id": "clm_7a1c0ce318c5",
+          "claim_version": 1
+        }
+      ],
+      "tool_execution_ids": [
+        "tlx_b1ef7574f0bb"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:08:41.080750Z",
+      "updated_at": "2026-11-25T19:08:41.085658Z"
+    },
+    {
+      "claim_id": "clm_1d462aa8083d",
+      "run_id": "run_808cff6805b4",
+      "statement": "Monthly uptime is approximately 99.8264% using 75 eligible downtime minutes in a 43,200-minute month.",
+      "category": "computation",
+      "status": "rejected",
+      "verification_status": "unsupported",
+      "version": 2,
+      "parent_claim_id": "clm_1d462aa8083d",
+      "author_agent_id": "agt_6805b4_1_6767",
+      "task_id": "tsk_6805b4_1_740d",
+      "evidence_ids": [
+        "evd_b2cd9842078d",
+        "evd_913fbee4bafd"
+      ],
+      "depends_on_claim_ids": [
+        "clm_7a1c0ce318c5"
+      ],
+      "premise_refs": [
+        {
+          "claim_id": "clm_7a1c0ce318c5",
+          "claim_version": 1
+        }
+      ],
+      "tool_execution_ids": [
+        "tlx_29d89c891908"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": "Bound both numerical inputs to the supplied policy/incident source; expression contains no unbound constants.",
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:08:41.080750Z",
+      "updated_at": "2026-11-25T19:08:59.201804Z"
+    },
+    {
+      "claim_id": "clm_052d57cceb41",
+      "run_id": "run_808cff6805b4",
+      "statement": "The 75-minute eligible downtime falls in the 44–120-minute tier, yielding a potential $1,200 service credit.",
+      "category": "computation",
+      "status": "supported",
+      "verification_status": "computationally_verified",
+      "version": 1,
+      "parent_claim_id": null,
+      "author_agent_id": "agt_6805b4_1_6767",
+      "task_id": "tsk_6805b4_1_740d",
+      "evidence_ids": [
+        "evd_b011e3962c0b",
+        "evd_183dfc2fe358"
+      ],
+      "depends_on_claim_ids": [
+        "clm_7a1c0ce318c5"
+      ],
+      "premise_refs": [
+        {
+          "claim_id": "clm_7a1c0ce318c5",
+          "claim_version": 1
+        }
+      ],
+      "tool_execution_ids": [
+        "tlx_f50766b622cc"
+      ],
+      "requirement_refs": [
+        "req_1",
+        "req_2"
+      ],
+      "assumptions": [],
+      "revision_notes": null,
+      "confidence": 1.0,
+      "is_material": true,
+      "created_at": "2026-11-25T19:08:41.081004Z",
+      "updated_at": "2026-11-25T19:08:48.332114Z"
+    }
+  ],
+  "review_verdicts": [
+    {
+      "verdict_id": "vrd_3eb9970507c0",
+      "run_id": "run_808cff6805b4",
+      "claim_id": "clm_1d462aa8083d",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_numbers",
+      "review_dimension": "numbers",
+      "decision": "needs_revision",
+      "rationale": "Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims.",
+      "evidence_refs": [],
+      "required_correction": "Bind every variable and empirical constant to grounded provenance aliases.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Ungrounded arithmetic inputs or inline constants"
+      ],
+      "created_at": "2026-11-25T19:08:41.085403Z"
+    },
+    {
+      "verdict_id": "vrd_75c84e841165",
+      "run_id": "run_808cff6805b4",
+      "claim_id": "clm_c736141810a1",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "The supplied policy excerpt explicitly says credits apply only to future invoices and never as cash refunds.",
+      "evidence_refs": [
+        "evd_27463eeccecb"
+      ],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-25T19:08:48.329530Z"
+    },
+    {
+      "verdict_id": "vrd_ef75a95ce3e8",
+      "run_id": "run_808cff6805b4",
+      "claim_id": "clm_42fc1462a99f",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "needs_revision",
+      "rationale": "The conclusion follows if closure is unlogged, but its only supporting excerpt is marked unverified.",
+      "evidence_refs": [
+        "evd_c44e3625bb70"
+      ],
+      "required_correction": "Verify the policy and closure-status evidence before relying on this conclusion.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Verify the policy and closure-status evidence before relying on this conclusion."
+      ],
+      "created_at": "2026-11-25T19:08:48.329832Z"
+    },
+    {
+      "verdict_id": "vrd_800b844ad5c5",
+      "run_id": "run_808cff6805b4",
+      "claim_id": "clm_7a1c0ce318c5",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "95 minus 20 planned minutes equals 75; 96-hour notice exceeds the stated 72-hour exclusion threshold.",
+      "evidence_refs": [
+        "evd_c4c418390e35",
+        "evd_b176627d44de"
+      ],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-25T19:08:48.330080Z"
+    },
+    {
+      "verdict_id": "vrd_f1edc9e08a55",
+      "run_id": "run_808cff6805b4",
+      "claim_id": "clm_052d57cceb41",
+      "claim_version": 1,
+      "reviewer_id": "reviewer_combined",
+      "review_dimension": "combined_evidence_consistency",
+      "decision": "approve",
+      "rationale": "75 minutes is within 44–120; 10% of $12,000 is $1,200, correctly stated as potential credit.",
+      "evidence_refs": [
+        "evd_b011e3962c0b",
+        "evd_183dfc2fe358"
+      ],
+      "required_correction": null,
+      "blocking_severity": "none",
+      "blocking_issues": [],
+      "created_at": "2026-11-25T19:08:48.330413Z"
+    },
+    {
+      "verdict_id": "vrd_fda7c3a25836",
+      "run_id": "run_808cff6805b4",
+      "claim_id": "clm_1d462aa8083d",
+      "claim_version": 2,
+      "reviewer_id": "reviewer_numbers",
+      "review_dimension": "numbers",
+      "decision": "needs_revision",
+      "rationale": "Arithmetic expression evaluated, but one or more inputs or inline constants lack valid resolvable provenance in prompt, docs, or claims.",
+      "evidence_refs": [],
+      "required_correction": "Bind every variable and empirical constant to grounded provenance aliases.",
+      "blocking_severity": "blocking",
+      "blocking_issues": [
+        "Ungrounded arithmetic inputs or inline constants"
+      ],
+      "created_at": "2026-11-25T19:08:59.201520Z"
+    }
+  ],
+  "tool_executions": [
+    {
+      "tool_execution_id": "tlx_b555f08d25b9",
+      "run_id": "run_808cff6805b4",
+      "tool_name": "arithmetic",
+      "actor": "agt_6805b4_1_6767",
+      "task_id": "tsk_6805b4_1_740d",
+      "expression": "95-20",
+      "variables": {
+        "total_outage": "95",
+        "planned_maintenance": "20"
+      },
+      "input_provenance_refs": {
+        "total_outage": "doc_1",
+        "planned_maintenance": "doc_1"
+      },
+      "provenance_details": {
+        "total_outage": {
+          "ref": "doc_1",
+          "kind": "verified_evidence",
+          "resolved_id": "evd_99d3bc5eaaaf",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "planned_maintenance": {
+          "ref": "doc_1",
+          "kind": "verified_evidence",
+          "resolved_id": "evd_99d3bc5eaaaf",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "75",
+      "computed_result": "75",
+      "units": "minutes",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-25T19:08:41.074155Z"
+    },
+    {
+      "tool_execution_id": "tlx_b1ef7574f0bb",
+      "run_id": "run_808cff6805b4",
+      "tool_name": "arithmetic",
+      "actor": "agt_6805b4_1_6767",
+      "task_id": "tsk_6805b4_1_740d",
+      "expression": "(43200-75)/43200*100",
+      "variables": {
+        "month_minutes": "43200",
+        "eligible_downtime": "75"
+      },
+      "input_provenance_refs": {
+        "month_minutes": "doc_1",
+        "eligible_downtime": "clm_eligible_downtime"
+      },
+      "provenance_details": {
+        "month_minutes": {
+          "ref": "doc_1",
+          "kind": "verified_evidence",
+          "resolved_id": "evd_99d3bc5eaaaf",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "eligible_downtime": {
+          "ref": "clm_eligible_downtime",
+          "kind": "unknown",
+          "grounded": false,
+          "note": "Fabricated or unknown provenance target 'clm_eligible_downtime'."
+        }
+      },
+      "proposed_result": "99.8263888889",
+      "computed_result": "99.82638888888888888888888889",
+      "units": "percent",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": false,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-25T19:08:41.077251Z"
+    },
+    {
+      "tool_execution_id": "tlx_f50766b622cc",
+      "run_id": "run_808cff6805b4",
+      "tool_name": "arithmetic",
+      "actor": "agt_6805b4_1_6767",
+      "task_id": "tsk_6805b4_1_740d",
+      "expression": "12000*0.10",
+      "variables": {
+        "monthly_contract": "12000",
+        "credit_rate": "0.1"
+      },
+      "input_provenance_refs": {
+        "monthly_contract": "doc_1",
+        "credit_rate": "doc_1"
+      },
+      "provenance_details": {
+        "monthly_contract": {
+          "ref": "doc_1",
+          "kind": "verified_evidence",
+          "resolved_id": "evd_99d3bc5eaaaf",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "credit_rate": {
+          "ref": "doc_1",
+          "kind": "verified_evidence",
+          "resolved_id": "evd_99d3bc5eaaaf",
+          "grounded": true,
+          "note": "Matched referenced target."
+        }
+      },
+      "proposed_result": "1200",
+      "computed_result": "1200",
+      "units": "USD",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": true,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-25T19:08:41.078200Z"
+    },
+    {
+      "tool_execution_id": "tlx_29d89c891908",
+      "run_id": "run_808cff6805b4",
+      "tool_name": "arithmetic",
+      "actor": "agt_6805b4_1_6767",
+      "task_id": "tsk_6805b4_1_740d",
+      "expression": "(month_minutes-downtime_minutes)/month_minutes*100",
+      "variables": {
+        "month_minutes": "43200",
+        "downtime_minutes": "75"
+      },
+      "input_provenance_refs": {
+        "month_minutes": "doc_1",
+        "downtime_minutes": "doc_1"
+      },
+      "provenance_details": {
+        "month_minutes": {
+          "ref": "doc_1",
+          "kind": "verified_evidence",
+          "resolved_id": "evd_99d3bc5eaaaf",
+          "grounded": true,
+          "note": "Matched referenced target."
+        },
+        "downtime_minutes": {
+          "ref": "doc_1",
+          "kind": "verified_evidence",
+          "resolved_id": "evd_99d3bc5eaaaf",
+          "grounded": false,
+          "note": "Value '75' for variable 'downtime_minutes' not found in referenced target."
+        }
+      },
+      "proposed_result": "99.8263888889",
+      "computed_result": "99.82638888888888888888888889",
+      "units": "percent",
+      "assumptions": [],
+      "matches_proposed": true,
+      "inputs_grounded": false,
+      "has_ungrounded_literals": false,
+      "formula_appropriate": null,
+      "success": true,
+      "error": null,
+      "created_at": "2026-11-25T19:08:59.196576Z"
+    }
+  ],
+  "honesty_gate": {
+    "gate_id": "hgt_1f5d6f4d3a9e",
+    "run_id": "run_808cff6805b4",
+    "passed": true,
+    "release_mode": "full",
+    "rejected_segments": [],
+    "rejected_claim_refs": [],
+    "reasons": [],
+    "verification_summary": {
+      "material_claim_count": 4,
+      "supported_claim_count": 3,
+      "unresolved_claim_count": 0,
+      "rejected_claim_count": 1,
+      "stale_claim_count": 0,
+      "revision_count": 2,
+      "evidence_types": {
+        "external_retrieved": 8,
+        "calculation": 2,
+        "external_unverified": 1
+      },
+      "review_completeness": 1.0,
+      "requirement_coverage": 0.8,
+      "requirements_answered": 3,
+      "requirements_partial": 2,
+      "requirements_unresolved": 0,
+      "requirements_missing": 0,
+      "requirement_statuses": [
+        {
+          "requirement_id": "req_1",
+          "text": "Use only the supplied Cloud API Support Tier Policy.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_7a1c0ce318c5",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_052d57cceb41",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_c736141810a1",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_2",
+          "text": "Calculate eligible unplanned downtime, monthly uptime percentage, and potential service-credit amount.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_7a1c0ce318c5",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_052d57cceb41",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_3",
+          "text": "Explain whether a cash refund is available.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_c736141810a1",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_4",
+          "text": "Assess whether the filing deadline can be dated today.",
+          "status": "partially_answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_42fc1462a99f",
+              "claim_version": 2
+            }
+          ],
+          "rationale": "Addressed conditionally or via reviewed advisory action only."
+        },
+        {
+          "requirement_id": "req_5",
+          "text": "Identify what remains uncertain before final claim approval.",
+          "status": "partially_answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_4c3e46e93785",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Addressed conditionally or via reviewed advisory action only."
+        }
+      ],
+      "execution_completed": true,
+      "release_checks_executed": true,
+      "content_released_safely": true,
+      "coverage_methodology": "internal_claim_linkage_not_independent_grade",
+      "independent_grade": null,
+      "honesty_gate_passed": true,
+      "honesty_gate_reasons": []
+    },
+    "created_at": "2026-11-25T19:09:07.886357Z"
+  },
+  "final_result": {
+    "run_id": "run_808cff6805b4",
+    "mode": "network",
+    "status": "completed",
+    "prompt": "Using the attached Cloud API Support Tier Policy only, calculate eligible unplanned downtime, monthly uptime percentage, and the potential service-credit amount. Explain whether a cash refund is available, whether the filing deadline can be dated today, and what remains uncertain before final claim approval.",
+    "provider": "openai",
+    "model": "gpt-6-luna",
+    "returned_model": "gpt-6-luna",
+    "answer": "**Verified Findings:**\n- Eligible unplanned downtime is 75 minutes after excluding the planned maintenance. [clm_7a1c0ce318c5@v1]\n- The 75-minute eligible downtime falls in the 44–120-minute tier, yielding a potential $1,200 service credit. [clm_052d57cceb41@v1]\n- The policy does not permit cash refunds; service credits apply only to future invoices. [clm_c736141810a1@v1]\n\n**Conditional / Qualified Statements:**\n- The filing deadline cannot be dated from the currently available evidence: it states that filing is due within 14 days of incident closure and that the closure date is not logged, but this evidence is marked unverified. Verify both facts before relying on the conclusion. [clm_42fc1462a99f@v2 (unresolved)]\n- Root cause and incident closure date remain unresolved and should be established before final claim approval. [clm_4c3e46e93785@v1 (unresolved)]\n\n**Unresolved / Withheld Items:**\n- No accepted claim supports a monthly uptime percentage; the available uptime computation claim was rejected.\n- Rejected claim (clm_1d462aa8083d v2) withheld from verified output.",
+    "missing_information": [
+      "Incident closure date is not logged, so the 14-day filing deadline cannot yet be assigned a calendar date.",
+      "Root cause is not logged; the policy does not specify whether or how root cause affects claim approval.",
+      "Incident closure date, to determine the 14-day submission deadline.",
+      "Root cause, for claim review.",
+      "Incident closure date is needed to determine the 14-day filing deadline."
+    ],
+    "assumptions": [],
+    "confidence_notes": "Verification: 3/4 material claims supported, 0 unresolved, 1 rejected, 0 stale, 2 revision(s). Execution completed: True; checks safely passed: True; internal requirement linkage: 80% (3 answered, 2 partial, 0 unresolved, 0 missing — not an independent grade); review completeness: 100%. Honesty Gate: full (passed=True). Specialist uncertainties: Incident closure date and root cause are not logged.; Root cause and incident closure date are not yet logged. Note: automated review and arithmetic verification constrain unsupported releases but remain fallible and do not guarantee empirical truth.",
+    "referenced_claim_ids": [
+      "clm_7a1c0ce318c5",
+      "clm_052d57cceb41",
+      "clm_c736141810a1",
+      "clm_42fc1462a99f",
+      "clm_4c3e46e93785"
+    ],
+    "specialist_roles": [
+      "Policy calculation analyst",
+      "Claim terms analyst"
+    ],
+    "incomplete_tasks": [],
+    "synthesis_mode": "model_synthesis",
+    "baseline_mode": null,
+    "verification": {
+      "material_claim_count": 4,
+      "supported_claim_count": 3,
+      "unresolved_claim_count": 0,
+      "rejected_claim_count": 1,
+      "stale_claim_count": 0,
+      "revision_count": 2,
+      "evidence_types": {
+        "external_retrieved": 8,
+        "calculation": 2,
+        "external_unverified": 1
+      },
+      "review_completeness": 1.0,
+      "requirement_coverage": 0.8,
+      "requirements_answered": 3,
+      "requirements_partial": 2,
+      "requirements_unresolved": 0,
+      "requirements_missing": 0,
+      "requirement_statuses": [
+        {
+          "requirement_id": "req_1",
+          "text": "Use only the supplied Cloud API Support Tier Policy.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_7a1c0ce318c5",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_052d57cceb41",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_c736141810a1",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_2",
+          "text": "Calculate eligible unplanned downtime, monthly uptime percentage, and potential service-credit amount.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_7a1c0ce318c5",
+              "claim_version": 1
+            },
+            {
+              "claim_id": "clm_052d57cceb41",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_3",
+          "text": "Explain whether a cash refund is available.",
+          "status": "answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_c736141810a1",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Linked to verified accepted claim version(s)."
+        },
+        {
+          "requirement_id": "req_4",
+          "text": "Assess whether the filing deadline can be dated today.",
+          "status": "partially_answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_42fc1462a99f",
+              "claim_version": 2
+            }
+          ],
+          "rationale": "Addressed conditionally or via reviewed advisory action only."
+        },
+        {
+          "requirement_id": "req_5",
+          "text": "Identify what remains uncertain before final claim approval.",
+          "status": "partially_answered",
+          "linked_claim_refs": [
+            {
+              "claim_id": "clm_4c3e46e93785",
+              "claim_version": 1
+            }
+          ],
+          "rationale": "Addressed conditionally or via reviewed advisory action only."
+        }
+      ],
+      "execution_completed": true,
+      "release_checks_executed": true,
+      "content_released_safely": true,
+      "coverage_methodology": "internal_claim_linkage_not_independent_grade",
+      "independent_grade": null,
+      "honesty_gate_passed": true,
+      "honesty_gate_reasons": []
+    },
+    "usage": {
+      "input_tokens": 11437,
+      "output_tokens": 5367,
+      "reasoning_tokens": 0,
+      "cached_input_tokens": 0,
+      "total_tokens": 16804,
+      "estimated_cost_usd": 0.0278394,
+      "actual_cost_usd": 0.0038272000000000002,
+      "model_calls": 7,
+      "successful_operations": 7,
+      "retries": 0,
+      "latency_ms": 49957.16725115199,
+      "usage_reported": true,
+      "returned_model": null,
+      "provider_response_id": null,
+      "response_status": null,
+      "incomplete_reason": null
+    },
+    "latency_ms": 44682.04887502361,
+    "error": null,
+    "created_at": "2026-11-25T19:08:23.209585Z",
+    "completed_at": "2026-11-25T19:09:07.890781Z"
+  }
+}
