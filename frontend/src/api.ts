@@ -8,8 +8,16 @@ import type {
   TracePayload,
 } from "./types";
 
+function getSessionToken(): string | null {
+  const meta = document.querySelector('meta[name="crewforge-token"]');
+  return meta?.getAttribute("content") || null;
+}
+
 async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(url, init);
+  const token = getSessionToken();
+  const headers = new Headers(init?.headers || {});
+  if (token) headers.set("X-CrewForge-Token", token);
+  const resp = await fetch(url, { ...init, headers });
   const data = await resp.json();
   if (!resp.ok) {
     throw new Error(data?.error || `HTTP ${resp.status}`);

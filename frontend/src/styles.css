@@ -145,6 +145,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
   font-size: 11.5px; font-weight: 700; background: var(--surface-2); border: 1px solid var(--border);
 }
 .pill-live { border-color: var(--green); color: var(--green); }
+.pill-error { border-color: var(--red); color: var(--red); }
 .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 
 .office-stage {
@@ -163,6 +164,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 @media (max-width: 780px) { .office-whiteboard { display: none; } }
 .wb-done { color: var(--green); font-weight: 600; }
 .wb-active { color: var(--accent-2); font-weight: 700; }
+.wb-error { color: var(--red); font-weight: 700; }
 .wb-todo { color: var(--muted); }
 
 .office-lead-row { display: flex; justify-content: center; }
@@ -185,6 +187,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
 .desk-lead { border-color: var(--accent); }
 .desk-specialist { border-color: var(--teal); }
 .desk-verifier { border-color: var(--amber); }
+.desk-error { border-color: var(--red) !important; }
 .desk-empty { min-width: 280px; max-width: 420px; padding: 14px; }
 .desk-name { font-size: 12.5px; font-weight: 700; }
 .desk-role { font-size: 11px; color: var(--muted); }
@@ -208,6 +211,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
   background: var(--surface); border: 1px solid var(--border); font-size: 12px; color: var(--muted);
 }
 .step-done { border-color: var(--green); color: var(--green); font-weight: 600; }
+.step-error { border-color: var(--red); color: var(--red); font-weight: 700; }
 .step-active { border-color: var(--accent); color: var(--text); font-weight: 700; }
 .step-dot {
   width: 18px; height: 18px; border-radius: 50%; background: var(--surface-2);

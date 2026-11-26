@@ -1,16 +1,20 @@
-"""CrewForge web server: Conversational UI, Gamified Office, and Mission Control."""
+"""CrewForge web server: Conversational UI, Gamified Office, MCP, and Mission Control."""
 
 from __future__ import annotations
 
 import argparse
+import secrets
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import uvicorn
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -22,7 +26,9 @@ from crewforge.dashboard_api import (
     ReadOnlyTraceStore,
     ReplayStore,
 )
+from crewforge.mcp_server import create_mcp_server
 from crewforge.providers.base import ModelProvider
+from crewforge.storage.database import Database
 from crewforge.web_api import (
     ChatMessageRequest,
     JudgeSessionManager,
@@ -33,12 +39,68 @@ _ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 _FRONTEND_DIST_DIR = _ROOT_DIR / "frontend" / "dist"
 _LEGACY_UI_DIR = Path(__file__).resolve().parent / "dashboard_ui"
 
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_MAX_REQUEST_BYTES = 524_288  # 512 KB
+
 _FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
     '<rect width="32" height="32" rx="7" fill="#6366f1"/>'
     '<text x="16" y="21" text-anchor="middle" fill="#ffffff" '
     'font-family="sans-serif" font-size="14" font-weight="700">CF</text></svg>'
 )
+
+
+class _LocalSecurityMiddleware(BaseHTTPMiddleware):
+    """Enforce localhost Origin validation, request size limits, and session token auth."""
+
+    def __init__(self, app: Starlette, *, auth_token: str, require_auth: bool = True) -> None:
+        super().__init__(app)
+        self._auth_token = auth_token
+        self._require_auth = require_auth
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # 1. Request size limit
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > _MAX_REQUEST_BYTES:
+                    return JSONResponse(
+                        {"error": "Request body exceeds 512 KB limit."}, status_code=413
+                    )
+            except ValueError:
+                return JSONResponse({"error": "Invalid Content-Length header."}, status_code=400)
+
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            body = await request.body()
+            if len(body) > _MAX_REQUEST_BYTES:
+                return JSONResponse(
+                    {"error": "Request body exceeds 512 KB limit."}, status_code=413
+                )
+
+            # 2. Localhost Origin / Referer validation (CSRF protection)
+            origin = request.headers.get("origin") or request.headers.get("referer")
+            if origin:
+                parsed = urlparse(origin)
+                if parsed.hostname not in _LOCAL_HOSTS:
+                    return JSONResponse(
+                        {"error": "Cross-origin request rejected."}, status_code=403
+                    )
+
+        # 3. Local endpoint authorization on /api/* (except /api/health) and /mcp
+        path = request.url.path
+        if self._require_auth and (
+            (path.startswith("/api/") and path != "/api/health") or path.startswith("/mcp")
+        ):
+            header_tok = request.headers.get("x-crewforge-token")
+            auth_hdr = request.headers.get("authorization", "")
+            bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else None
+            provided = header_tok or bearer_tok
+            if not provided or not secrets.compare_digest(provided, self._auth_token):
+                return JSONResponse(
+                    {"error": "Unauthorized local endpoint access."}, status_code=401
+                )
+
+        return await call_next(request)
 
 
 def create_dashboard_app(
@@ -49,8 +111,21 @@ def create_dashboard_app(
     dvg_path: str | Path | None = None,
     budget_db_path: str | Path | None = None,
     provider_factory: Callable[[CrewForgeSettings], ModelProvider] | None = None,
+    auth_token: str | None = None,
+    require_auth: bool = False,
+    require_react: bool = False,
 ) -> Starlette:
-    """Create the Starlette app for CrewForge Chat, Gamified Office, and Mission Control."""
+    """Create the Starlette app for CrewForge Chat, Gamified Office, MCP, and Mission Control."""
+    react_index = _FRONTEND_DIST_DIR / "index.html"
+    use_react = react_index.is_file()
+    if require_react and not use_react:
+        raise RuntimeError(
+            "React production build not found at frontend/dist/index.html. "
+            "Run: cd frontend && npm ci && npm run build"
+        )
+    ui_dir = _FRONTEND_DIST_DIR if use_react else _LEGACY_UI_DIR
+
+    resolved_token = auth_token or secrets.token_urlsafe(24)
     trace_store = ReadOnlyTraceStore(db_path=db_path)
     replay_store = ReplayStore(replay_dir=replay_dir)
     benchmark_store = BenchmarkStore(benchmark_path=benchmark_path, dvg_path=dvg_path)
@@ -60,11 +135,34 @@ def create_dashboard_app(
         provider_factory=provider_factory,
     )
 
-    use_react = (_FRONTEND_DIST_DIR / "index.html").is_file()
-    ui_dir = _FRONTEND_DIST_DIR if use_react else _LEGACY_UI_DIR
+    # Shared MCP server using the exact same isolated JudgeSessionManager settings & DBs
+    mcp_db = Database(db_path)
+    mcp_server = create_mcp_server(
+        database=mcp_db,
+        settings_factory=session_mgr.build_runtime_settings,
+        provider_factory=provider_factory,
+        host="127.0.0.1",
+        port=8765,
+    )
+    mcp_http_app = mcp_server.streamable_http_app()
+
+    @asynccontextmanager
+    async def _lifespan(_app: Starlette) -> AsyncIterator[None]:
+        await mcp_db.initialize()
+        async with mcp_server.session_manager.run():
+            try:
+                yield
+            finally:
+                await mcp_db.close()
 
     async def index(_request: Request) -> Response:
-        return FileResponse(ui_dir / "index.html")
+        html_path = ui_dir / "index.html"
+        if use_react:
+            raw = html_path.read_text(encoding="utf-8")
+            meta_tag = f'<meta name="crewforge-token" content="{resolved_token}" />'
+            injected = raw.replace("</head>", f"  {meta_tag}\n  </head>", 1)
+            return HTMLResponse(injected)
+        return FileResponse(html_path)
 
     async def favicon(_request: Request) -> Response:
         return Response(_FAVICON_SVG, media_type="image/svg+xml")
@@ -171,8 +269,14 @@ def create_dashboard_app(
         cancelled = session_mgr.cancel_run(run_id)
         return JSONResponse({"run_id": run_id, "cancelled": cancelled})
 
-    async def mcp_status(_request: Request) -> JSONResponse:
-        return JSONResponse(session_mgr.get_mcp_status())
+    async def mcp_status(request: Request) -> JSONResponse:
+        base = str(request.base_url).rstrip("/")
+        mcp_url = f"{base}/mcp"
+        data = await session_mgr.get_mcp_status(
+            mcp_url=mcp_url,
+            auth_token=resolved_token if require_auth else None,
+        )
+        return JSONResponse(data)
 
     routes: list[Route | Mount] = [
         Route("/", index),
@@ -192,6 +296,7 @@ def create_dashboard_app(
         Route("/api/chats/{chat_id}/messages", post_chat_message, methods=["POST"]),
         Route("/api/runs/{run_id}/cancel", cancel_run, methods=["POST"]),
         Route("/api/mcp/status", mcp_status, methods=["GET"]),
+        *mcp_http_app.routes,
     ]
     if use_react and (_FRONTEND_DIST_DIR / "assets").is_dir():
         routes.append(
@@ -204,7 +309,11 @@ def create_dashboard_app(
     else:
         routes.append(Mount("/static", StaticFiles(directory=str(_LEGACY_UI_DIR)), name="static"))
 
-    return Starlette(routes=routes)
+    app = Starlette(routes=routes, lifespan=_lifespan)
+    app.add_middleware(
+        _LocalSecurityMiddleware, auth_token=resolved_token, require_auth=require_auth
+    )
+    return app
 
 
 def run_dashboard(
@@ -215,13 +324,18 @@ def run_dashboard(
     replay_dir: str | Path = "demo/traces",
     benchmark_path: str | Path = "demo/v2_reconciled_scores.json",
     dvg_path: str | Path | None = None,
+    require_react: bool = True,
 ) -> None:
     """Start the CrewForge web server on localhost."""
+    if host not in _LOCAL_HOSTS:
+        raise ValueError("CrewForge web server is restricted to localhost bindings.")
     app = create_dashboard_app(
         db_path=db_path,
         replay_dir=replay_dir,
         benchmark_path=benchmark_path,
         dvg_path=dvg_path,
+        require_auth=True,
+        require_react=require_react,
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
 
@@ -230,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for `crewforge-dashboard`."""
     parser = argparse.ArgumentParser(
         prog="crewforge-dashboard",
-        description="CrewForge conversational UI, gamified office, and Mission Control.",
+        description="CrewForge conversational UI, gamified office, MCP, and Mission Control.",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
@@ -254,6 +368,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional path to finalized David vs Goliath reconciled report JSON.",
     )
+    parser.add_argument(
+        "--allow-legacy-fallback",
+        action="store_true",
+        help="Allow falling back to legacy dashboard_ui if frontend/dist is not built.",
+    )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     run_dashboard(
         host=args.host,
@@ -262,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
         replay_dir=args.replay_dir,
         benchmark_path=args.benchmark_file,
         dvg_path=args.dvg_file,
+        require_react=not args.allow_legacy_fallback,
     )
     return 0
 

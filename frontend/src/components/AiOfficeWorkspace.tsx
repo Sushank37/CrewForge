@@ -14,8 +14,20 @@ interface AiOfficeProps {
   mode: "network" | "baseline";
 }
 
-function deriveStage(trace: TracePayload | null, isRunning: boolean): {
-  step: number; // 0 idle, 1 team formed, 2 executing, 3 reviewing, 4 finalized
+export function isVerificationBlocked(trace: TracePayload | null): boolean {
+  if (!trace) return false;
+  const status = String(trace.status || "").toLowerCase();
+  if (status === "failed" || status === "cancelled") return true;
+  const gate = trace.honesty_gate;
+  if (gate && (gate.passed === false || String(gate.release_mode).toLowerCase() === "blocked")) {
+    return true;
+  }
+  return false;
+}
+
+export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
+  step: number;
+  blocked: boolean;
   headline: string;
   subline: string;
   leadBubble: string;
@@ -24,6 +36,7 @@ function deriveStage(trace: TracePayload | null, isRunning: boolean): {
     if (isRunning) {
       return {
         step: 1,
+        blocked: false,
         headline: "Your AI Team is assembling...",
         subline: "Lead is analyzing the prompt and forming the team.",
         leadBubble: "Analyzing prompt & planning...",
@@ -31,6 +44,7 @@ function deriveStage(trace: TracePayload | null, isRunning: boolean): {
     }
     return {
       step: 0,
+      blocked: false,
       headline: "CrewForge AI Office",
       subline: "Ask a question below to watch your dynamic team collaborate in real time.",
       leadBubble: "Ready when you are.",
@@ -40,26 +54,39 @@ function deriveStage(trace: TracePayload | null, isRunning: boolean): {
   const events = trace.execution_events || [];
   const types = new Set(events.map((e) => e.event_type));
   const status = String(trace.status || "").toLowerCase();
+  const blocked = isVerificationBlocked(trace);
 
-  if (status === "completed" || status === "partial" || types.has("run_completed")) {
-    return {
-      step: 4,
-      headline: status === "completed" ? "Mission Accomplished" : "Completed with Verified Safeguards",
-      subline: `${trace.roster?.length || 1} agents collaborated · ${events.length} persisted events`,
-      leadBubble: "Verified & delivered final answer!",
-    };
-  }
   if (status === "failed" || types.has("run_failed")) {
     return {
       step: 4,
-      headline: "Execution Halted",
-      subline: "Review the error or Mission Control trace for details.",
-      leadBubble: "Run encountered an error.",
+      blocked: true,
+      headline: "Execution Failed",
+      subline: "Run failed — inspect the error or Mission Control trace for details.",
+      leadBubble: "Execution failed.",
+    };
+  }
+  if ((status === "completed" || status === "partial" || types.has("run_completed")) && blocked) {
+    return {
+      step: 4,
+      blocked: true,
+      headline: "Verification Blocked Release",
+      subline: "Honesty Gate withheld unverified or rejected claims.",
+      leadBubble: "Release blocked by Honesty Gate.",
+    };
+  }
+  if (status === "completed" || status === "partial" || types.has("run_completed")) {
+    return {
+      step: 4,
+      blocked: false,
+      headline: status === "completed" ? "Mission Accomplished" : "Completed (Partial Release)",
+      subline: `${trace.roster?.length || 1} agents collaborated · ${events.length} persisted events`,
+      leadBubble: status === "completed" ? "Verified & delivered final answer!" : "Released verified subset.",
     };
   }
   if (types.has("honesty_gate_evaluated") || types.has("synthesis_completed")) {
     return {
       step: 4,
+      blocked,
       headline: "Finalizing Verified Answer...",
       subline: "Honesty Gate is checking claim provenance and release rules.",
       leadBubble: "Running Honesty Gate...",
@@ -68,6 +95,7 @@ function deriveStage(trace: TracePayload | null, isRunning: boolean): {
   if (types.has("review_completed") || types.has("claim_revised")) {
     return {
       step: 3,
+      blocked: false,
       headline: "Reviewing Claims & Evidence...",
       subline: "Independent reviewers are verifying arithmetic and provenance.",
       leadBubble: "Checking reviewer verdicts...",
@@ -76,6 +104,7 @@ function deriveStage(trace: TracePayload | null, isRunning: boolean): {
   if (types.has("plan_created") || types.has("task_started")) {
     return {
       step: 2,
+      blocked: false,
       headline: "Your AI Team is on it!",
       subline: "Lead has assembled the team and specialists are executing tasks.",
       leadBubble: "Coordinating specialist tasks...",
@@ -83,6 +112,7 @@ function deriveStage(trace: TracePayload | null, isRunning: boolean): {
   }
   return {
     step: 1,
+    blocked: false,
     headline: "Your AI Team is assembling...",
     subline: "Lead is decomposing the problem into specialist tasks.",
     leadBubble: "Planning DAG & specialists...",
@@ -96,6 +126,7 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
   const leadProfile = CHARACTER_ROSTER[0];
   const specialists = (trace?.roster || []).filter((a) => a.role.toLowerCase() !== "lead");
   const tasks = trace?.tasks || [];
+  const claims = trace?.claims || [];
   const verdicts = trace?.review_verdicts || [];
   const events = trace?.execution_events || [];
 
@@ -107,10 +138,10 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
       : "—";
 
   const leadMood: CharacterMood =
-    stage.step === 4
-      ? trace?.status === "failed"
-        ? "error"
-        : "completed"
+    stage.blocked
+      ? "error"
+      : stage.step === 4
+      ? "completed"
       : isRunning || stage.step > 0
       ? "working"
       : "idle";
@@ -118,9 +149,15 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
   const lastReviewerId =
     verdicts.length > 0 ? verdicts[verdicts.length - 1].reviewer_id : "reviewer_evidence";
   const verifierProfile = pickVerifierCharacter(lastReviewerId);
+  const hasRejectedVerdict = verdicts.some((v) => {
+    const d = String(v.decision || v.verdict || "").toLowerCase();
+    return d === "reject" || d === "needs_revision";
+  });
   const verifierMood: CharacterMood =
-    verdicts.length > 0
-      ? stage.step === 4
+    stage.blocked
+      ? "error"
+      : verdicts.length > 0
+      ? stage.step === 4 && !hasRejectedVerdict
         ? "completed"
         : "reviewing"
       : stage.step === 3
@@ -143,9 +180,17 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
           <div className="office-subline">{stage.subline}</div>
         </div>
         <div className="office-header-actions">
-          <span className={`office-pill ${isRunning ? "pill-live" : "pill-idle"}`}>
+          <span className={`office-pill ${isRunning ? "pill-live" : stage.blocked ? "pill-error" : "pill-idle"}`}>
             <span className="pulse-dot" />
-            {isRunning ? "Live Execution" : trace ? String(trace.status).toUpperCase() : mode === "baseline" ? "Baseline" : "Standby"}
+            {isRunning
+              ? "Live Execution"
+              : stage.blocked
+              ? "Verification Blocked"
+              : trace
+              ? String(trace.status).toUpperCase()
+              : mode === "baseline"
+              ? "Baseline"
+              : "Standby"}
             {elapsed !== "—" ? ` · ${elapsed}` : ""}
           </span>
           <button
@@ -161,7 +206,6 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
       {!collapsed && (
         <>
           <div className="office-stage">
-            {/* Whiteboard */}
             <div className="office-whiteboard" aria-label="Execution Progress Board">
               <div className="wb-row">
                 <span className={stage.step >= 1 ? "wb-done" : "wb-todo"}>
@@ -179,20 +223,19 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
                 </span>
               </div>
               <div className="wb-row">
-                <span className={stage.step >= 4 ? "wb-done" : stage.step === 3 ? "wb-active" : "wb-todo"}>
-                  {stage.step >= 4 ? "✓" : "○"} Review
+                <span className={stage.blocked ? "wb-error" : stage.step >= 4 ? "wb-done" : stage.step === 3 ? "wb-active" : "wb-todo"}>
+                  {stage.blocked ? "✕" : stage.step >= 4 ? "✓" : "○"} Review
                 </span>
               </div>
               <div className="wb-row">
-                <span className={stage.step >= 4 ? "wb-done" : "wb-todo"}>
-                  {stage.step >= 4 ? "✓" : "○"} Finalize
+                <span className={stage.blocked ? "wb-error" : stage.step >= 4 ? "wb-done" : "wb-todo"}>
+                  {stage.blocked ? "✕" : stage.step >= 4 ? "✓" : "○"} Finalize
                 </span>
               </div>
             </div>
 
-            {/* Lead Desk */}
             <div className="office-lead-row">
-              <div className="desk-card desk-lead">
+              <div className={`desk-card desk-lead ${stage.blocked ? "desk-error" : ""}`}>
                 <div className="speech-bubble">{stage.leadBubble}</div>
                 <CharacterAvatar profile={leadProfile} mood={leadMood} size={68} />
                 <div className="desk-name">Lead</div>
@@ -200,15 +243,18 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
               </div>
             </div>
 
-            {/* Animated connection bar */}
             {specialists.length > 0 && (
               <svg className="office-wires" viewBox="0 0 600 32" preserveAspectRatio="none" aria-hidden="true">
-                <path d="M300 0 L300 14 M110 14 L490 14 M110 14 L110 32 M300 14 L300 32 M490 14 L490 32"
-                  stroke="#60a5fa" strokeWidth="2" fill="none" strokeDasharray={isRunning ? "6 4" : undefined} />
+                <path
+                  d="M300 0 L300 14 M110 14 L490 14 M110 14 L110 32 M300 14 L300 32 M490 14 L490 32"
+                  stroke={stage.blocked ? "#ef4444" : "#60a5fa"}
+                  strokeWidth="2"
+                  fill="none"
+                  strokeDasharray={isRunning ? "6 4" : undefined}
+                />
               </svg>
             )}
 
-            {/* Dynamic Specialist Desks + Verification Desk */}
             <div className="office-desks-row">
               {specialists.length === 0 && (
                 <div className="desk-card desk-empty">
@@ -226,36 +272,45 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
                 const profile = pickSpecialistCharacter(spec.agent_id, idx);
                 const specTask = tasks.find((t) => t.assigned_agent_id === spec.agent_id);
                 const tStatus = String(specTask?.status || "pending").toLowerCase();
+                const specClaims = claims.filter((c) => c.author_agent_id === spec.agent_id);
+                const allRejectedOrStale =
+                  specClaims.length > 0 &&
+                  specClaims.every((c) => c.status === "rejected" || c.status === "stale") &&
+                  !isRunning;
+
                 const mood: CharacterMood =
-                  tStatus === "completed"
-                    ? "completed"
-                    : tStatus === "failed"
+                  tStatus === "failed" || tStatus === "blocked" || allRejectedOrStale
                     ? "error"
+                    : tStatus === "completed"
+                    ? "completed"
                     : tStatus === "running" || tStatus === "in_progress"
                     ? "working"
                     : isRunning
                     ? "working"
                     : "idle";
-                const bubble =
-                  latestEventForAgent(spec.agent_id) ||
-                  specTask?.title ||
-                  spec.specialty ||
-                  "Executing task...";
+                const bubble = allRejectedOrStale
+                  ? "Claims withheld / rejected"
+                  : latestEventForAgent(spec.agent_id) ||
+                    specTask?.title ||
+                    spec.specialty ||
+                    "Executing task...";
 
                 return (
-                  <div key={spec.agent_id} className="desk-card desk-specialist">
+                  <div key={spec.agent_id} className={`desk-card desk-specialist ${mood === "error" ? "desk-error" : ""}`}>
                     <div className="speech-bubble">{bubble.slice(0, 48)}</div>
                     <CharacterAvatar profile={profile} mood={mood} size={58} />
                     <div className="desk-name">{spec.role}</div>
-                    <div className="desk-role">{tStatus}</div>
+                    <div className="desk-role">{allRejectedOrStale ? "withheld" : tStatus}</div>
                   </div>
                 );
               })}
 
               {mode === "network" && (specialists.length > 0 || verdicts.length > 0) && (
-                <div className="desk-card desk-verifier">
+                <div className={`desk-card desk-verifier ${stage.blocked ? "desk-error" : ""}`}>
                   <div className="speech-bubble">
-                    {verdicts.length > 0
+                    {stage.blocked
+                      ? "Blocked ungrounded release"
+                      : verdicts.length > 0
                       ? `${verdicts.length} claim verdict(s) recorded`
                       : stage.step >= 3
                       ? "Checking claims & evidence..."
@@ -263,28 +318,38 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
                   </div>
                   <CharacterAvatar profile={verifierProfile} mood={verifierMood} size={58} />
                   <div className="desk-name">Reviewer</div>
-                  <div className="desk-role">Verification</div>
+                  <div className="desk-role">{stage.blocked ? "blocked" : "Verification"}</div>
                 </div>
               )}
             </div>
           </div>
 
-          {/* 4-Step Progress Stepper */}
           <div className="office-stepper">
             {[
               { n: 1, label: "Team Formed" },
               { n: 2, label: "Executing Tasks" },
               { n: 3, label: "Reviewing Results" },
-              { n: 4, label: "Finalizing Answer" },
-            ].map((s) => (
-              <div
-                key={s.n}
-                className={`step-pill ${stage.step > s.n ? "step-done" : stage.step === s.n ? "step-active" : ""}`}
-              >
-                <span className="step-dot">{stage.step > s.n ? "✓" : s.n}</span>
-                <span>{s.label}</span>
-              </div>
-            ))}
+              { n: 4, label: stage.blocked ? "Release Blocked" : "Finalizing Answer" },
+            ].map((s) => {
+              const isErrStep = stage.blocked && s.n === 4;
+              return (
+                <div
+                  key={s.n}
+                  className={`step-pill ${
+                    isErrStep
+                      ? "step-error"
+                      : stage.step > s.n || (stage.step === 4 && s.n === 4 && !stage.blocked)
+                      ? "step-done"
+                      : stage.step === s.n
+                      ? "step-active"
+                      : ""
+                  }`}
+                >
+                  <span className="step-dot">{isErrStep ? "✕" : stage.step > s.n ? "✓" : s.n}</span>
+                  <span>{s.label}</span>
+                </div>
+              );
+            })}
           </div>
         </>
       )}

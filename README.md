@@ -166,13 +166,13 @@ uv run crewforge-mcp --transport streamable-http --host 127.0.0.1 --port 8000
 
 CrewForge Mission Control is a read-only localhost observability dashboard (`127.0.0.1:8765`) for inspecting multi-agent execution, dynamic agent topology, claim/evidence lineage, independent reviewer verdicts, Honesty Gate decisions, historical trace replay, and reconciled benchmark results.
 
-### One-Command Dashboard Startup
+### One-Command React UI + Mission Control Startup
 
 ```bash
-.venv/bin/crewforge-dashboard
+cd frontend && npm ci && npm run build && cd .. && uv run crewforge-dashboard
 ```
 
-By default, this binds to `127.0.0.1:8765`, loads historical Phase 5E demo traces from `demo/traces/`, loads reconciled V2 benchmark results from `demo/v2_reconciled_scores.json`, and polls `.crewforge/demo_live.db` in read-only mode.
+By default, `crewforge-dashboard` requires the built React bundle in `frontend/dist/` (failing fast if missing rather than silently falling back), binds to `127.0.0.1:8765`, and isolates judge chat/MCP sessions in `.crewforge/judge_session.db` and `.crewforge/judge_budget.db`.
 
 ### Live Monitoring Alongside MCP Server
 

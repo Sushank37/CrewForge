@@ -233,6 +233,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 onChange={(e) => setSettings({ ...settings, total_budget_ceiling_usd: Number(e.target.value) })}
               />
             </label>
+            <label className="field">
+              <span>Custom Input Price / 1M (USD)</span>
+              <input
+                type="number"
+                step="0.01"
+                placeholder="Optional (e.g. 0.10)"
+                value={settings.custom_input_price_per_1m ?? ""}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    custom_input_price_per_1m: e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <label className="field">
+              <span>Custom Output Price / 1M (USD)</span>
+              <input
+                type="number"
+                step="0.01"
+                placeholder="Optional (e.g. 0.50)"
+                value={settings.custom_output_price_per_1m ?? ""}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    custom_output_price_per_1m: e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </label>
           </div>
 
           <div className="muted" style={{ fontSize: 12 }}>
@@ -295,6 +325,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               max_model_calls_per_run: settings.max_model_calls_per_run,
               max_cost_per_run_usd: settings.max_cost_per_run_usd,
               total_budget_ceiling_usd: settings.total_budget_ceiling_usd,
+              custom_input_price_per_1m: settings.custom_input_price_per_1m,
+              custom_output_price_per_1m: settings.custom_output_price_per_1m,
               ...(apiKeyInput.trim() ? { api_key: apiKeyInput.trim() } : {}),
             })
           }

@@ -103,15 +103,15 @@ Endpoint URL for local HTTP MCP clients: `http://127.0.0.1:8000/mcp`
 
 ---
 
-## 5. Start Mission Control Dashboard
+## 5. Build & Start the React Interface + Mission Control
 
-In a second terminal, point Mission Control at the same dedicated demo database (read-only `mode=ro`):
+Build the React frontend and launch `crewforge-dashboard` (which requires the built React bundle and will not silently fall back to the legacy HTML view):
 
 ```bash
-uv run crewforge-dashboard --db-path .crewforge/demo_live.db --host 127.0.0.1 --port 8765
+cd frontend && npm ci && npm run build && cd .. && uv run crewforge-dashboard --db-path .crewforge/judge_session.db --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765` in your browser.
+Open `http://127.0.0.1:8765` in your browser. The server also exposes the shared MCP Streamable HTTP endpoint at `http://127.0.0.1:8765/mcp` using the same isolated judge session, credentials, and budget DB.
 
 ---
 

@@ -5,20 +5,25 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import socket
+import os
 import sqlite3
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel, Field
 
 from crewforge.config import (
     DEFAULT_MODEL_PRICING,
     BudgetAllocationCategory,
     CrewForgeSettings,
+    ModelPricing,
     ProviderType,
     sanitize_error_message,
 )
@@ -28,6 +33,8 @@ from crewforge.core.orchestrator import NetworkRunner
 from crewforge.core.retrieval import ReferenceDocument
 from crewforge.providers.base import ModelProvider
 from crewforge.storage.database import Database
+
+_ENV_ISOLATION_LOCK = threading.Lock()
 
 
 def _utc_iso() -> str:
@@ -67,6 +74,8 @@ class JudgeSettingsUpdate(BaseModel):
     max_model_calls_per_run: int | None = Field(default=None, ge=1, le=32)
     max_cost_per_run_usd: float | None = Field(default=None, ge=0.0, le=5.0)
     total_budget_ceiling_usd: float | None = Field(default=None, ge=0.0, le=100.0)
+    custom_input_price_per_1m: float | None = Field(default=None, ge=0.0, le=1000.0)
+    custom_output_price_per_1m: float | None = Field(default=None, ge=0.0, le=1000.0)
 
 
 class JudgeSessionManager:
@@ -88,7 +97,7 @@ class JudgeSessionManager:
         self._provider_factory = provider_factory
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
-        # Distributable product defaults: isolated judge session, no team budget lock-in
+        # Distributable product defaults: isolated judge session, no team budget or .env fallback
         self._config: dict[str, Any] = {
             "provider": "ollama",
             "model": "qwen3:4b",
@@ -103,8 +112,10 @@ class JudgeSessionManager:
             "max_model_calls_per_run": 16,
             "max_cost_per_run_usd": 0.05,
             "total_budget_ceiling_usd": 5.00,
+            "custom_input_price_per_1m": None,
+            "custom_output_price_per_1m": None,
         }
-        # Kept strictly in backend process memory — never persisted or returned raw
+        # Kept strictly in backend process memory — never persisted, never reads .env
         self._api_key: str | None = None
         self._init_chat_tables()
 
@@ -174,15 +185,24 @@ class JudgeSessionManager:
         return self.get_public_settings()
 
     def build_runtime_settings(self) -> CrewForgeSettings:
-        """Build an isolated CrewForgeSettings instance for a judge chat run."""
+        """Build an isolated CrewForgeSettings instance without .env or host env fallback."""
         prov = ProviderType(self._config["provider"])
         is_cloud = prov in (ProviderType.OPENAI, ProviderType.OPENAI_COMPATIBLE)
         max_out = int(self._config["max_output_tokens"])
-        pricing = dict(DEFAULT_MODEL_PRICING)
+        model_name = str(self._config["model"])
+
+        pricing: dict[str, ModelPricing] = dict(DEFAULT_MODEL_PRICING)
+        custom_in = self._config.get("custom_input_price_per_1m")
+        custom_out = self._config.get("custom_output_price_per_1m")
+        if custom_in is not None and custom_out is not None:
+            pricing[model_name] = ModelPricing(
+                input_per_1m=float(custom_in),
+                output_per_1m=float(custom_out),
+            )
 
         kwargs: dict[str, Any] = {
             "provider": prov,
-            "model": str(self._config["model"]),
+            "model": model_name,
             "openai_api_key": self._api_key,
             "openai_base_url": self._config["openai_base_url"] or None,
             "ollama_base_url": self._config["ollama_base_url"] or "http://127.0.0.1:11434",
@@ -211,13 +231,26 @@ class JudgeSessionManager:
             "budget_allocation_category": BudgetAllocationCategory.GENERAL,
             "db_path": self.db_path,
             "cloud_db_path": self.db_path,
-            "canonical_budget_db_path": self.budget_db_path,
+            "budget_authority_path": self.budget_db_path,
             "pricing_json": pricing,
             "request_timeout_seconds": 180.0,
             "run_deadline_seconds": 480.0,
             "enable_http_retrieval": False,
         }
-        return CrewForgeSettings(**kwargs)
+        # Prevent silent fallback to host OPENAI_API_KEY / CREWFORGE_* or team .env
+        with _ENV_ISOLATION_LOCK:
+            saved_env: dict[str, str] = {}
+            for key in list(os.environ.keys()):
+                if key == "OPENAI_API_KEY" or key.startswith("CREWFORGE_"):
+                    saved_env[key] = os.environ.pop(key)
+            try:
+                settings = CrewForgeSettings(_env_file=None, **kwargs)
+            finally:
+                os.environ.update(saved_env)
+
+        if self._api_key is None:
+            settings.openai_api_key = None
+        return settings
 
     # ---------------- Conversation Persistence ----------------
     def list_chats(self) -> list[dict[str, Any]]:
@@ -485,30 +518,59 @@ class JudgeSessionManager:
         task.cancel()
         return True
 
-    def get_mcp_status(self) -> dict[str, Any]:
-        """Check local Streamable HTTP MCP port and return portable configs."""
+    async def get_mcp_status(
+        self,
+        *,
+        mcp_url: str = "http://127.0.0.1:8765/mcp",
+        auth_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Perform an actual MCP Streamable HTTP handshake and tool discovery."""
         http_reachable = False
-        with (
-            contextlib.suppress(OSError),
-            socket.create_connection(("127.0.0.1", 8000), timeout=0.3),
-        ):
-            http_reachable = True
+        discovered_tools: list[str] = []
+        handshake_error: str | None = None
+
+        headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+        try:
+            async with (
+                asyncio.timeout(2.0),
+                httpx.AsyncClient(headers=headers) as http_client,
+                streamable_http_client(mcp_url, http_client=http_client) as (
+                    read_stream,
+                    write_stream,
+                    _,
+                ),
+                ClientSession(read_stream, write_stream) as session,
+            ):
+                await session.initialize()
+                tools_resp = await session.list_tools()
+                discovered_tools = [t.name for t in tools_resp.tools]
+                http_reachable = True
+        except Exception as exc:
+            handshake_error = sanitize_error_message(str(exc), max_length=240)
+
         return {
-            "tools": ["solve", "baseline", "trace"],
-            "http_endpoint": "http://127.0.0.1:8000/mcp",
+            "tools": discovered_tools or ["solve", "baseline", "trace"],
+            "discovered_tools": discovered_tools,
+            "http_endpoint": mcp_url,
             "http_reachable": http_reachable,
+            "handshake_error": handshake_error,
             "session_db_path": str(self.db_path),
+            "session_budget_db_path": str(self.budget_db_path),
             "stdio_config": {
                 "mcpServers": {
                     "crewforge": {
                         "command": "uv",
                         "args": ["run", "--directory", "/path/to/CrewForge", "crewforge-mcp"],
-                        "env": {"CREWFORGE_DB_PATH": str(self.db_path)},
+                        "env": {
+                            "CREWFORGE_DB_PATH": str(self.db_path),
+                            "CREWFORGE_BUDGET_AUTHORITY_PATH": str(self.budget_db_path),
+                        },
                     }
                 }
             },
             "http_command": (
-                f"CREWFORGE_DB_PATH={self.db_path} uv run crewforge-mcp "
-                "--transport streamable-http --host 127.0.0.1 --port 8000"
+                f"CREWFORGE_DB_PATH={self.db_path} "
+                f"CREWFORGE_BUDGET_AUTHORITY_PATH={self.budget_db_path} "
+                "uv run crewforge-mcp --transport streamable-http --host 127.0.0.1 --port 8000"
             ),
         }

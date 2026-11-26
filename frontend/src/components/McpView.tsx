@@ -54,15 +54,21 @@ export const McpView: React.FC = () => {
         <section className="card">
           <h2>Connection Status</h2>
           <div className="status-line">
-            <span>Streamable HTTP (<code>{status.http_endpoint}</code>)</span>
+            <span>Streamable HTTP Handshake (<code>{status.http_endpoint}</code>)</span>
             <span className={`pill ${status.http_reachable ? "pill-green" : "pill-amber"}`}>
-              {status.http_reachable ? "Reachable" : "Not Running"}
+              {status.http_reachable ? "Handshake OK" : "Not Reachable"}
             </span>
           </div>
           <div className="muted" style={{ fontSize: 12 }}>
             Shared session DB: <code>{status.session_db_path}</code>
             <br />
-            Exposed tools: {status.tools.map((t) => <code key={t} style={{ marginRight: 6 }}>{t}</code>)}
+            Discovered tools: {(status.discovered_tools?.length ? status.discovered_tools : status.tools).map((t) => <code key={t} style={{ marginRight: 6 }}>{t}</code>)}
+            {status.handshake_error && (
+              <>
+                <br />
+                <span style={{ color: "var(--amber)" }}>Handshake note: {status.handshake_error}</span>
+              </>
+            )}
           </div>
           <div className="alert-info">
             Localhost-only by default. Do not expose an unauthenticated MCP server on a public tunnel.

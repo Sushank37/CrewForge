@@ -46,6 +46,8 @@ export interface JudgeSettings {
   max_model_calls_per_run: number;
   max_cost_per_run_usd: number;
   total_budget_ceiling_usd: number;
+  custom_input_price_per_1m: number | null;
+  custom_output_price_per_1m: number | null;
   api_key_configured: boolean;
   api_key_hint: string | null;
   session_db_path: string;
@@ -54,9 +56,12 @@ export interface JudgeSettings {
 
 export interface McpStatus {
   tools: string[];
+  discovered_tools?: string[];
   http_endpoint: string;
   http_reachable: boolean;
+  handshake_error?: string | null;
   session_db_path: string;
+  session_budget_db_path?: string;
   stdio_config: Record<string, unknown>;
   http_command: string;
 }

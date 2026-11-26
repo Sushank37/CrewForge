@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 
 from crewforge.config import CrewForgeSettings, configure_logging
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
-from crewforge.core.budget import BudgetManager
+from crewforge.core.budget import BudgetManager, UnifiedBudgetAuthority
 from crewforge.core.executor import ModelExecutor
 from crewforge.core.orchestrator import NetworkRunner
 from crewforge.providers.base import ModelProvider
@@ -27,28 +27,60 @@ def create_mcp_server(
     settings: CrewForgeSettings | None = None,
     database: Database | None = None,
     provider: ModelProvider | None = None,
+    settings_factory: Callable[[], CrewForgeSettings] | None = None,
+    provider_factory: Callable[[CrewForgeSettings], ModelProvider] | None = None,
     host: str = "127.0.0.1",
     port: int = 8000,
 ) -> FastMCP:
     """Create and configure the CrewForge FastMCP server instance.
 
-    Shares one ModelExecutor concurrency semaphore across concurrent MCP tool runs.
+    Shares one ModelExecutor concurrency semaphore across concurrent MCP tool runs,
+    or resolves live isolated judge-session settings when settings_factory is supplied.
     """
-    resolved_settings = settings or CrewForgeSettings()
-    configure_logging(resolved_settings.log_level)
+    resolved_settings = settings or (
+        settings_factory() if settings_factory else CrewForgeSettings()
+    )
+    if settings_factory is None:
+        configure_logging(resolved_settings.log_level)
 
     resolved_db = database or Database(resolved_settings.effective_db_path)
-    owns_provider = provider is None
+    owns_provider = provider is None and provider_factory is None
     resolved_provider: ModelProvider | None = provider
     shared_budget: BudgetManager | None = None
     shared_executor: ModelExecutor | None = None
     initialized = False
 
-    async def _ensure_initialized() -> tuple[Database, ModelProvider, BudgetManager, ModelExecutor]:
+    async def _ensure_initialized() -> tuple[
+        Database, ModelProvider, BudgetManager, ModelExecutor, CrewForgeSettings
+    ]:
         nonlocal resolved_provider, shared_budget, shared_executor, initialized
         if not initialized:
             await resolved_db.initialize()
             initialized = True
+        if settings_factory is not None:
+            live_settings = settings_factory()
+            live_provider = (
+                provider
+                if provider is not None
+                else (
+                    provider_factory(live_settings)
+                    if provider_factory is not None
+                    else build_provider_from_settings(live_settings)
+                )
+            )
+            live_authority = UnifiedBudgetAuthority(
+                settings=live_settings,
+                migrate_default_dbs=False,
+            )
+            live_budget = BudgetManager(resolved_db, live_settings, authority=live_authority)
+            live_executor = ModelExecutor(
+                provider=live_provider,
+                database=resolved_db,
+                budget_manager=live_budget,
+                settings=live_settings,
+            )
+            return resolved_db, live_provider, live_budget, live_executor, live_settings
+
         if resolved_provider is None:
             resolved_provider = build_provider_from_settings(resolved_settings)
         if shared_budget is None:
@@ -60,7 +92,7 @@ def create_mcp_server(
                 budget_manager=shared_budget,
                 settings=resolved_settings,
             )
-        return resolved_db, resolved_provider, shared_budget, shared_executor
+        return resolved_db, resolved_provider, shared_budget, shared_executor, resolved_settings
 
     @asynccontextmanager
     async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
@@ -90,12 +122,12 @@ def create_mcp_server(
     @mcp.tool()
     async def solve(prompt: str) -> dict[str, Any]:
         """Solve an arbitrary prompt using CrewForge's verified multi-agent network."""
-        db, active_provider, budget_manager, executor = await _ensure_initialized()
+        db, active_provider, budget_manager, executor, active_settings = await _ensure_initialized()
         runner = NetworkRunner(
             provider=active_provider,
             database=db,
             budget_manager=budget_manager,
-            settings=resolved_settings,
+            settings=active_settings,
             executor=executor,
         )
         logger.info(
@@ -109,12 +141,12 @@ def create_mcp_server(
     @mcp.tool()
     async def baseline(prompt: str) -> dict[str, Any]:
         """Run the single-agent baseline with equivalent arithmetic tool parity."""
-        db, active_provider, budget_manager, executor = await _ensure_initialized()
+        db, active_provider, budget_manager, executor, active_settings = await _ensure_initialized()
         runner = BaselineRunner(
             provider=active_provider,
             database=db,
             budget_manager=budget_manager,
-            settings=resolved_settings,
+            settings=active_settings,
             executor=executor,
         )
         logger.info(
@@ -128,7 +160,7 @@ def create_mcp_server(
     @mcp.tool()
     async def trace(run_id: str) -> dict[str, Any]:
         """Retrieve the persisted execution trace, verdicts, tool records, and gate decisions."""
-        db, _, _, _ = await _ensure_initialized()
+        db, _, _, _, _ = await _ensure_initialized()
         run_trace = await db.get_run_trace(run_id)
         if run_trace is None:
             return {
