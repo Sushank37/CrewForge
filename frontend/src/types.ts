@@ -66,6 +66,7 @@ export interface JudgeSettings {
   max_output_tokens: number;
   max_workers: number;
   max_tasks: number;
+  adaptive_team_capacity?: boolean;
   max_concurrency: number;
   max_model_calls_per_run: number;
   max_cost_per_run_usd: number;

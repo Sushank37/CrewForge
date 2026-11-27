@@ -290,20 +290,47 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 onChange={(e) => setSettings({ ...settings, max_model_calls_per_run: Number(e.target.value) })}
               />
             </label>
+            <label className="checkbox-row" style={{ gridColumn: "1 / -1" }}>
+              <input
+                type="checkbox"
+                checked={settings.adaptive_team_capacity ?? true}
+                onChange={(e) =>
+                  setSettings({ ...settings, adaptive_team_capacity: e.target.checked })
+                }
+              />
+              <span>
+                Adaptive Team Capacity (auto-scales within Max Model Calls / Run; currently up to{" "}
+                {settings.max_workers} workers / {settings.max_tasks} tasks)
+              </span>
+            </label>
             <label className="field">
               <span>Max Workers</span>
               <input
                 type="number"
+                disabled={settings.adaptive_team_capacity ?? true}
                 value={settings.max_workers}
-                onChange={(e) => setSettings({ ...settings, max_workers: Number(e.target.value) })}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    adaptive_team_capacity: false,
+                    max_workers: Number(e.target.value),
+                  })
+                }
               />
             </label>
             <label className="field">
               <span>Max Tasks</span>
               <input
                 type="number"
+                disabled={settings.adaptive_team_capacity ?? true}
                 value={settings.max_tasks}
-                onChange={(e) => setSettings({ ...settings, max_tasks: Number(e.target.value) })}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    adaptive_team_capacity: false,
+                    max_tasks: Number(e.target.value),
+                  })
+                }
               />
             </label>
             <label className="field">
@@ -412,8 +439,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               openai_reasoning_effort: settings.openai_reasoning_effort,
               allow_paid_runs: settings.allow_paid_runs,
               max_output_tokens: settings.max_output_tokens,
-              max_workers: settings.max_workers,
-              max_tasks: settings.max_tasks,
+              adaptive_team_capacity: settings.adaptive_team_capacity ?? true,
+              ...(settings.adaptive_team_capacity === false
+                ? { max_workers: settings.max_workers, max_tasks: settings.max_tasks }
+                : {}),
               max_concurrency: settings.max_concurrency,
               max_model_calls_per_run: settings.max_model_calls_per_run,
               max_cost_per_run_usd: settings.max_cost_per_run_usd,

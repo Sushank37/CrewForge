@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -15,6 +17,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -42,10 +45,94 @@ from crewforge.storage.database import Database
 _ENV_ISOLATION_LOCK = threading.Lock()
 GROQ_FREE_ENDPOINT = "https://api.groq.com/openai/v1"
 GROQ_FREE_MODELS = ("openai/gpt-oss-120b", "openai/gpt-oss-20b")
+APPROVED_REMOTE_PROVIDER_HOSTS = frozenset(
+    {
+        "api.openai.com",
+        "api.groq.com",
+        "generativelanguage.googleapis.com",
+        "api.anthropic.com",
+        "openrouter.ai",
+        "api.together.xyz",
+        "api.fireworks.ai",
+        "api.mistral.ai",
+        "api.deepseek.com",
+    }
+)
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
 current_session_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "crewforge_session_id", default="default"
 )
+
+
+def _is_disallowed_ip(ip_str: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip_str.split("%", 1)[0])
+    except ValueError:
+        return True
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def validate_remote_provider_url(
+    raw_url: str,
+    *,
+    dns_resolver: Callable[[str], list[str]] | None = None,
+) -> str:
+    """Validate that a remote provider endpoint is an approved public HTTPS model API."""
+    cleaned = (raw_url or "").strip()
+    if not cleaned:
+        return ""
+    parsed = urlparse(cleaned)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("Remote provider endpoint must use HTTPS.")
+    if parsed.username or parsed.password:
+        raise ValueError("Remote provider endpoint cannot contain embedded credentials.")
+    hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not hostname:
+        raise ValueError("Remote provider endpoint must include a valid hostname.")
+    if (
+        hostname == "localhost"
+        or hostname.endswith(".localhost")
+        or hostname.endswith(".local")
+        or hostname.endswith(".internal")
+    ):
+        raise ValueError("Remote provider endpoints cannot target localhost or internal hosts.")
+    try:
+        ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Remote provider endpoints cannot target raw IP addresses.")
+    if hostname not in APPROVED_REMOTE_PROVIDER_HOSTS:
+        raise ValueError(
+            f"Remote provider host '{hostname}' is not in the approved HTTPS model API allowlist."
+        )
+    if dns_resolver is not None:
+        resolved = dns_resolver(hostname)
+        for ip_str in resolved:
+            if _is_disallowed_ip(ip_str):
+                raise ValueError(
+                    f"Remote provider host '{hostname}' resolved to a restricted network address."
+                )
+    else:
+        try:
+            infos = socket.getaddrinfo(hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+            for info in infos:
+                sockaddr = info[4]
+                if sockaddr and _is_disallowed_ip(str(sockaddr[0])):
+                    raise ValueError(
+                        f"Remote provider host '{hostname}' resolved to a restricted "
+                        "network address."
+                    )
+        except OSError:
+            pass
+    return cleaned
 
 
 def validate_session_id(raw: str | None) -> str:
@@ -97,6 +184,7 @@ class JudgeSettingsUpdate(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=256, le=32768)
     max_workers: int | None = Field(default=None, ge=1, le=32)
     max_tasks: int | None = Field(default=None, ge=1, le=64)
+    adaptive_team_capacity: bool | None = None
     max_concurrency: int | None = Field(default=None, ge=1, le=32)
     max_model_calls_per_run: int | None = Field(default=None, ge=1, le=128)
     max_cost_per_run_usd: float | None = Field(default=None, ge=0.0, le=5.0)
@@ -114,6 +202,7 @@ class JudgeSessionManager:
         db_path: str | Path = ".crewforge/judge_session.db",
         budget_db_path: str | Path | None = None,
         provider_factory: Callable[[CrewForgeSettings], ModelProvider] | None = None,
+        allow_local_ollama: bool = True,
     ) -> None:
         self.db_path = Path(db_path)
         self.budget_db_path = (
@@ -122,6 +211,7 @@ class JudgeSessionManager:
             else self.db_path.with_name("judge_budget.db")
         )
         self._provider_factory = provider_factory
+        self._allow_local_ollama = allow_local_ollama
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._provider_wait_state: dict[str, dict[str, Any]] = {}
 
@@ -129,9 +219,9 @@ class JudgeSessionManager:
         self._config: dict[str, Any] = {
             "billing_mode": "free",
             "free_tier_verified": False,
-            "provider": "ollama",
-            "model": "qwen3:4b",
-            "openai_base_url": "",
+            "provider": "ollama" if allow_local_ollama else "openai_compatible",
+            "model": "qwen3:4b" if allow_local_ollama else GROQ_FREE_MODELS[0],
+            "openai_base_url": "" if allow_local_ollama else GROQ_FREE_ENDPOINT,
             "ollama_base_url": "http://127.0.0.1:11434",
             "openai_reasoning_effort": "low",
             "allow_paid_runs": False,
@@ -222,13 +312,32 @@ class JudgeSessionManager:
             "session_budget_db_path": str(self.budget_db_path),
         }
 
-    def update_settings(self, patch: JudgeSettingsUpdate) -> dict[str, Any]:
+    def update_settings(
+        self, patch: JudgeSettingsUpdate, *, is_remote_request: bool = False
+    ) -> dict[str, Any]:
         """Apply validated judge-session configuration updates in memory."""
         data = patch.model_dump(exclude_none=True)
         raw_key = data.pop("api_key", None)
         clear_key = data.pop("clear_api_key", False)
+        adaptive_flag = data.pop("adaptive_team_capacity", None)
 
         candidate = {**self._config, **data}
+        if adaptive_flag is True:
+            candidate["max_workers"] = None
+            candidate["max_tasks"] = None
+
+        if candidate["provider"] == "ollama" and (
+            not self._allow_local_ollama or is_remote_request
+        ):
+            raise ValueError("Local Ollama is restricted to local development accounts.")
+
+        if (not self._allow_local_ollama or is_remote_request) and candidate.get(
+            "openai_base_url"
+        ):
+            candidate["openai_base_url"] = validate_remote_provider_url(
+                str(candidate["openai_base_url"])
+            )
+
         if candidate["billing_mode"] == "free":
             if candidate["provider"] == "openai":
                 raise ValueError(
@@ -259,9 +368,16 @@ class JudgeSessionManager:
     def build_runtime_settings(self) -> CrewForgeSettings:
         """Build an isolated CrewForgeSettings instance without .env or host env fallback."""
         prov = ProviderType(self._config["provider"])
+        if prov == ProviderType.OLLAMA and not self._allow_local_ollama:
+            raise ValueError("Local Ollama is restricted to local development accounts.")
+        if not self._allow_local_ollama and self._config.get("openai_base_url"):
+            validate_remote_provider_url(str(self._config["openai_base_url"]))
         is_free_mode = self._config.get("billing_mode", "free") == "free"
-        if is_free_mode and prov == ProviderType.OPENAI_COMPATIBLE and not self._config.get(
-            "free_tier_verified"
+        if (
+            self._provider_factory is None
+            and is_free_mode
+            and prov == ProviderType.OPENAI_COMPATIBLE
+            and not self._config.get("free_tier_verified")
         ):
             raise ValueError(
                 "Free mode requires confirming a verified Groq free-tier account in Settings."
@@ -799,6 +915,7 @@ class JudgeSessionRegistry:
                     db_path=db_path,
                     budget_db_path=budget_db_path,
                     provider_factory=self.provider_factory,
+                    allow_local_ollama=(sid == "default"),
                 )
                 self._sessions[sid] = mgr
             return mgr

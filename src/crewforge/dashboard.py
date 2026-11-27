@@ -126,11 +126,14 @@ class _LocalSecurityMiddleware(BaseHTTPMiddleware):
         is_forwarded_remote = bool(
             request.headers.get("cf-connecting-ip")
             or request.headers.get("x-forwarded-host")
+            or request.headers.get("x-forwarded-for")
+            or request.headers.get("forwarded")
         )
         is_local_request = (
             (not parsed_host or parsed_host in _ALLOWED_HOST_HEADERS)
             and not is_forwarded_remote
         )
+        request.state.is_local_request = is_local_request
 
         # 1. Request size limit
         content_length = request.headers.get("content-length")
@@ -437,7 +440,12 @@ def create_dashboard_app(
         try:
             body = await request.json()
             patch = JudgeSettingsUpdate.model_validate(body)
-            return JSONResponse(registry.get_current_session().update_settings(patch))
+            is_remote = not getattr(request.state, "is_local_request", True)
+            return JSONResponse(
+                registry.get_current_session().update_settings(
+                    patch, is_remote_request=is_remote
+                )
+            )
         except Exception as exc:
             return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
 
