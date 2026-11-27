@@ -110,12 +110,24 @@ class ClaimLedger:
 
         persisted_evidence: list[Evidence] = []
         retrieved_docs = [e for e in verified_evidence_all if e.source_type == "external_retrieved"]
+        retrieved_sources_by_ref: dict[str, str] = {}
+        chunks_by_ref: dict[str, list[str]] = {}
+        for ev in retrieved_docs:
+            if ev.source_ref:
+                chunks_by_ref.setdefault(ev.source_ref, []).append(ev.excerpt)
+            retrieved_sources_by_ref[ev.evidence_id] = ev.excerpt
+        for ref, chunks in chunks_by_ref.items():
+            retrieved_sources_by_ref[ref] = "\n\n".join(chunks)
+        for doc_idx, ev in enumerate(retrieved_docs, start=1):
+            alias = f"doc_{doc_idx}"
+            if alias not in retrieved_sources_by_ref:
+                retrieved_sources_by_ref[alias] = (
+                    retrieved_sources_by_ref.get(ev.source_ref, ev.excerpt)
+                    if ev.source_ref
+                    else ev.excerpt
+                )
         retrieved_sources_text = "\n".join(e.excerpt for e in retrieved_docs)
-        retrieved_refs = {
-            *(f"doc_{idx}" for idx, _ in enumerate(verified_evidence_all, start=1)),
-            *(e.source_ref for e in retrieved_docs if e.source_ref),
-            *(e.evidence_id for e in retrieved_docs),
-        }
+        retrieved_refs = set(retrieved_sources_by_ref.keys())
         for proposal in evidence_proposals:
             effective_source_type = proposal.source_type
             check = verify_evidence_proposal(
@@ -124,13 +136,14 @@ class ClaimLedger:
                 dependency_findings_text=dependency_findings_text,
                 matching_tool_records=combined_tool_records,
                 retrieved_sources_text=retrieved_sources_text,
+                retrieved_sources_by_ref=retrieved_sources_by_ref,
             )
             # If a specialist cited an attached/retrieved document using `dependency_finding`
             # or `user_prompt`, re-verify strictly against `external_retrieved` when it matches
             # a known retrieved doc ref or verbatim retrieved text.
             if (
                 not check.verified_in_input
-                and retrieved_sources_text
+                and retrieved_sources_by_ref
                 and proposal.source_type in {"user_prompt", "dependency_finding"}
                 and (
                     proposal.source_ref in retrieved_refs
@@ -147,6 +160,7 @@ class ClaimLedger:
                     dependency_findings_text=dependency_findings_text,
                     matching_tool_records=combined_tool_records,
                     retrieved_sources_text=retrieved_sources_text,
+                    retrieved_sources_by_ref=retrieved_sources_by_ref,
                 )
                 if retrieved_check.verified_in_input:
                     effective_source_type = "external_retrieved"

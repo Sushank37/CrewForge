@@ -95,9 +95,19 @@ def _preserves_numbers_and_negation(
     if idx == -1:
         return False, "Excerpt not found in referenced input."
 
-    # Inspect immediate prefix window (~25 chars) for an omitted leading negation marker.
+    # Inspect immediate prefix window (~25 chars) within the same sentence/clause
+    # for an omitted leading negation marker (do not cross sentence/doc boundaries).
     prefix_start = max(0, idx - 25)
     prefix = norm_source[prefix_start:idx]
+    last_boundary = max(
+        prefix.rfind("."),
+        prefix.rfind("!"),
+        prefix.rfind("?"),
+        prefix.rfind(";"),
+        prefix.rfind("\n"),
+    )
+    if last_boundary != -1:
+        prefix = prefix[last_boundary + 1 :]
     prefix_tokens = set(re.findall(r"[a-z]+", prefix))
     excerpt_tokens = set(re.findall(r"[a-z]+", norm_excerpt))
     if (prefix_tokens & _NEGATION_WORDS) and not (excerpt_tokens & _NEGATION_WORDS):
@@ -119,6 +129,7 @@ def verify_evidence_proposal(
     dependency_findings_text: str = "",
     matching_tool_records: list[ToolExecutionRecord] | None = None,
     retrieved_sources_text: str = "",
+    retrieved_sources_by_ref: dict[str, str] | None = None,
 ) -> ProvenanceCheckResult:
     """Deterministically validate provenance without conflating substring match with truth.
 
@@ -180,6 +191,51 @@ def verify_evidence_proposal(
         )
 
     if proposal.source_type == "external_retrieved":
+        if retrieved_sources_by_ref is not None:
+            ref = (proposal.source_ref or "").strip()
+            if ref:
+                doc_text = retrieved_sources_by_ref.get(ref)
+                if not doc_text:
+                    return ProvenanceCheckResult(
+                        reliability=EvidenceReliability.UNVERIFIED,
+                        verified_in_input=False,
+                        notes=f"Referenced external document '{ref}' not found.",
+                    )
+                matched, note = _preserves_numbers_and_negation(
+                    excerpt=proposal.excerpt,
+                    source_text=doc_text,
+                )
+                return ProvenanceCheckResult(
+                    reliability=EvidenceReliability.MEDIUM
+                    if matched
+                    else EvidenceReliability.UNVERIFIED,
+                    verified_in_input=matched,
+                    notes=note,
+                )
+            if not retrieved_sources_by_ref:
+                return ProvenanceCheckResult(
+                    reliability=EvidenceReliability.UNVERIFIED,
+                    verified_in_input=False,
+                    notes="No retrieved external document matches this citation.",
+                )
+            last_note = "Excerpt not found in referenced input."
+            for doc_text in retrieved_sources_by_ref.values():
+                matched, note = _preserves_numbers_and_negation(
+                    excerpt=proposal.excerpt,
+                    source_text=doc_text,
+                )
+                if matched:
+                    return ProvenanceCheckResult(
+                        reliability=EvidenceReliability.MEDIUM,
+                        verified_in_input=True,
+                        notes=note,
+                    )
+                last_note = note
+            return ProvenanceCheckResult(
+                reliability=EvidenceReliability.UNVERIFIED,
+                verified_in_input=False,
+                notes=last_note,
+            )
         if not retrieved_sources_text:
             return ProvenanceCheckResult(
                 reliability=EvidenceReliability.UNVERIFIED,

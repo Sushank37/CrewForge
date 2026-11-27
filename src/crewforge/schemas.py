@@ -574,7 +574,10 @@ class SpecialistOutput(BaseModel):
     )
     claims: list[ProposedClaim] = Field(
         default_factory=list,
-        description="1 to 3 atomic claims directly addressing assigned deliverables.",
+        description=(
+            "Atomic claims covering all assigned deliverables and independent numerical results "
+            "(one claim per distinct result, scaled to task complexity)."
+        ),
     )
     evidence_proposals: list[ProposedEvidence] = Field(
         default_factory=list,

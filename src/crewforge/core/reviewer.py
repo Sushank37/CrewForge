@@ -456,7 +456,11 @@ class ReviewerPool:
                 outcome.verdicts.append(verdict)
                 outcome.updated_claims[claim.claim_id] = updated
                 latest_by_id[claim.claim_id] = updated
-                if verdict.blocking_severity == "blocking" and next_status == ClaimStatus.REJECTED:
+                needs_repair = updated.is_material and (
+                    verdict.blocking_severity == "blocking"
+                    or verdict.decision == ReviewDecision.NEEDS_REVISION
+                )
+                if needs_repair and next_status == ClaimStatus.REJECTED:
                     outcome.blocking_claims.append(updated)
                     await self._graph.invalidate_dependents(
                         run_id=run_id,
@@ -655,7 +659,12 @@ class ReviewerPool:
                     break
 
             if rejections:
-                blocking = any(v.blocking_severity == "blocking" for v in rejections)
+                has_actionable_revision = any(
+                    v.decision == ReviewDecision.NEEDS_REVISION for v in rejections
+                )
+                blocking = any(v.blocking_severity == "blocking" for v in rejections) or (
+                    claim.is_material and has_actionable_revision
+                )
                 next_status = ClaimStatus.REJECTED
                 next_ver = (
                     VerificationStatus.CONTRADICTED

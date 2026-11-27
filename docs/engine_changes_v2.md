@@ -74,3 +74,13 @@ New test file: `tests/test_reasoning_scalability.py` (4 tests):
    - Preserved alias collision protection (specialist sub-excerpts cannot overwrite `doc_*` aliases), unverified-evidence rejection, fabricated/cross-run `run_id` rejection, and stale claim version rejection.
 2. **`src/crewforge/core/repair.py` (`TargetedRepairEngine` & `_build_revision_prompt`):**
    - Constructed the run-scoped `ProvenanceCatalog` in `resolve_disputes()` and included trusted provenance references in targeted repair prompts.
+
+## V2.2 Repair Routing, Atomic Coverage & Evidence Verification Fixes (Post-`ebbf979`)
+
+1. **`src/crewforge/core/reviewer.py`:**
+   - Routed rejected material claims with actionable `needs_revision` verdicts into `outcome.blocking_claims` (and downstream invalidation) even when `blocking_severity == "minor"`, while preserving `UNCERTAINTY` / `UNRESOLVED` handling and budget/deadline guards.
+2. **`src/crewforge/prompts/worker.py`, `src/crewforge/prompts/planner.py`, `src/crewforge/schemas.py`:**
+   - Removed the artificial `1 to 3` claim/deliverable restriction; sized claims dynamically to complexity and required separate atomic claims + deterministic `ToolExecutionRecord`s for each independently requested numerical result.
+3. **`src/crewforge/core/evidence_verifier.py` & `src/crewforge/core/ledger.py`:**
+   - Verified `external_retrieved` excerpts strictly against their actual referenced document (`retrieved_sources_by_ref`) rather than concatenated unrelated documents, blocking cross-document misattribution.
+   - Restricted the negation-prefix check in `_preserves_numbers_and_negation()` to the same sentence/clause so unrelated prior sentences or documents do not cause false negation rejections, while still rejecting omitted same-sentence negation, altered numbers, and noncontiguous/fabricated quotations.
