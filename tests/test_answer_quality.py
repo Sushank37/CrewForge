@@ -265,7 +265,163 @@ def test_dependent_claim_revalidated_after_upstream_revision(tmp_path: Path) -> 
             assert res.verification.supported_claim_count == 2
             assert "540000 USD" in res.answer
             assert "stays under budget" in res.answer
+            assert res.answer.count("540000 USD") == 1
             assert "[clm_" not in res.answer
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+def test_stale_dependent_revalidation_creates_new_version_preserving_v1(tmp_path: Path) -> None:
+    """_revalidate_stale_dependents must create v2 and preserve v1 premise_refs & STALE status."""
+    from crewforge.core.ledger import ClaimLedger
+    from crewforge.core.messaging import MessageBus
+    from crewforge.core.repair import TargetedRepairEngine
+    from crewforge.core.reviewer import ReviewerPool
+    from crewforge.schemas import AgentSpec
+
+    db_path = tmp_path / "reval_v2.db"
+    settings = CrewForgeSettings(
+        db_path=db_path,
+        budget_authority_path=tmp_path / "reval_v2_budget.db",
+        provider="ollama",
+        model="qwen3:4b",
+        allow_paid_runs=False,
+        max_model_calls_per_run=16,
+        max_retries=0,
+    )
+
+    def handler(prompt: str, response_model: type[BaseModel] | None) -> Any:
+        if response_model is ReviewerBatchOutput:
+            verdicts = []
+            for cid, cver in _CLAIM_HEADER_RE.findall(prompt):
+                verdicts.append(
+                    {
+                        "claim_id": cid,
+                        "claim_version": int(cver),
+                        "review_dimension": "combined_evidence_consistency",
+                        "decision": "approve",
+                        "rationale": "Upstream premise v2 is supported.",
+                        "evidence_refs": [],
+                        "blocking_severity": "none",
+                    }
+                )
+            return {"verdicts": verdicts, "missing_requirement_coverage": []}
+        return {}
+
+    async def _run() -> None:
+        db = Database(db_path)
+        await db.initialize()
+        try:
+            await db.create_run("run_rv2", "network", "Check budget", settings.to_run_config())
+            plan = ExecutionPlan(
+                run_id="run_rv2",
+                goal="Budget check",
+                user_requirements=["Check budget"],
+                agents=[AgentSpec(agent_id="a1", role="Analyst", instructions="Analyze")],
+                tasks=[
+                    TaskSpec(
+                        task_id="t1",
+                        task_ref="t1",
+                        title="Check",
+                        description="Check",
+                        assigned_agent_id="a1",
+                    )
+                ],
+            )
+            await db.save_execution_plan(plan)
+            await db.insert_claim(
+                Claim(
+                    claim_id="clm_deadbeef01",
+                    run_id="run_rv2",
+                    version=1,
+                    statement="Total is 500000 USD.",
+                    category=ClaimCategory.COMPUTATION,
+                    author_agent_id="a1",
+                    task_id="t1",
+                    status=ClaimStatus.REJECTED,
+                    verification_status=VerificationStatus.CONTRADICTED,
+                )
+            )
+            await db.insert_claim(
+                Claim(
+                    claim_id="clm_deadbeef01",
+                    run_id="run_rv2",
+                    version=2,
+                    statement="Total is 540000 USD.",
+                    category=ClaimCategory.COMPUTATION,
+                    author_agent_id="a1",
+                    task_id="t1",
+                    status=ClaimStatus.SUPPORTED,
+                    verification_status=VerificationStatus.COMPUTATIONALLY_VERIFIED,
+                )
+            )
+            await db.insert_evidence(
+                Evidence(
+                    evidence_id="evd_dep_1",
+                    run_id="run_rv2",
+                    source_type="dependency_finding",
+                    source_ref="clm_deadbeef01",
+                    excerpt="Total is 540000 USD.",
+                    created_by="a1",
+                    verified_in_input=True,
+                )
+            )
+            await db.insert_claim(
+                Claim(
+                    claim_id="clm_deadbeef02",
+                    run_id="run_rv2",
+                    version=1,
+                    statement="The plan stays under budget.",
+                    category=ClaimCategory.INFERENCE,
+                    author_agent_id="a1",
+                    task_id="t1",
+                    evidence_ids=["evd_dep_1"],
+                    depends_on_claim_ids=["clm_deadbeef01"],
+                    premise_refs=[ClaimVersionRef(claim_id="clm_deadbeef01", claim_version=1)],
+                    status=ClaimStatus.STALE,
+                    verification_status=VerificationStatus.STALE_PENDING_REVIEW,
+                )
+            )
+            bm = BudgetManager(db, settings)
+            from crewforge.core.executor import ModelExecutor
+
+            ex = ModelExecutor(
+                provider=FakeProvider(handler=handler, max_retries=0),
+                database=db,
+                budget_manager=bm,
+                settings=settings,
+            )
+            ledger = ClaimLedger(db)
+            reviewer = ReviewerPool(executor=ex, database=db, settings=settings)
+            repair = TargetedRepairEngine(
+                executor=ex,
+                database=db,
+                ledger=ledger,
+                message_bus=MessageBus(db),
+                reviewer_pool=reviewer,
+                settings=settings,
+            )
+            calls, _verdicts, blocking = await repair._revalidate_stale_dependents(
+                run_id="run_rv2",
+                original_prompt="Check budget",
+                plan=plan,
+                verdicts_by_key={},
+                run_deadline_monotonic=None,
+            )
+            assert calls == 1
+            assert blocking == []
+            versions = [
+                c
+                for c in await db.get_claims_for_run("run_rv2", latest_only=False)
+                if c.claim_id == "clm_deadbeef02"
+            ]
+            assert [c.version for c in versions] == [1, 2]
+            assert versions[0].status == ClaimStatus.STALE
+            assert versions[0].premise_refs[0].claim_version == 1
+            assert versions[1].status == ClaimStatus.SUPPORTED
+            assert versions[1].premise_refs[0].claim_version == 2
         finally:
             await db.close()
 

@@ -287,7 +287,7 @@ export const MissionControlView: React.FC<MissionControlProps> = ({ initialRunId
                   <div className="kpi-mini"><span>Status</span><strong>{trace.status}</strong></div>
                   <div className="kpi-mini"><span>Calls</span><strong>{trace.usage?.model_calls ?? "Unknown"}</strong></div>
                   <div className="kpi-mini"><span>Cost</span><strong>{trace.usage?.actual_cost_usd !== undefined ? `$${trace.usage.actual_cost_usd.toFixed(6)}` : "Unknown"}</strong></div>
-                  <div className="kpi-mini"><span>Req. Linkage</span><strong>{projected.gate?.verification_summary?.requirement_coverage !== undefined ? `${(projected.gate.verification_summary.requirement_coverage * 100).toFixed(1)}%` : "Pending"}</strong></div>
+                  <div className="kpi-mini"><span>Internal Req. Linkage (not grade)</span><strong>{projected.gate?.verification_summary?.requirement_coverage !== undefined ? `${(projected.gate.verification_summary.requirement_coverage * 100).toFixed(1)}%` : "Pending"}</strong></div>
                 </div>
               )}
 

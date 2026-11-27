@@ -424,6 +424,24 @@ export function applyTraceToOffice(
       case "synthesis_fast_path":
       case "synthesis_completed":
       case "run_completed": {
+        if (String(trace.mode || "").toLowerCase() === "baseline") {
+          actors.lead = {
+            ...actors.lead,
+            pose: "idle",
+            arrivedPose: "idle",
+            bubble: "Baseline (unverified)",
+            bubbleUntil: tStart + 5000,
+          };
+          actors.reviewer = {
+            ...actors.reviewer,
+            pose: "idle",
+            arrivedPose: "idle",
+            bubble: "No review (baseline)",
+            bubbleUntil: tStart + 5000,
+          };
+          note = ev.message || "Baseline completed without independent verification.";
+          break;
+        }
         const outcome = classifyReleaseOutcome(trace);
         const leadPose: SpritePose = outcome === "blocked" ? "error" : "completed";
         const revPose: SpritePose =
@@ -483,6 +501,17 @@ export function applyTraceToOffice(
     });
     note = trace.waiting_reason || waitText;
   } else if (!isRunning && (trace.status === "completed" || trace.status === "partial" || trace.status === "failed")) {
+    if (String(trace.mode || "").toLowerCase() === "baseline") {
+      actors.lead = { ...actors.lead, pose: "idle", arrivedPose: "idle" };
+      actors.reviewer = { ...actors.reviewer, pose: "idle", arrivedPose: "idle" };
+      return {
+        runId: trace.run_id,
+        actors,
+        packets,
+        processedEventKeys: processed,
+        lastInteractionNote: "Baseline completed without independent verification.",
+      };
+    }
     const outcome = classifyReleaseOutcome(trace);
     const finalLeadPose: SpritePose = outcome === "blocked" ? "error" : "completed";
     const finalRevPose: SpritePose =

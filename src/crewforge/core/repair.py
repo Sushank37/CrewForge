@@ -419,26 +419,28 @@ class TargetedRepairEngine:
                     ClaimVersionRef(claim_id=uid, claim_version=latest_by_id[uid].version)
                     for uid in up_ids
                 ]
+                # Create a new claim version (preserving original v1 premise_refs & review history).
+                new_claim = await self._ledger.revise_claim(
+                    prior_claim=claim,
+                    new_statement=claim.statement,
+                    author_agent_id=claim.author_agent_id,
+                    task_id=claim.task_id,
+                    revision_notes=(
+                        "Upstream premises verified; created new version for dependent "
+                        "revalidation."
+                    ),
+                )
                 await self._db.refresh_claim_premise_refs(
                     run_id=run_id,
-                    claim_id=claim.claim_id,
-                    version=claim.version,
+                    claim_id=new_claim.claim_id,
+                    version=new_claim.version,
                     premise_refs=refreshed_refs,
                 )
-                await self._db.update_claim_verification_state(
-                    run_id=run_id,
-                    claim_id=claim.claim_id,
-                    version=claim.version,
-                    status=ClaimStatus.ASSERTED,
-                    verification_status=VerificationStatus.UNVERIFIED,
-                    revision_notes="Upstream premises verified; queued for dependent revalidation.",
-                )
                 ready.append(
-                    claim.model_copy(
+                    new_claim.model_copy(
                         update={
                             "premise_refs": refreshed_refs,
                             "status": ClaimStatus.ASSERTED,
-                            "verification_status": VerificationStatus.UNVERIFIED,
                         }
                     )
                 )

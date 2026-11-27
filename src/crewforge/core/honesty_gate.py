@@ -725,11 +725,7 @@ class HonestyGate:
             if len(clean_points) == 1:
                 sections.append(clean_points[0])
             else:
-                summary_line = " ".join(clean_points)
-                bullet_lines = [f"- {pt}" for pt in clean_points]
-                sections.append(
-                    f"{summary_line}\n\n**Verified Details:**\n" + "\n".join(bullet_lines)
-                )
+                sections.append("\n".join(f"- {pt}" for pt in clean_points))
 
         if approved_conditional:
             lines = ["**Conditional / Qualified Statements:**"]

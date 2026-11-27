@@ -83,6 +83,16 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
     };
   }
   if (status === "completed" || status === "partial" || types.has("run_completed")) {
+    if (String(trace.mode || "").toLowerCase() === "baseline") {
+      return {
+        step: 4,
+        blocked: false,
+        releaseOutcome: "none",
+        headline: "Baseline Complete (Unverified)",
+        subline: "Single-agent baseline finished without independent claim verification.",
+        leadBubble: "Baseline output ready (unverified).",
+      };
+    }
     const isPartial = releaseOutcome === "partial";
     return {
       step: 4,
