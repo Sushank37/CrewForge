@@ -524,9 +524,13 @@ def extract_numbers_from_text(text: str) -> set[Decimal]:
     return found
 
 
+_SENTENCE_OR_PARA_BREAK_RE = re.compile(r"(?:(?<!\d)\.(?!\d)|;|\n\s*\n)")
+_COMMA_SEP_RE = re.compile(r"(?<!\d),(?!\d)")
+
+
 def _extract_numeric_occurrences(text: str) -> list[tuple[Decimal, Decimal | None, str, str]]:
     """Return list of (raw_value, pct_ratio_value, raw_token, local_context_window)."""
-    results: list[tuple[Decimal, Decimal | None, str, str]] = []
+    raw_spans: list[tuple[Decimal, Decimal | None, int, int, str]] = []
     for match in _NUMBER_RE.finditer(text):
         token = match.group(0)
         cleaned = token.replace(",", "")
@@ -541,32 +545,40 @@ def _extract_numeric_occurrences(text: str) -> list[tuple[Decimal, Decimal | Non
             continue
         if not raw_val.is_finite():
             continue
-        start = match.start()
-        end = match.end()
-        # Bound local context to current clause/comma separator for accurate variable binding.
-        left_slice = text[max(0, start - 45) : start]
-        for sep in (".", ";", "\n", ","):
-            pos = left_slice.rfind(sep)
-            if pos != -1:
-                left_slice = left_slice[pos + 1 :]
-        right_slice = text[end : min(len(text), end + 20)]
-        for sep in (".", ";", "\n", ","):
-            pos = right_slice.find(sep)
-            if pos != -1:
-                right_slice = right_slice[:pos]
-        results.append((raw_val, ratio_val, token, f"{left_slice} {token} {right_slice}".lower()))
+        raw_spans.append((raw_val, ratio_val, match.start(), match.end(), token))
     for raw_val, start, end, token in _extract_word_number_spans(text):
-        left_slice = text[max(0, start - 45) : start]
-        for sep in (".", ";", "\n", ","):
-            pos = left_slice.rfind(sep)
-            if pos != -1:
-                left_slice = left_slice[pos + 1 :]
-        right_slice = text[end : min(len(text), end + 20)]
-        for sep in (".", ";", "\n", ","):
-            pos = right_slice.find(sep)
-            if pos != -1:
-                right_slice = right_slice[:pos]
-        results.append((raw_val, None, token, f"{left_slice} {token} {right_slice}".lower()))
+        raw_spans.append((raw_val, None, start, end, token))
+    raw_spans.sort(key=lambda item: item[2])
+
+    results: list[tuple[Decimal, Decimal | None, str, str]] = []
+    for idx, (raw_val, ratio_val, start, end, token) in enumerate(raw_spans):
+        prev_end = raw_spans[idx - 1][3] if idx > 0 else 0
+        next_start = raw_spans[idx + 1][2] if idx + 1 < len(raw_spans) else len(text)
+
+        left_bound = max(0, start - 65, prev_end)
+        right_bound = min(len(text), end + 65, next_start)
+        left_slice = text[left_bound:start]
+        right_slice = text[end:right_bound]
+
+        # Break only on sentence/paragraph boundaries (not decimals, thousands commas, or \n).
+        left_breaks = list(_SENTENCE_OR_PARA_BREAK_RE.finditer(left_slice))
+        if left_breaks:
+            left_slice = left_slice[left_breaks[-1].end() :]
+        elif prev_end > 0 and left_bound == prev_end:
+            comma_match = _COMMA_SEP_RE.search(left_slice)
+            if comma_match is not None:
+                left_slice = left_slice[comma_match.end() :]
+
+        right_break = _SENTENCE_OR_PARA_BREAK_RE.search(right_slice)
+        if right_break is not None:
+            right_slice = right_slice[: right_break.start()]
+        elif next_start < len(text) and right_bound == next_start:
+            comma_match = _COMMA_SEP_RE.search(right_slice)
+            if comma_match is not None:
+                right_slice = right_slice[: comma_match.start()]
+
+        norm_ctx = re.sub(r"\s+", " ", f"{left_slice} {token} {right_slice}").strip().lower()
+        results.append((raw_val, ratio_val, token, norm_ctx))
     return results
 
 

@@ -280,7 +280,7 @@ class BaselineRunner:
                 )
             tool_summaries: list[dict[str, object]] = []
             if parsed.computations:
-                for req in parsed.computations[:4]:
+                for req in parsed.computations:
                     rec = await self._arithmetic.execute(
                         run_id=resolved_run_id,
                         actor="baseline",

@@ -703,6 +703,15 @@ class HonestyGate:
 
         requirement_coverage: float | None = round(req_score / len(reqs), 4) if reqs else None
 
+        if is_partial_run or incomplete_tasks:
+            for item in req_items:
+                if item.status == "missing":
+                    omitted_notice = f"Omitted requirement ({item.requirement_id}): {item.text}"
+                    if omitted_notice not in clean_missing:
+                        clean_missing.append(omitted_notice)
+                    if omitted_notice not in dedup_unresolved:
+                        dedup_unresolved.append(omitted_notice)
+
         # 6. Application-controlled deterministic rendering from exact ledger claims.
         sections: list[str] = []
         if is_partial_run:

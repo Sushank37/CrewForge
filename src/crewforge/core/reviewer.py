@@ -94,12 +94,29 @@ def _build_review_user_prompt(
         for tid in claim.tool_execution_ids:
             rec = tool_by_id.get(tid)
             if rec is not None:
+                var_bindings: list[str] = []
+                for v_name, v_val in rec.variables.items():
+                    v_ref = rec.input_provenance_refs.get(v_name, "missing")
+                    detail = rec.provenance_details.get(v_name, {})
+                    resolved_id = detail.get("resolved_id")
+                    src_snippet = ""
+                    if isinstance(resolved_id, str):
+                        if resolved_id in evidence_by_id:
+                            src_snippet = f" -> \"{evidence_by_id[resolved_id].excerpt}\""
+                        elif resolved_id in prior_claims_by_id:
+                            src_snippet = f" -> \"{prior_claims_by_id[resolved_id].statement}\""
+                        elif resolved_id in tool_by_id:
+                            t_ref = tool_by_id[resolved_id]
+                            src_snippet = f" -> {t_ref.computed_result} {t_ref.units}".strip()
+                    var_bindings.append(f"{v_name}={v_val} [{v_ref}{src_snippet}]")
+                bindings_str = "; ".join(var_bindings) if var_bindings else "none"
                 tool_lines.append(
                     f"  - {rec.tool_execution_id}: expr=`{rec.expression}`, "
                     f"computed={rec.computed_result}, proposed={rec.proposed_result}, "
                     f"units='{rec.units}', matches={rec.matches_proposed}, "
                     f"inputs_grounded={rec.inputs_grounded}, "
-                    f"ungrounded_literals={rec.has_ungrounded_literals}, success={rec.success}"
+                    f"ungrounded_literals={rec.has_ungrounded_literals}, success={rec.success}, "
+                    f"inputs=[{bindings_str}]"
                 )
         premise_lines = []
         for p in claim.premise_refs:

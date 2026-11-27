@@ -190,8 +190,8 @@ class ClaimLedger:
         persisted_claims: list[Claim] = []
         local_ref_map: dict[str, Claim] = {}
 
-        # Enforce bounded claim count per specialist call (keep at most 4 claims per batch).
-        for idx, prop_claim in enumerate(claim_proposals[:4]):
+        # Persist all valid proposed claims within existing run/call budgets.
+        for idx, prop_claim in enumerate(claim_proposals):
             linked_evidence_ids = [
                 persisted_evidence[e_idx].evidence_id
                 for e_idx in prop_claim.evidence_indices
@@ -326,7 +326,15 @@ class ClaimLedger:
             )
             tool_ids = [rec.tool_execution_id]
 
-        resolved_premises = list(prior_claim.premise_refs)
+        resolved_premises: list[ClaimVersionRef] = []
+        for pref in prior_claim.premise_refs:
+            p_latest = latest_by_id.get(pref.claim_id)
+            if p_latest is not None:
+                resolved_premises.append(
+                    ClaimVersionRef(claim_id=p_latest.claim_id, claim_version=p_latest.version)
+                )
+            else:
+                resolved_premises.append(pref)
         resolved_dep_ids = list(prior_claim.depends_on_claim_ids)
         if premise_claim_ids is not None:
             resolved_premises = []

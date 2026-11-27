@@ -22,6 +22,7 @@ from crewforge.schemas import (
     ExecutionPlan,
     ReviewVerdict,
     RevisionOutput,
+    ToolExecutionRecord,
     VerificationStatus,
 )
 from crewforge.storage.database import CrossRunReferenceError, Database
@@ -47,8 +48,12 @@ def _build_revision_prompt(
     evidence_by_id: dict[str, Evidence],
     dependency_findings_text: str,
     provenance_catalog: ProvenanceCatalog | None = None,
+    tool_by_id: dict[str, ToolExecutionRecord] | None = None,
+    claims_by_id: dict[str, Claim] | None = None,
 ) -> str:
     blocks: list[str] = []
+    tools_map = tool_by_id or {}
+    claims_map = claims_by_id or {}
     for claim in disputed_claims:
         verdicts = verdicts_by_claim_key.get((claim.claim_id, claim.version), [])
         obj_lines = [
@@ -61,12 +66,38 @@ def _build_revision_prompt(
             for eid in claim.evidence_ids
             if eid in evidence_by_id
         ]
+        tool_lines: list[str] = []
+        for tid in claim.tool_execution_ids:
+            rec = tools_map.get(tid)
+            if rec is None:
+                continue
+            var_parts: list[str] = []
+            for v_name, v_val in rec.variables.items():
+                v_ref = rec.input_provenance_refs.get(v_name, "missing")
+                detail = rec.provenance_details.get(v_name, {})
+                resolved_id = detail.get("resolved_id")
+                src_snippet = ""
+                if isinstance(resolved_id, str):
+                    if resolved_id in evidence_by_id:
+                        src_snippet = f" -> \"{evidence_by_id[resolved_id].excerpt}\""
+                    elif resolved_id in claims_map:
+                        src_snippet = f" -> \"{claims_map[resolved_id].statement}\""
+                var_parts.append(f"{v_name}={v_val} [{v_ref}{src_snippet}]")
+            bindings_str = "; ".join(var_parts) if var_parts else "none"
+            tool_lines.append(
+                f"  - {rec.tool_execution_id}: expr=`{rec.expression}`, "
+                f"computed={rec.computed_result} {rec.units}, "
+                f"inputs_grounded={rec.inputs_grounded}, success={rec.success}, "
+                f"inputs=[{bindings_str}]"
+            )
         blocks.append(
             f"Target claim: claim_id={claim.claim_id}, expected_version={claim.version}, "
             f"category={claim.category.value}\n"
             f"Current statement: {claim.statement}\n"
             f"Reviewer objections:\n" + "\n".join(obj_lines) + "\n"
-            "Current evidence:\n" + ("\n".join(evd_lines) if evd_lines else "  - None")
+            "Current evidence:\n" + ("\n".join(evd_lines) if evd_lines else "  - None") + "\n"
+            "Existing deterministic calculations:\n"
+            + ("\n".join(tool_lines) if tool_lines else "  - None")
         )
 
     prov_lines: list[str] = []
@@ -79,10 +110,10 @@ def _build_revision_prompt(
             if dedup_key in seen_targets:
                 continue
             seen_targets.add(dedup_key)
-            snippet = target.text.replace("\n", " ")[:180]
+            snippet = target.text.replace("\n", " ")
             prov_lines.append(f"  - {key} ({target.kind}): {snippet}")
     prov_section = (
-        "Valid provenance references for computations:\n" + "\n".join(prov_lines[:25]) + "\n\n"
+        "Valid provenance references and source passages:\n" + "\n".join(prov_lines) + "\n\n"
         if prov_lines
         else ""
     )
@@ -94,8 +125,11 @@ def _build_revision_prompt(
         "You must address the following blocking reviewer objections. Return one "
         "`TargetedClaimRevision` inside `revisions` for EACH target claim below (do not return "
         "an empty `revisions` list), specifying its exact `target_claim_id` and "
-        "`expected_version`. For numeric claims, supply a valid `computation` "
-        "(`ArithmeticRequest`) using plain numeric strings without currency symbols.\n\n"
+        "`expected_version`. If a claim already has a valid, grounded ToolExecution and the "
+        "objection only concerns citations or wording, set `computation` to null to preserve the "
+        "existing verified calculation unless recalculation is necessary. When supplying a new\n"
+        "`computation` (`ArithmeticRequest`), use plain numeric strings without currency "
+        "symbols.\n\n"
         + "\n\n".join(blocks)
     )
 
@@ -150,18 +184,39 @@ class TargetedRepairEngine:
             verdicts_by_key.setdefault((v.claim_id, v.claim_version), []).append(v)
 
         # Prioritize claims tied to user requirements first.
-        prioritized = sorted(
+        pending_blocking: list[Claim] = sorted(
             blocking_claims,
             key=lambda c: (0 if c.requirement_refs else 1, c.created_at),
         )
+        repair_attempts: dict[str, int] = {}
+        max_waves = max(
+            self._settings.max_revision_rounds * 2,
+            self._settings.max_revision_rounds + 2,
+        )
 
-        # Group by originating specialist so unaffected specialists are never rerun.
-        by_author: dict[str, list[Claim]] = {}
-        for claim in prioritized:
-            if claim.author_agent_id in agents_by_id:
-                by_author.setdefault(claim.author_agent_id, []).append(claim)
+        for _wave in range(max_waves):
+            if not pending_blocking:
+                break
 
-        for _round in range(self._settings.max_revision_rounds):
+            # Dependency-aware ordering: repair upstream claims before claims that depend on them.
+            pending_ids = {c.claim_id for c in pending_blocking}
+            ready_claims: list[Claim] = []
+            deferred_claims: list[Claim] = []
+            for claim in pending_blocking:
+                dep_ids = {p.claim_id for p in claim.premise_refs} | set(claim.depends_on_claim_ids)
+                if dep_ids & (pending_ids - {claim.claim_id}):
+                    deferred_claims.append(claim)
+                else:
+                    ready_claims.append(claim)
+            if not ready_claims:
+                ready_claims = pending_blocking
+                deferred_claims = []
+
+            # Group by originating specialist so unaffected specialists are never rerun.
+            by_author: dict[str, list[Claim]] = {}
+            for claim in ready_claims:
+                if claim.author_agent_id in agents_by_id:
+                    by_author.setdefault(claim.author_agent_id, []).append(claim)
             if not by_author:
                 break
 
@@ -200,6 +255,24 @@ class TargetedRepairEngine:
                         )
                     )
                     return result
+
+                # Refresh ledger and provenance catalog before each repair batch.
+                fresh_trace = await self._db.get_run_trace(run_id)
+                if fresh_trace is None:
+                    continue
+                evidence_by_id = {e.evidence_id: e for e in fresh_trace.evidence}
+                tasks_by_id = {t.task_id: t for t in fresh_trace.tasks}
+                tool_by_id = {t.tool_execution_id: t for t in fresh_trace.tool_executions}
+                fresh_latest: dict[str, Claim] = {}
+                for fc in fresh_trace.claims:
+                    prev = fresh_latest.get(fc.claim_id)
+                    if prev is None or fc.version > prev.version:
+                        fresh_latest[fc.claim_id] = fc
+                claims_for_author = [
+                    fresh_latest.get(c.claim_id, c) for c in claims_for_author
+                ]
+                for c in claims_for_author:
+                    repair_attempts[c.claim_id] = repair_attempts.get(c.claim_id, 0) + 1
 
                 agent = agents_by_id[author_id]
                 # Send structured review messages from objecting reviewers via MessageBus.
@@ -247,9 +320,9 @@ class TargetedRepairEngine:
 
                 repair_catalog = build_provenance_catalog(
                     original_prompt=original_prompt,
-                    verified_evidence=[e for e in trace.evidence if e.verified_in_input],
-                    all_claims=trace.claims,
-                    tool_records=trace.tool_executions,
+                    verified_evidence=[e for e in fresh_trace.evidence if e.verified_in_input],
+                    all_claims=fresh_trace.claims,
+                    tool_records=fresh_trace.tool_executions,
                     run_id=run_id,
                 )
                 revision_prompt = _build_revision_prompt(
@@ -259,6 +332,8 @@ class TargetedRepairEngine:
                     evidence_by_id=evidence_by_id,
                     dependency_findings_text=dep_blob,
                     provenance_catalog=repair_catalog,
+                    tool_by_id=tool_by_id,
+                    claims_by_id=fresh_latest,
                 )
                 try:
                     res = await self._executor.execute_structured(
@@ -386,11 +461,21 @@ class TargetedRepairEngine:
             )
             result.re_review_calls += dep_calls
 
-            # Prepare any remaining blocking claims for potential next round.
-            by_author = {}
-            for claim in [*review_outcome.blocking_claims, *blocking_from_deps]:
-                if claim.author_agent_id in agents_by_id:
-                    by_author.setdefault(claim.author_agent_id, []).append(claim)
+            # Prepare any remaining blocking or deferred claims for potential next wave.
+            next_pending_map: dict[str, Claim] = {}
+            latest_after_wave = {
+                c.claim_id: c
+                for c in await self._db.get_claims_for_run(run_id, latest_only=True)
+            }
+            for claim in [*review_outcome.blocking_claims, *blocking_from_deps, *deferred_claims]:
+                latest_c = latest_after_wave.get(claim.claim_id, claim)
+                if (
+                    latest_c.status in {ClaimStatus.REJECTED, ClaimStatus.ASSERTED}
+                    and repair_attempts.get(latest_c.claim_id, 0)
+                    < self._settings.max_revision_rounds
+                ):
+                    next_pending_map[latest_c.claim_id] = latest_c
+            pending_blocking = list(next_pending_map.values())
 
         # Ensure any unrevised rejected claims or un-rereviewed stale claims stay non-approved.
         latest_all = await self._db.get_claims_for_run(run_id, latest_only=True)

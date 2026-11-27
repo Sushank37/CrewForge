@@ -144,8 +144,10 @@ class SpecialistWorker:
             user_prompt += (
                 "\n\nTRUNCATION RECOVERY: Your previous structured response hit "
                 "max_output_tokens. Return a much shorter, strictly valid JSON response: "
-                "concise findings (<= 80 words), 1 to 2 atomic claims, short verbatim "
-                "evidence excerpts (<= 200 chars), and no repetition."
+                "concise findings (<= 80 words), short verbatim evidence excerpts (<= 200 chars), "
+                "and no repetition, while preserving all required atomic claims and calculations. "
+                "If any requirement cannot fit, record it in `missing_information` or as an "
+                "`is_unresolved=true` claim."
             )
 
         response = await self._executor.execute_structured(

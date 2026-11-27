@@ -84,3 +84,24 @@ New test file: `tests/test_reasoning_scalability.py` (4 tests):
 3. **`src/crewforge/core/evidence_verifier.py` & `src/crewforge/core/ledger.py`:**
    - Verified `external_retrieved` excerpts strictly against their actual referenced document (`retrieved_sources_by_ref`) rather than concatenated unrelated documents, blocking cross-document misattribution.
    - Restricted the negation-prefix check in `_preserves_numbers_and_negation()` to the same sentence/clause so unrelated prior sentences or documents do not cause false negation rejections, while still rejecting omitted same-sentence negation, altered numbers, and noncontiguous/fabricated quotations.
+
+## V2.3 Claim Persistence, Numeric Provenance Context, Dependency-Aware Repair & Evidence Continuity (Post-53bf298)
+
+Targeted domain-independent reliability fixes addressing production task `tsk_pub_ea8ae13f0e1904cc760d6147f295a2fc`:
+
+1. **Eliminated Silent Claim Truncation** (`src/crewforge/core/ledger.py`, `src/crewforge/core/baseline.py`, `src/crewforge/core/worker.py`, `src/crewforge/core/honesty_gate.py`)
+   - Removed `claim_proposals[:4]` in `ClaimLedger.record_specialist_outputs()` and `parsed.computations[:4]` in `baseline.py` so all proposed claims and computations within run/call budgets are persisted and reviewed.
+   - Removed the fixed `"1 to 2 atomic claims"` instruction in `SpecialistWorker.execute_task()` truncation recovery (`compact_recovery=True`) so required claims and calculations are preserved or explicitly flagged as `is_unresolved` / `missing_information`.
+   - Updated `HonestyGate.evaluate()` to explicitly surface omitted requirements in `missing_information` and `Unresolved / Withheld Items` when partial execution or incomplete tasks occur due to resource limits.
+
+2. **Numeric Provenance Context Extraction** (`src/crewforge/tools/arithmetic.py`)
+   - Replaced the narrow 45/20-character window and naive `.` / `\n` / `,` splitting in `_extract_numeric_occurrences()` with span-bounded 65-character windows that split only on sentence/paragraph boundaries (`(?<!\d)\.(?!\d)`, `;`, `\n\s*\n`) and inter-number commas, preserving line-break key-value labels, thousands separators, and decimal punctuation while still rejecting swapped quantities, wrong values, fabricated refs, unit conflicts, and stale claim versions.
+
+3. **Dependency-Aware Repair & Fresh Ledger Context** (`src/crewforge/core/repair.py`, `src/crewforge/core/ledger.py`)
+   - Refreshed the run trace (`claims`, `evidence`, `tool_executions`) and `ProvenanceCatalog` before each specialist repair batch in `TargetedRepairEngine.resolve_disputes()`.
+   - Ordered repair waves topologically so upstream blocking claims are repaired and independently re-reviewed before dependent claims are repaired or revalidated against current supported premise versions.
+   - Updated `ClaimLedger.apply_targeted_revision()` to refresh `premise_refs` to latest claim versions rather than preserving superseded premise versions.
+
+4. **Evidence Continuity for Reviewers & Repair Agents** (`src/crewforge/core/reviewer.py`, `src/crewforge/core/repair.py`)
+   - Exposed resolved arithmetic input bindings (`variables`, `input_provenance_refs`, and resolved source excerpts) in both `_build_review_user_prompt()` and `_build_revision_prompt()`.
+   - Removed the 180-character excerpt truncation and 25-line cap in `_build_revision_prompt()` so repair agents can access full verified source passages without fabricating quotations, and instructed repair agents to preserve existing valid `ToolExecution` records (`computation: null`) during citation-only repairs.
