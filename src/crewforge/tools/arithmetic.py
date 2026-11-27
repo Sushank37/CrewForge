@@ -316,7 +316,7 @@ def build_provenance_catalog(
         if is_latest:
             catalog.targets_by_key[claim.claim_id] = t_ver
 
-    for rec in tool_records or []:
+    for rec in scoped_tools:
         if rec.success and rec.inputs_grounded and rec.computed_result is not None:
             t_tool = ProvenanceTarget(
                 alias=rec.tool_execution_id,

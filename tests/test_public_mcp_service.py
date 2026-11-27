@@ -839,6 +839,7 @@ async def test_public_mcp_budget_calculation_multidoc_provenance_trace_and_basel
         ClaimStatus,
         Evidence,
         RunConfig,
+        ToolExecutionRecord,
     )
     from crewforge.storage.database import Database
     from crewforge.tools.arithmetic import (
@@ -910,12 +911,24 @@ async def test_public_mcp_budget_calculation_multidoc_provenance_trace_and_basel
         status=ClaimStatus.SUPPORTED,
         author_agent_id="agt_1",
     )
+    cross_run_tool = ToolExecutionRecord(
+        tool_execution_id="tlx_cross_run",
+        run_id="run_other",
+        actor="agt_1",
+        expression="888",
+        computed_result="888",
+        units="USD",
+        inputs_grounded=True,
+        success=True,
+    )
     cat = build_provenance_catalog(
         original_prompt="Check budget",
         verified_evidence=[ev_doc1, ev_doc2, ev_specialist_collision, ev_unverified],
         all_claims=[stale_v1, fresh_v2, cross_run],
+        tool_records=[cross_run_tool],
         run_id="run_a",
     )
+    assert "tlx_cross_run" not in cat.targets_by_key
     assert "doc_1" in cat.targets_by_key
     assert "doc_2" in cat.targets_by_key
     assert "12000" in cat.targets_by_key["doc_1"].text
@@ -946,6 +959,7 @@ async def test_public_mcp_budget_calculation_multidoc_provenance_trace_and_basel
         ("clm_fabricated", "100"),
         ("clm_other_run", "888"),
         ("clm_stale1@v1", "500"),
+        ("tlx_cross_run", "888"),
     ):
         rec = await arith_tool.execute(
             run_id="run_a",
