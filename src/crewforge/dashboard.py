@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import secrets
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,11 +29,12 @@ from crewforge.dashboard_api import (
 )
 from crewforge.mcp_server import create_mcp_server
 from crewforge.providers.base import ModelProvider
-from crewforge.storage.database import Database
 from crewforge.web_api import (
     ChatMessageRequest,
-    JudgeSessionManager,
+    JudgeSessionRegistry,
     JudgeSettingsUpdate,
+    current_session_id_var,
+    validate_session_id,
 )
 
 _ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -51,20 +53,49 @@ _FAVICON_SVG = (
 )
 
 
-class _LocalSecurityMiddleware(BaseHTTPMiddleware):
-    """Enforce localhost Origin validation, request size limits, and session token auth."""
+def _parse_allowed_hosts(allowed_hosts: Iterable[str] | None) -> tuple[str, ...]:
+    raw_items: list[str] = []
+    if allowed_hosts is not None:
+        raw_items.extend(str(item) for item in allowed_hosts)
+    env_hosts = os.environ.get("CREWFORGE_ALLOWED_HOSTS", "")
+    if env_hosts:
+        raw_items.extend(env_hosts.split(","))
+    cleaned: list[str] = []
+    for item in raw_items:
+        host = item.strip().lower()
+        if not host:
+            continue
+        parsed = urlparse(host if "://" in host else f"https://{host}").hostname
+        if parsed and parsed not in cleaned:
+            cleaned.append(parsed)
+    return tuple(cleaned)
 
-    def __init__(self, app: Starlette, *, auth_token: str, require_auth: bool = True) -> None:
+
+class _LocalSecurityMiddleware(BaseHTTPMiddleware):
+    """Enforce Host/Origin validation, request size limits, session isolation, and token auth."""
+
+    def __init__(
+        self,
+        app: Starlette,
+        *,
+        auth_token: str,
+        require_auth: bool = True,
+        allowed_hosts: Iterable[str] | None = None,
+    ) -> None:
         super().__init__(app)
         self._auth_token = auth_token
         self._require_auth = require_auth
+        extra = set(_parse_allowed_hosts(allowed_hosts))
+        self._allowed_host_headers = _ALLOWED_HOST_HEADERS | extra
+        self._allowed_origin_hosts = _LOCAL_HOSTS | extra
+        self._remote_hosts = extra - _LOCAL_HOSTS
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         # 0. Host header validation (DNS rebinding protection)
         raw_host = request.headers.get("host", "")
         if raw_host:
             parsed_host = urlparse(f"http://{raw_host}").hostname
-            if parsed_host not in _ALLOWED_HOST_HEADERS:
+            if parsed_host not in self._allowed_host_headers:
                 return JSONResponse({"error": "Invalid Host header."}, status_code=403)
 
         # 1. Request size limit
@@ -85,16 +116,21 @@ class _LocalSecurityMiddleware(BaseHTTPMiddleware):
                     {"error": "Request body exceeds 512 KB limit."}, status_code=413
                 )
 
-            # 2. Localhost Origin / Referer validation (CSRF protection)
+            # 2. Origin / Referer validation (CSRF protection)
             origin = request.headers.get("origin") or request.headers.get("referer")
             if origin:
                 parsed = urlparse(origin)
-                if parsed.hostname not in _LOCAL_HOSTS:
+                hostname = (parsed.hostname or "").lower()
+                if hostname not in self._allowed_origin_hosts:
                     return JSONResponse(
                         {"error": "Cross-origin request rejected."}, status_code=403
                     )
+                if hostname in self._remote_hosts and parsed.scheme != "https":
+                    return JSONResponse(
+                        {"error": "Remote origins must use HTTPS."}, status_code=403
+                    )
 
-        # 3. Local endpoint authorization on /api/* (except /api/health) and /mcp
+        # 3. Endpoint authorization on /api/* (except /api/health) and /mcp
         path = request.url.path
         if self._require_auth and (
             (path.startswith("/api/") and path != "/api/health") or path.startswith("/mcp")
@@ -108,7 +144,17 @@ class _LocalSecurityMiddleware(BaseHTTPMiddleware):
                     {"error": "Unauthorized local endpoint access."}, status_code=401
                 )
 
-        return await call_next(request)
+        # 4. Per-judge session isolation
+        try:
+            session_id = validate_session_id(request.headers.get("x-crewforge-session"))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        token = current_session_id_var.set(session_id)
+        try:
+            return await call_next(request)
+        finally:
+            current_session_id_var.reset(token)
 
 
 def create_dashboard_app(
@@ -122,6 +168,7 @@ def create_dashboard_app(
     auth_token: str | None = None,
     require_auth: bool = False,
     require_react: bool = False,
+    allowed_hosts: Iterable[str] | None = None,
 ) -> Starlette:
     """Create the Starlette app for CrewForge Chat, Gamified Office, MCP, and Mission Control."""
     react_index = _FRONTEND_DIST_DIR / "index.html"
@@ -133,71 +180,85 @@ def create_dashboard_app(
         )
     ui_dir = _FRONTEND_DIST_DIR if use_react else _LEGACY_UI_DIR
 
-    resolved_token = auth_token or secrets.token_urlsafe(24)
-    trace_store = ReadOnlyTraceStore(db_path=db_path)
+    resolved_token = (
+        auth_token
+        or os.environ.get("CREWFORGE_MCP_AUTH_TOKEN", "").strip()
+        or secrets.token_urlsafe(24)
+    )
+    extra_hosts = _parse_allowed_hosts(allowed_hosts)
     replay_store = ReplayStore(replay_dir=replay_dir)
     benchmark_store = BenchmarkStore(benchmark_path=benchmark_path, dvg_path=dvg_path)
-    session_mgr = JudgeSessionManager(
-        db_path=db_path,
-        budget_db_path=budget_db_path,
+    registry = JudgeSessionRegistry(
+        base_db_path=db_path,
+        base_budget_db_path=budget_db_path,
         provider_factory=provider_factory,
     )
 
-    # Shared MCP server using the exact same isolated JudgeSessionManager settings & DBs
-    mcp_db = Database(db_path)
+    # Shared MCP server routing each request to its isolated judge session DB & settings
     mcp_server = create_mcp_server(
-        database=mcp_db,
-        settings_factory=session_mgr.build_runtime_settings,
+        database_factory=registry.get_mcp_database,
+        settings_factory=lambda: registry.get_current_session().build_runtime_settings(),
         provider_factory=provider_factory,
         host="127.0.0.1",
         port=8765,
+        allowed_hosts=extra_hosts,
     )
     mcp_http_app = mcp_server.streamable_http_app()
 
     @asynccontextmanager
     async def _lifespan(_app: Starlette) -> AsyncIterator[None]:
-        await mcp_db.initialize()
+        await registry.get_mcp_database("default")
         async with mcp_server.session_manager.run():
             try:
                 yield
             finally:
-                await mcp_db.close()
+                await registry.close_all()
 
-    async def index(_request: Request) -> Response:
+    async def index(request: Request) -> Response:
         html_path = ui_dir / "index.html"
         if use_react:
             raw = html_path.read_text(encoding="utf-8")
-            meta_tag = f'<meta name="crewforge-token" content="{resolved_token}" />'
-            injected = raw.replace("</head>", f"  {meta_tag}\n  </head>", 1)
-            return HTMLResponse(injected)
+            raw_host = request.headers.get("host", "")
+            req_host = (urlparse(f"http://{raw_host}").hostname or "").lower()
+            is_local = not req_host or req_host in _ALLOWED_HOST_HEADERS
+            if is_local:
+                meta_tag = f'<meta name="crewforge-token" content="{resolved_token}" />'
+                raw = raw.replace("</head>", f"  {meta_tag}\n  </head>", 1)
+            return HTMLResponse(raw)
         return FileResponse(html_path)
 
     async def favicon(_request: Request) -> Response:
         return Response(_FAVICON_SVG, media_type="image/svg+xml")
 
     async def health(_request: Request) -> JSONResponse:
+        default_mgr = registry.get_session("default")
         return JSONResponse(
             {
                 "status": "ok",
                 "service": "crewforge-mission-control",
                 "mode": "read_only_observability",
                 "ui": "react" if use_react else "legacy",
-                "db_path": str(trace_store.db_path),
-                "db_exists": trace_store.db_path.is_file(),
+                "db_path": str(default_mgr.db_path),
+                "db_exists": default_mgr.db_path.is_file(),
                 "replay_dir": str(replay_store.replay_dir),
+                "remote_mcp_enabled": bool(extra_hosts),
             }
         )
 
     # ---------------- Read-Only Mission Control Endpoints ----------------
     async def live_runs(_request: Request) -> JSONResponse:
+        mgr = registry.get_current_session()
+        trace_store = ReadOnlyTraceStore(db_path=mgr.db_path)
         return JSONResponse({"runs": trace_store.list_runs()})
 
     async def live_run_detail(request: Request) -> JSONResponse:
         run_id = request.path_params["run_id"]
+        mgr = registry.get_current_session()
+        trace_store = ReadOnlyTraceStore(db_path=mgr.db_path)
         try:
             payload = await trace_store.get_run_payload(run_id)
             if payload.get("status") == "running":
-                wait_state = session_mgr.get_provider_wait_state(run_id)
+                wait_state = mgr.get_provider_wait_state(run_id)
                 if wait_state:
                     payload["waiting_for_provider"] = True
                     payload["waiting_reason"] = wait_state["waiting_reason"]
@@ -231,18 +292,18 @@ def create_dashboard_app(
 
     # ---------------- Conversational & Judge Settings Endpoints ----------------
     async def get_settings(_request: Request) -> JSONResponse:
-        return JSONResponse(session_mgr.get_public_settings())
+        return JSONResponse(registry.get_current_session().get_public_settings())
 
     async def post_settings(request: Request) -> JSONResponse:
         try:
             body = await request.json()
             patch = JudgeSettingsUpdate.model_validate(body)
-            return JSONResponse(session_mgr.update_settings(patch))
+            return JSONResponse(registry.get_current_session().update_settings(patch))
         except Exception as exc:
             return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
 
     async def list_chats(_request: Request) -> JSONResponse:
-        return JSONResponse({"chats": session_mgr.list_chats()})
+        return JSONResponse({"chats": registry.get_current_session().list_chats()})
 
     async def create_chat(request: Request) -> JSONResponse:
         title = "New Chat"
@@ -252,16 +313,17 @@ def create_dashboard_app(
                 title = body["title"]
         except Exception:
             pass
-        return JSONResponse(session_mgr.create_chat(title=title), status_code=201)
+        chat = registry.get_current_session().create_chat(title=title)
+        return JSONResponse(chat, status_code=201)
 
     async def get_chat(request: Request) -> JSONResponse:
-        chat = session_mgr.get_chat(request.path_params["chat_id"])
+        chat = registry.get_current_session().get_chat(request.path_params["chat_id"])
         if chat is None:
             return JSONResponse({"error": "Chat not found."}, status_code=404)
         return JSONResponse(chat)
 
     async def delete_chat(request: Request) -> JSONResponse:
-        ok = session_mgr.delete_chat(request.path_params["chat_id"])
+        ok = registry.get_current_session().delete_chat(request.path_params["chat_id"])
         if not ok:
             return JSONResponse({"error": "Chat not found."}, status_code=404)
         return JSONResponse({"deleted": True})
@@ -271,7 +333,7 @@ def create_dashboard_app(
         try:
             body = await request.json()
             req = ChatMessageRequest.model_validate(body)
-            res = await session_mgr.submit_message(chat_id, req)
+            res = await registry.get_current_session().submit_message(chat_id, req)
             return JSONResponse(res, status_code=202)
         except KeyError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
@@ -280,15 +342,31 @@ def create_dashboard_app(
 
     async def cancel_run(request: Request) -> JSONResponse:
         run_id = request.path_params["run_id"]
-        cancelled = session_mgr.cancel_run(run_id)
+        cancelled = registry.get_current_session().cancel_run(run_id)
         return JSONResponse({"run_id": run_id, "cancelled": cancelled})
 
     async def mcp_status(request: Request) -> JSONResponse:
-        base = str(request.base_url).rstrip("/")
-        mcp_url = f"{base}/mcp"
-        data = await session_mgr.get_mcp_status(
-            mcp_url=mcp_url,
+        mgr = registry.get_current_session()
+        session_id = current_session_id_var.get()
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        req_host = request.headers.get("host", "").strip()
+        scheme = "https" if forwarded_proto == "https" else request.url.scheme
+        if req_host:
+            public_url = f"{scheme}://{req_host}/mcp"
+        else:
+            public_url = f"{str(request.base_url).rstrip('/')}/mcp"
+        internal_port = request.url.port or (8765 if scheme == "https" else 8765)
+        internal_url = (
+            f"http://127.0.0.1:{internal_port}/mcp"
+            if scheme == "https" or (urlparse(public_url).hostname or "") not in _LOCAL_HOSTS
+            else public_url
+        )
+        data = await mgr.get_mcp_status(
+            mcp_url=public_url,
             auth_token=resolved_token if require_auth else None,
+            session_id=session_id,
+            public_url=public_url,
+            internal_url=internal_url,
         )
         return JSONResponse(data)
 
@@ -325,7 +403,10 @@ def create_dashboard_app(
 
     app = Starlette(routes=routes, lifespan=_lifespan)
     app.add_middleware(
-        _LocalSecurityMiddleware, auth_token=resolved_token, require_auth=require_auth
+        _LocalSecurityMiddleware,
+        auth_token=resolved_token,
+        require_auth=require_auth,
+        allowed_hosts=extra_hosts,
     )
     return app
 
@@ -339,8 +420,10 @@ def run_dashboard(
     benchmark_path: str | Path = "demo/v2_reconciled_scores.json",
     dvg_path: str | Path | None = None,
     require_react: bool = True,
+    allowed_hosts: Iterable[str] | None = None,
+    auth_token: str | None = None,
 ) -> None:
-    """Start the CrewForge web server on localhost."""
+    """Start the CrewForge web server on localhost (optionally fronted by an HTTPS tunnel)."""
     if host not in _LOCAL_HOSTS:
         raise ValueError("CrewForge web server is restricted to localhost bindings.")
     app = create_dashboard_app(
@@ -348,8 +431,10 @@ def run_dashboard(
         replay_dir=replay_dir,
         benchmark_path=benchmark_path,
         dvg_path=dvg_path,
+        auth_token=auth_token,
         require_auth=True,
         require_react=require_react,
+        allowed_hosts=allowed_hosts,
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
 
@@ -387,6 +472,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Allow falling back to legacy dashboard_ui if frontend/dist is not built.",
     )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        help="Optional public hostname allowed behind an HTTPS reverse proxy / tunnel.",
+    )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
     run_dashboard(
         host=args.host,
@@ -396,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
         benchmark_path=args.benchmark_file,
         dvg_path=args.dvg_file,
         require_react=not args.allow_legacy_fallback,
+        allowed_hosts=args.allowed_host,
     )
     return 0
 

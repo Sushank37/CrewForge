@@ -63,6 +63,8 @@ export const McpView: React.FC = () => {
             </span>
           </div>
           <div className="muted" style={{ fontSize: 12 }}>
+            Session ID: <code>{status.session_id || "default"}</code>
+            <br />
             Shared session DB: <code>{status.session_db_path}</code>
             <br />
             Discovered tools: {(status.discovered_tools?.length ? status.discovered_tools : status.tools).map((t) => <code key={t} style={{ marginRight: 6 }}>{t}</code>)}
@@ -74,7 +76,9 @@ export const McpView: React.FC = () => {
             )}
           </div>
           <div className="alert-info">
-            Authenticated localhost-only endpoint. Do not expose an unauthenticated MCP server on a public tunnel.
+            {status.remote_https
+              ? "Authenticated Remote HTTPS MCP active. MCP Bearer auth is separate from provider API keys; use X-CrewForge-Session to isolate each judge's credentials and trace DB."
+              : "Authenticated localhost endpoint (supports HTTPS reverse proxy / Cloudflare Tunnel via --allowed-host or CREWFORGE_ALLOWED_HOSTS). MCP Bearer auth is separate from provider API keys."}
           </div>
         </section>
 

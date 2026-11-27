@@ -62,6 +62,8 @@ export interface McpStatus {
   http_endpoint: string;
   http_reachable: boolean;
   handshake_error?: string | null;
+  session_id?: string;
+  remote_https?: boolean;
   session_db_path: string;
   session_budget_db_path?: string;
   shared_http_config?: Record<string, unknown>;

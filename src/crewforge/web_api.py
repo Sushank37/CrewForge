@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -39,6 +41,24 @@ from crewforge.storage.database import Database
 _ENV_ISOLATION_LOCK = threading.Lock()
 GROQ_FREE_ENDPOINT = "https://api.groq.com/openai/v1"
 GROQ_FREE_MODELS = ("openai/gpt-oss-120b", "openai/gpt-oss-20b")
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
+current_session_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "crewforge_session_id", default="default"
+)
+
+
+def validate_session_id(raw: str | None) -> str:
+    """Validate an explicit judge session identifier, defaulting to 'default'."""
+    if raw is None or not raw.strip():
+        return "default"
+    cleaned = raw.strip()
+    if cleaned == "default":
+        return "default"
+    if not _SESSION_ID_RE.match(cleaned):
+        raise ValueError(
+            "Invalid judge session ID. Use 4-64 alphanumeric, '-' or '_' characters."
+        )
+    return cleaned
 
 
 def _utc_iso() -> str:
@@ -590,18 +610,28 @@ class JudgeSessionManager:
         *,
         mcp_url: str = "http://127.0.0.1:8765/mcp",
         auth_token: str | None = None,
+        session_id: str = "default",
+        public_url: str | None = None,
+        internal_url: str | None = None,
     ) -> dict[str, Any]:
         """Perform an actual MCP Streamable HTTP handshake and tool discovery."""
         http_reachable = False
         discovered_tools: list[str] = []
         handshake_error: str | None = None
 
-        headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+        probe_url = internal_url or mcp_url
+        exposed_url = public_url or mcp_url
+        headers: dict[str, str] = {}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        if session_id and session_id != "default":
+            headers["X-CrewForge-Session"] = session_id
+
         try:
             async with (
                 asyncio.timeout(2.0),
                 httpx.AsyncClient(headers=headers) as http_client,
-                streamable_http_client(mcp_url, http_client=http_client) as (
+                streamable_http_client(probe_url, http_client=http_client) as (
                     read_stream,
                     write_stream,
                     _,
@@ -615,21 +645,27 @@ class JudgeSessionManager:
         except Exception as exc:
             handshake_error = sanitize_error_message(str(exc), max_length=240)
 
+        shared_headers: dict[str, str] = {
+            "Authorization": f"Bearer {auth_token or '<SESSION_TOKEN>'}",
+        }
+        if session_id and session_id != "default":
+            shared_headers["X-CrewForge-Session"] = session_id
+
         return {
             "tools": discovered_tools or ["solve", "baseline", "trace"],
             "discovered_tools": discovered_tools,
-            "http_endpoint": mcp_url,
+            "http_endpoint": exposed_url,
             "http_reachable": http_reachable,
             "handshake_error": handshake_error,
+            "session_id": session_id or "default",
+            "remote_https": exposed_url.startswith("https://"),
             "session_db_path": str(self.db_path),
             "session_budget_db_path": str(self.budget_db_path),
             "shared_http_config": {
                 "mcpServers": {
                     "crewforge-shared": {
-                        "url": mcp_url,
-                        "headers": {
-                            "Authorization": f"Bearer {auth_token or '<SESSION_TOKEN>'}",
-                        },
+                        "url": exposed_url,
+                        "headers": shared_headers,
                     }
                 }
             },
@@ -651,3 +687,77 @@ class JudgeSessionManager:
                 "uv run crewforge-mcp --transport streamable-http --host 127.0.0.1 --port 8000"
             ),
         }
+
+
+class JudgeSessionRegistry:
+    """Isolate judge sessions, credentials, chats, and SQLite trace/budget DBs per session ID."""
+
+    def __init__(
+        self,
+        *,
+        base_db_path: str | Path = ".crewforge/judge_session.db",
+        base_budget_db_path: str | Path | None = None,
+        provider_factory: Callable[[CrewForgeSettings], ModelProvider] | None = None,
+    ) -> None:
+        self.base_db_path = Path(base_db_path)
+        self.base_budget_db_path = (
+            Path(base_budget_db_path)
+            if base_budget_db_path is not None
+            else self.base_db_path.parent / "judge_budget.db"
+        )
+        self.provider_factory = provider_factory
+        self._lock = threading.Lock()
+        self._sessions: dict[str, JudgeSessionManager] = {}
+        self._mcp_dbs: dict[str, Database] = {}
+        self._initialized_mcp_dbs: set[str] = set()
+
+    def _paths_for(self, session_id: str) -> tuple[Path, Path]:
+        if session_id == "default":
+            return self.base_db_path, self.base_budget_db_path
+        session_dir = self.base_db_path.parent / "sessions" / session_id
+        return session_dir / "session.db", session_dir / "budget.db"
+
+    def get_session(self, session_id: str | None = None) -> JudgeSessionManager:
+        """Return the isolated JudgeSessionManager for the validated session ID."""
+        sid = validate_session_id(session_id)
+        with self._lock:
+            mgr = self._sessions.get(sid)
+            if mgr is None:
+                db_path, budget_db_path = self._paths_for(sid)
+                mgr = JudgeSessionManager(
+                    db_path=db_path,
+                    budget_db_path=budget_db_path,
+                    provider_factory=self.provider_factory,
+                )
+                self._sessions[sid] = mgr
+            return mgr
+
+    def get_current_session(self) -> JudgeSessionManager:
+        """Return the JudgeSessionManager bound to the active request/MCP context."""
+        return self.get_session(current_session_id_var.get())
+
+    async def get_mcp_database(self, session_id: str | None = None) -> Database:
+        """Return an initialized isolated Database for MCP calls in this session."""
+        sid = validate_session_id(session_id or current_session_id_var.get())
+        with self._lock:
+            db = self._mcp_dbs.get(sid)
+            if db is None:
+                db_path, _ = self._paths_for(sid)
+                db = Database(db_path)
+                self._mcp_dbs[sid] = db
+            needs_init = sid not in self._initialized_mcp_dbs
+        if needs_init:
+            await db.initialize()
+            with self._lock:
+                self._initialized_mcp_dbs.add(sid)
+        return db
+
+    async def close_all(self) -> None:
+        """Close all cached MCP Database connections cleanly."""
+        with self._lock:
+            dbs = list(self._mcp_dbs.values())
+            self._mcp_dbs.clear()
+            self._initialized_mcp_dbs.clear()
+        for db in dbs:
+            with contextlib.suppress(Exception):
+                await db.close()

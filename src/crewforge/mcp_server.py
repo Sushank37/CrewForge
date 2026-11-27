@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import logging
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from crewforge.config import CrewForgeSettings, configure_logging
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
@@ -22,15 +24,51 @@ from crewforge.storage.database import Database
 logger = logging.getLogger("crewforge.mcp")
 
 
+def _build_transport_security(
+    allowed_hosts: Iterable[str] | None,
+) -> TransportSecuritySettings | None:
+    """Configure FastMCP DNS rebinding protection for localhost plus explicit remote HTTPS hosts."""
+    hosts = [h.strip().lower() for h in (allowed_hosts or ()) if h and h.strip()]
+    if not hosts:
+        return None
+    base_hosts = ["127.0.0.1", "localhost", "[::1]", "testserver", *hosts]
+    allowed_host_patterns: list[str] = []
+    allowed_origin_patterns: list[str] = [
+        "http://127.0.0.1",
+        "http://127.0.0.1:*",
+        "http://localhost",
+        "http://localhost:*",
+        "http://[::1]",
+        "http://[::1]:*",
+    ]
+    for h in base_hosts:
+        if h not in allowed_host_patterns:
+            allowed_host_patterns.append(h)
+        wildcard = f"{h}:*"
+        if wildcard not in allowed_host_patterns:
+            allowed_host_patterns.append(wildcard)
+    for h in hosts:
+        for origin in (f"https://{h}", f"https://{h}:*"):
+            if origin not in allowed_origin_patterns:
+                allowed_origin_patterns.append(origin)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_host_patterns,
+        allowed_origins=allowed_origin_patterns,
+    )
+
+
 def create_mcp_server(
     *,
     settings: CrewForgeSettings | None = None,
     database: Database | None = None,
+    database_factory: Callable[[], Database | Awaitable[Database]] | None = None,
     provider: ModelProvider | None = None,
     settings_factory: Callable[[], CrewForgeSettings] | None = None,
     provider_factory: Callable[[CrewForgeSettings], ModelProvider] | None = None,
     host: str = "127.0.0.1",
     port: int = 8000,
+    allowed_hosts: Iterable[str] | None = None,
 ) -> FastMCP:
     """Create and configure the CrewForge FastMCP server instance.
 
@@ -54,8 +92,13 @@ def create_mcp_server(
         Database, ModelProvider, BudgetManager, ModelExecutor, CrewForgeSettings
     ]:
         nonlocal resolved_provider, shared_budget, shared_executor, initialized
-        if not initialized:
-            await resolved_db.initialize()
+        active_db = resolved_db
+        if database_factory is not None:
+            candidate_db = database_factory()
+            active_db = await candidate_db if inspect.isawaitable(candidate_db) else candidate_db
+            await active_db.initialize()
+        elif not initialized:
+            await active_db.initialize()
             initialized = True
         if settings_factory is not None:
             live_settings = settings_factory()
@@ -72,27 +115,27 @@ def create_mcp_server(
                 settings=live_settings,
                 migrate_default_dbs=False,
             )
-            live_budget = BudgetManager(resolved_db, live_settings, authority=live_authority)
+            live_budget = BudgetManager(active_db, live_settings, authority=live_authority)
             live_executor = ModelExecutor(
                 provider=live_provider,
-                database=resolved_db,
+                database=active_db,
                 budget_manager=live_budget,
                 settings=live_settings,
             )
-            return resolved_db, live_provider, live_budget, live_executor, live_settings
+            return active_db, live_provider, live_budget, live_executor, live_settings
 
         if resolved_provider is None:
             resolved_provider = build_provider_from_settings(resolved_settings)
         if shared_budget is None:
-            shared_budget = BudgetManager(resolved_db, resolved_settings)
+            shared_budget = BudgetManager(active_db, resolved_settings)
         if shared_executor is None:
             shared_executor = ModelExecutor(
                 provider=resolved_provider,
-                database=resolved_db,
+                database=active_db,
                 budget_manager=shared_budget,
                 settings=resolved_settings,
             )
-        return resolved_db, resolved_provider, shared_budget, shared_executor, resolved_settings
+        return active_db, resolved_provider, shared_budget, shared_executor, resolved_settings
 
     @asynccontextmanager
     async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
@@ -117,6 +160,7 @@ def create_mcp_server(
         host=host,
         port=port,
         lifespan=_lifespan,
+        transport_security=_build_transport_security(allowed_hosts),
     )
 
     @mcp.tool()
