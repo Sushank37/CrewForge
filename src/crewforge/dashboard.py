@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import secrets
 import sys
+import threading
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -72,31 +74,45 @@ def _parse_allowed_hosts(allowed_hosts: Iterable[str] | None) -> tuple[str, ...]
 
 
 class _LocalSecurityMiddleware(BaseHTTPMiddleware):
-    """Enforce Host/Origin validation, request size limits, session isolation, and token auth."""
+    """Enforce Host/Origin validation, admin/judge separation, MCP ownership, and token auth."""
 
     def __init__(
         self,
         app: Starlette,
         *,
-        auth_token: str,
+        admin_token: str,
+        registry: JudgeSessionRegistry,
         require_auth: bool = True,
         allowed_hosts: Iterable[str] | None = None,
     ) -> None:
         super().__init__(app)
-        self._auth_token = auth_token
+        self._admin_token_hash = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
+        self._registry = registry
         self._require_auth = require_auth
         extra = set(_parse_allowed_hosts(allowed_hosts))
         self._allowed_host_headers = _ALLOWED_HOST_HEADERS | extra
         self._allowed_origin_hosts = _LOCAL_HOSTS | extra
         self._remote_hosts = extra - _LOCAL_HOSTS
+        self._mcp_lock = threading.Lock()
+        self._mcp_session_owners: dict[str, str] = {}
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         # 0. Host header validation (DNS rebinding protection)
         raw_host = request.headers.get("host", "")
+        parsed_host = ""
         if raw_host:
-            parsed_host = urlparse(f"http://{raw_host}").hostname
+            parsed_host = (urlparse(f"http://{raw_host}").hostname or "").lower()
             if parsed_host not in self._allowed_host_headers:
                 return JSONResponse({"error": "Invalid Host header."}, status_code=403)
+
+        is_forwarded_remote = bool(
+            request.headers.get("cf-connecting-ip")
+            or request.headers.get("x-forwarded-host")
+        )
+        is_local_request = (
+            (not parsed_host or parsed_host in _ALLOWED_HOST_HEADERS)
+            and not is_forwarded_remote
+        )
 
         # 1. Request size limit
         content_length = request.headers.get("content-length")
@@ -130,31 +146,88 @@ class _LocalSecurityMiddleware(BaseHTTPMiddleware):
                         {"error": "Remote origins must use HTTPS."}, status_code=403
                     )
 
-        # 3. Endpoint authorization on /api/* (except /api/health) and /mcp
+        # 3. Authentication & server-side session derivation on /api/* (except /api/health) and /mcp
         path = request.url.path
-        if self._require_auth and (
+        requires_endpoint_auth = (
             (path.startswith("/api/") and path != "/api/health") or path.startswith("/mcp")
-        ):
+        )
+        role = "admin"
+        session_id = "default"
+        if requires_endpoint_auth:
             header_tok = request.headers.get("x-crewforge-token")
             auth_hdr = request.headers.get("authorization", "")
             bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else None
-            provided = header_tok or bearer_tok
-            if not provided or not secrets.compare_digest(provided, self._auth_token):
+            provided = (header_tok or bearer_tok or "").strip()
+
+            if provided:
+                provided_hash = hashlib.sha256(provided.encode("utf-8")).hexdigest()
+                if secrets.compare_digest(provided_hash, self._admin_token_hash):
+                    if not is_local_request:
+                        return JSONResponse(
+                            {"error": "Local administrator access is restricted to localhost."},
+                            status_code=403,
+                        )
+                    role = "admin"
+                    session_id = "default"
+                else:
+                    judge_session = self._registry.authenticate_judge_token(provided)
+                    if judge_session is None:
+                        return JSONResponse(
+                            {"error": "Unauthorized endpoint access."}, status_code=401
+                        )
+                    role = "judge"
+                    session_id = judge_session
+            elif self._require_auth or not is_local_request:
                 return JSONResponse(
-                    {"error": "Unauthorized local endpoint access."}, status_code=401
+                    {"error": "Unauthorized endpoint access."}, status_code=401
                 )
 
-        # 4. Per-judge session isolation
-        try:
-            session_id = validate_session_id(request.headers.get("x-crewforge-session"))
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            # 4. Admin-only route guard
+            if path.startswith("/api/admin/") and role != "admin":
+                return JSONResponse(
+                    {"error": "Administrator privileges required."}, status_code=403
+                )
 
+            # 5. Prevent cross-session or default-session spoofing via X-CrewForge-Session
+            claimed_session = request.headers.get("x-crewforge-session")
+            if claimed_session is not None and claimed_session.strip():
+                try:
+                    validated_claim = validate_session_id(claimed_session)
+                except ValueError as exc:
+                    return JSONResponse({"error": str(exc)}, status_code=400)
+                if validated_claim != session_id:
+                    return JSONResponse(
+                        {"error": "Cross-session access denied."}, status_code=403
+                    )
+
+            # 6. Enforce MCP Streamable HTTP session ownership (mcp-session-id)
+            if path.startswith("/mcp"):
+                mcp_sid = request.headers.get("mcp-session-id")
+                if mcp_sid:
+                    with self._mcp_lock:
+                        owner = self._mcp_session_owners.get(mcp_sid)
+                    if owner is not None and owner != session_id:
+                        return JSONResponse(
+                            {"error": "MCP session belongs to another judge."}, status_code=403
+                        )
+
+        request.state.auth_role = role
+        request.state.session_id = session_id
         token = current_session_id_var.set(session_id)
         try:
-            return await call_next(request)
+            response = await call_next(request)
         finally:
             current_session_id_var.reset(token)
+
+        if path.startswith("/mcp") and response.status_code < 400:
+            resp_mcp_sid = response.headers.get("mcp-session-id")
+            if resp_mcp_sid:
+                with self._mcp_lock:
+                    if request.method == "DELETE":
+                        self._mcp_session_owners.pop(resp_mcp_sid, None)
+                    else:
+                        self._mcp_session_owners.setdefault(resp_mcp_sid, session_id)
+        return response
 
 
 def create_dashboard_app(
@@ -180,8 +253,9 @@ def create_dashboard_app(
         )
     ui_dir = _FRONTEND_DIST_DIR if use_react else _LEGACY_UI_DIR
 
-    resolved_token = (
+    resolved_admin_token = (
         auth_token
+        or os.environ.get("CREWFORGE_ADMIN_TOKEN", "").strip()
         or os.environ.get("CREWFORGE_MCP_AUTH_TOKEN", "").strip()
         or secrets.token_urlsafe(24)
     )
@@ -214,17 +288,10 @@ def create_dashboard_app(
             finally:
                 await registry.close_all()
 
-    async def index(request: Request) -> Response:
+    async def index(_request: Request) -> Response:
         html_path = ui_dir / "index.html"
         if use_react:
-            raw = html_path.read_text(encoding="utf-8")
-            raw_host = request.headers.get("host", "")
-            req_host = (urlparse(f"http://{raw_host}").hostname or "").lower()
-            is_local = not req_host or req_host in _ALLOWED_HOST_HEADERS
-            if is_local:
-                meta_tag = f'<meta name="crewforge-token" content="{resolved_token}" />'
-                raw = raw.replace("</head>", f"  {meta_tag}\n  </head>", 1)
-            return HTMLResponse(raw)
+            return HTMLResponse(html_path.read_text(encoding="utf-8"))
         return FileResponse(html_path)
 
     async def favicon(_request: Request) -> Response:
@@ -345,6 +412,27 @@ def create_dashboard_app(
         cancelled = registry.get_current_session().cancel_run(run_id)
         return JSONResponse({"run_id": run_id, "cancelled": cancelled})
 
+    async def admin_list_tokens(_request: Request) -> JSONResponse:
+        return JSONResponse({"tokens": registry.list_judge_tokens()})
+
+    async def admin_issue_token(request: Request) -> JSONResponse:
+        label = "Judge"
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and isinstance(body.get("label"), str):
+                label = body["label"]
+        except Exception:
+            pass
+        issued = registry.issue_judge_token(label=label)
+        return JSONResponse(issued, status_code=201)
+
+    async def admin_revoke_token(request: Request) -> JSONResponse:
+        identifier = request.path_params["identifier"]
+        revoked = registry.revoke_judge_token(identifier)
+        if not revoked:
+            return JSONResponse({"error": "Active judge token not found."}, status_code=404)
+        return JSONResponse({"revoked": True, "identifier": identifier})
+
     async def mcp_status(request: Request) -> JSONResponse:
         mgr = registry.get_current_session()
         session_id = current_session_id_var.get()
@@ -355,15 +443,19 @@ def create_dashboard_app(
             public_url = f"{scheme}://{req_host}/mcp"
         else:
             public_url = f"{str(request.base_url).rstrip('/')}/mcp"
-        internal_port = request.url.port or (8765 if scheme == "https" else 8765)
+        internal_port = request.url.port or 8765
         internal_url = (
             f"http://127.0.0.1:{internal_port}/mcp"
             if scheme == "https" or (urlparse(public_url).hostname or "") not in _LOCAL_HOSTS
             else public_url
         )
+        header_tok = request.headers.get("x-crewforge-token")
+        auth_hdr = request.headers.get("authorization", "")
+        bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else None
+        caller_tok = (header_tok or bearer_tok or "").strip() or None
         data = await mgr.get_mcp_status(
             mcp_url=public_url,
-            auth_token=resolved_token if require_auth else None,
+            auth_token=caller_tok,
             session_id=session_id,
             public_url=public_url,
             internal_url=internal_url,
@@ -374,6 +466,9 @@ def create_dashboard_app(
         Route("/", index),
         Route("/favicon.ico", favicon),
         Route("/api/health", health),
+        Route("/api/admin/tokens", admin_list_tokens, methods=["GET"]),
+        Route("/api/admin/tokens", admin_issue_token, methods=["POST"]),
+        Route("/api/admin/tokens/{identifier}", admin_revoke_token, methods=["DELETE"]),
         Route("/api/live/runs", live_runs),
         Route("/api/live/runs/{run_id}", live_run_detail),
         Route("/api/replay/files", replay_files),
@@ -402,9 +497,11 @@ def create_dashboard_app(
         routes.append(Mount("/static", StaticFiles(directory=str(_LEGACY_UI_DIR)), name="static"))
 
     app = Starlette(routes=routes, lifespan=_lifespan)
+    app.state.registry = registry
     app.add_middleware(
         _LocalSecurityMiddleware,
-        auth_token=resolved_token,
+        admin_token=resolved_admin_token,
+        registry=registry,
         require_auth=require_auth,
         allowed_hosts=extra_hosts,
     )

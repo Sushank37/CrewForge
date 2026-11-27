@@ -8,9 +8,24 @@ import type {
   TracePayload,
 } from "./types";
 
-function getSessionToken(): string | null {
-  const meta = document.querySelector('meta[name="crewforge-token"]');
-  return meta?.getAttribute("content") || null;
+export function getSessionToken(): string | null {
+  try {
+    return window.sessionStorage.getItem("crewforge_token") || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setSessionToken(token: string | null): void {
+  try {
+    if (token && token.trim()) {
+      window.sessionStorage.setItem("crewforge_token", token.trim());
+    } else {
+      window.sessionStorage.removeItem("crewforge_token");
+    }
+  } catch {
+    // Ignore storage errors in restricted contexts
+  }
 }
 
 async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
