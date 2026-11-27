@@ -22,7 +22,11 @@ from crewforge.schemas import (
     VerificationStatus,
 )
 from crewforge.storage.database import Database
-from crewforge.tools.arithmetic import arithmetic_lineage_issue, provenance_failures
+from crewforge.tools.arithmetic import (
+    arithmetic_lineage_issue,
+    extract_numbers_from_text,
+    provenance_failures,
+)
 
 REVIEWER_EVIDENCE_ID = "reviewer_evidence"
 REVIEWER_NUMBERS_ID = "reviewer_numbers"
@@ -52,7 +56,8 @@ def _build_review_system_prompt(dimension: str) -> str:
         "- Return one verdict entry in `verdicts` for EVERY claim listed below.\n"
         "- For numeric claims, verify whether expression and units match the user question "
         "(even when arithmetic succeeded).\n"
-        "- For inferences, check that premises support conclusion and assumptions are explicit.\n"
+        "- For inferences, verify the premises. Treat proposed plan or worker assumptions as "
+        "conditional and require primary evidence for empirical values.\n"
         "- Use `approve`, `reject`, `needs_revision`, or `unresolved` with `blocking_severity` "
         "set to `blocking` when the claim cannot safely be released as stated.\n"
         "- Keep each `rationale` and `required_correction` concise (under 150 characters) "
@@ -202,6 +207,7 @@ class ReviewerPool:
         tool_by_id: dict[str, ToolExecutionRecord],
         latest_by_id: dict[str, Claim],
         tool_owners: dict[str, Claim] | None = None,
+        plan_assumptions: list[str] | None = None,
     ) -> tuple[ReviewVerdict | None, ClaimStatus | None, VerificationStatus | None]:
         """Apply zero-cost deterministic checks prior to LLM review."""
         if not claim.is_material:
@@ -347,7 +353,9 @@ class ReviewerPool:
             verified_evds = [
                 evidence_by_id[eid]
                 for eid in claim.evidence_ids
-                if eid in evidence_by_id and evidence_by_id[eid].verified_in_input
+                if eid in evidence_by_id
+                and evidence_by_id[eid].verified_in_input
+                and evidence_by_id[eid].source_type == "external_retrieved"
             ]
             if not verified_evds:
                 verdict = ReviewVerdict(
@@ -374,9 +382,16 @@ class ReviewerPool:
                 if eid in evidence_by_id
                 and evidence_by_id[eid].verified_in_input
                 and evidence_by_id[eid].source_type
-                in {"user_prompt", "dependency_finding", "external_retrieved"}
+                in {"user_prompt", "external_retrieved"}
             ]
-            if not verified_evds:
+            assumed_numbers = extract_numbers_from_text(
+                "\n".join([*(plan_assumptions or []), *claim.assumptions])
+            )
+            cited_numbers = extract_numbers_from_text("\n".join(e.excerpt for e in verified_evds))
+            unsourced_assumptions = (
+                extract_numbers_from_text(claim.statement) & assumed_numbers
+            ) - cited_numbers
+            if not verified_evds or unsourced_assumptions:
                 verdict = ReviewVerdict(
                     run_id=run_id,
                     claim_id=claim.claim_id,
@@ -385,11 +400,16 @@ class ReviewerPool:
                     review_dimension="evidence",
                     decision=ReviewDecision.NEEDS_REVISION,
                     rationale=(
-                        "Given-fact claim lacks verbatim verified provenance from prompt or deps."
+                        "Given-fact claim lacks verified provenance from the prompt "
+                        "or retrieved documents."
+                        + (
+                            " The claim uses numbers from an assumption absent from the citation."
+                            if unsourced_assumptions else ""
+                        )
                     ),
                     evidence_refs=list(claim.evidence_ids),
                     required_correction=(
-                        "Attach an accurate excerpt from user_prompt or dependency_finding."
+                        "Attach an accurate excerpt from the user prompt or a retrieved document."
                     ),
                     blocking_severity="blocking",
                     blocking_issues=["Missing verified provenance"],
@@ -409,7 +429,9 @@ class ReviewerPool:
             verified_evds = [
                 evidence_by_id[eid]
                 for eid in claim.evidence_ids
-                if eid in evidence_by_id and evidence_by_id[eid].verified_in_input
+                if eid in evidence_by_id
+                and evidence_by_id[eid].verified_in_input
+                and evidence_by_id[eid].source_type == "external_retrieved"
             ]
             if not verified_evds:
                 return ClaimStatus.UNRESOLVED, VerificationStatus.UNSUPPORTED
@@ -481,6 +503,7 @@ class ReviewerPool:
                 tool_by_id=tool_by_id,
                 latest_by_id=latest_by_id,
                 tool_owners=tool_owners,
+                plan_assumptions=plan.assumptions,
             )
             if verdict is not None and next_status is not None and next_ver_status is not None:
                 await self._db.insert_review_verdict(verdict)

@@ -98,7 +98,8 @@ async def test_coin_toss_probability_network_run_verified_end_to_end(tmp_path: P
                         "source_type": "user_prompt",
                         "source_ref": "up_1",
                         "excerpt": (
-                            "toss 10 coins together what is the probability i will get "
+                            "toss 10 fair independent coins together what is the probability "
+                            "i will get "
                             "atleast 6 heads"
                         ),
                     }
@@ -202,7 +203,8 @@ async def test_coin_toss_probability_network_run_verified_end_to_end(tmp_path: P
         settings=settings,
     )
     res = await runner.run(
-        "If i toss 10 coins together what is the probability i will get atleast 6 heads"
+        "If i toss 10 fair independent coins together what is the probability "
+        "i will get atleast 6 heads"
     )
     await db.close()
     assert res.status == RunStatus.COMPLETED, f"err={res.error} notes={res.confidence_notes}"

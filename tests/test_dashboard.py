@@ -172,6 +172,8 @@ async def _seed_synthetic_run(db_path: Path, run_id: str = "run_test123456") -> 
             usage=UsageMetrics(model_calls=3, input_tokens=100, output_tokens=50),
         )
     )
+    # Finish the writer's SQLite checkpoint before tests snapshot the DB and WAL.
+    await db.close()
 
 
 def test_dashboard_topology_builder() -> None:

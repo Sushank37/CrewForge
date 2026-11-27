@@ -103,9 +103,22 @@ class ClaimLedger:
             for alias in {f"clm_{idx}", proposal.claim_ref} if alias
         )
 
+        premise_available = {
+            claim.claim_id: claim.is_material and claim.status in {
+                ClaimStatus.ASSERTED, ClaimStatus.SUPPORTED,
+            }
+            for claim in existing_claims
+        }
         claim_tool_records: dict[int, ToolExecutionRecord] = {}
         all_new_tool_records: list[ToolExecutionRecord] = []
         for idx, prop_claim in enumerate(claim_proposals):
+            aliases = {
+                alias for alias in {f"clm_{idx + 1}", prop_claim.claim_ref}
+                if alias and local_alias_counts[alias] == 1
+            }
+            ready = (
+                not prop_claim.is_unresolved and prop_claim.category not in _NON_MATERIAL_CATEGORIES
+            )
             if prop_claim.computation is not None:
                 rec = await self._arithmetic.execute(
                     run_id=run_id,
@@ -113,17 +126,26 @@ class ClaimLedger:
                     request=prop_claim.computation,
                     catalog=catalog,
                     task_id=task_id,
+                    invalid_premise_refs=[
+                        pid for pid in prop_claim.premise_claim_ids
+                        if not premise_available.get(pid)
+                    ],
                 )
                 claim_tool_records[idx] = rec
                 all_new_tool_records.append(rec)
                 target = make_tool_target(rec)
-                if target.is_trusted and not prop_claim.is_unresolved:
+                ready = ready and target.is_trusted
+                if ready and prop_claim.category == ClaimCategory.COMPUTATION:
                     catalog.targets_by_key[rec.tool_execution_id] = target
-                    for alias in {f"clm_{idx + 1}", prop_claim.claim_ref}:
-                        if alias and local_alias_counts[alias] == 1:
-                            catalog.targets_by_key.setdefault(alias, target)
+                    for alias in aliases:
+                        catalog.targets_by_key.setdefault(alias, target)
+            for alias in aliases:
+                premise_available.setdefault(alias, ready)
 
-        combined_tool_records = [*prior_tool_records, *all_new_tool_records]
+        combined_tool_records = [
+            r for r in [*prior_tool_records, *all_new_tool_records]
+            if (target := catalog.targets_by_key.get(r.tool_execution_id)) and target.is_trusted
+        ]
 
         persisted_evidence: list[Evidence] = []
         retrieved_docs = [e for e in verified_evidence_all if e.source_type == "external_retrieved"]

@@ -1,26 +1,37 @@
+import re
 from pathlib import Path
 
 import pytest
 
 from crewforge.config import CrewForgeSettings
 from crewforge.core.budget import BudgetManager
-from crewforge.core.claim_graph import ClaimDependencyGraph
 from crewforge.core.executor import ModelExecutor
-from crewforge.core.ledger import ClaimLedger
+from crewforge.core.honesty_gate import HonestyGate
+from crewforge.core.ledger import ClaimLedger, ClaimRevisionError
 from crewforge.core.messaging import MessageBus
-from crewforge.core.repair import TargetedRepairEngine, _build_revision_prompt
+from crewforge.core.repair import TargetedRepairEngine
 from crewforge.core.reviewer import ReviewerPool
 from crewforge.schemas import (
+    AgentSpec,
     ArithmeticRequest,
     ArithmeticVariableBinding,
+    ClaimCategory,
     ClaimStatus,
+    ClaimVersionRef,
     Evidence,
     ExecutionPlan,
     ProposedClaim,
+    ProposedEvidence,
+    ReleaseSegment,
+    ReviewDecision,
+    ReviewerBatchOutput,
+    RevisionOutput,
+    SynthesisOutput,
+    TaskSpec,
     VerificationStatus,
 )
 from crewforge.storage.database import Database
-from crewforge.tools.arithmetic import DeterministicArithmeticTool
+from crewforge.tools.arithmetic import DeterministicArithmeticTool, build_provenance_catalog
 from tests.fake_provider import FakeProvider
 
 
@@ -172,12 +183,26 @@ async def test_correct_arithmetic_with_invalid_provenance_is_rejected(
     assert result.provenance_details[operand]["code"] == code
 
 
-async def test_changed_premise_keeps_dependent_unverified_and_repair_gets_new_value(run_db):
+async def test_changed_premise_recovers_two_dependent_calculations_and_releases(run_db):
     db, settings = run_db
+    settings = settings.model_copy(update={
+        "max_revision_rounds": 2, "max_model_calls_per_run": 16,
+        "separate_review_dimensions": False, "max_retries": 0,
+    })
     ledger = ClaimLedger(db)
-    prompt = "The initial estimate is $75. The corrected amount is $91. The fee is $6."
+    prompt = (
+        "The initial estimate is $75. The corrected amount is $91. The fee is $6. "
+        "The deposit is $20. Use the corrected amount to calculate the total and balance."
+    )
+    agent = AgentSpec(run_id="offline", role="Analyst", instructions="Calculate charges.")
+    task = TaskSpec(
+        run_id="offline", title="Calculate charges", description="Use the corrected amount.",
+        assigned_agent_id=agent.agent_id,
+    )
+    plan = ExecutionPlan(run_id="offline", goal="Calculate charges", agents=[agent], tasks=[task])
+    await db.save_execution_plan(plan)
     _, claims, records = await ledger.record_specialist_outputs(
-        run_id="offline", agent_id="lead", task_id=None, original_prompt=prompt,
+        run_id="offline", agent_id=agent.agent_id, task_id=task.task_id, original_prompt=prompt,
         dependency_findings_text="", evidence_proposals=[], claim_proposals=[
             claim("The estimate is $75.", computation(
                 "estimate", 75, "USD", binding("estimate", 75),
@@ -186,61 +211,162 @@ async def test_changed_premise_keeps_dependent_unverified_and_repair_gets_new_va
                 "estimate + fee", 81, "USD",
                 binding("estimate", 75, "clm_1"), binding("fee", 6, "up_3"),
             )),
+            claim("After the deposit the balance is $61.", computation(
+                "charge - deposit", 61, "USD",
+                binding("charge", 81, "clm_2"), binding("deposit", 20, "up_4"),
+            )),
         ],
     )
-    assert records[1].inputs_grounded
-    upstream, dependent = claims
-    revised = await ledger.apply_targeted_revision(
-        run_id="offline", target_claim_id=upstream.claim_id, expected_version=1,
-        new_statement="The corrected amount is $91.", author_agent_id="lead",
-        original_prompt=prompt, computation_request=computation(
-            "amount", 91, "USD", binding("amount", 91, "up_2"),
+    assert all(record.inputs_grounded for record in records)
+    upstream, dependent, balance = claims
+    revisions = {
+        (upstream.claim_id, 1): (
+            "The corrected amount is $91.",
+            computation("amount", 91, "USD", binding("amount", 91, "up_2")),
+            "Use the corrected amount",
         ),
-    )
-    await db.update_claim_verification_state(
-        run_id="offline", claim_id=revised.claim_id, version=2,
-        status=ClaimStatus.SUPPORTED,
-        verification_status=VerificationStatus.COMPUTATIONALLY_VERIFIED,
-    )
-    stale = await ClaimDependencyGraph(db).invalidate_dependents(
-        run_id="offline", root_claim_id=revised.claim_id, reason="Corrected amount",
-        superseded_version=1,
-    )
-    assert [c.claim_id for c in stale] == [dependent.claim_id]
+        (dependent.claim_id, 2): (
+            "With the fee the charge is $97.",
+            computation(
+                "estimate + fee", 97, "USD",
+                binding("estimate", 91, f"{upstream.claim_id}@v2"), binding("fee", 6, "up_3"),
+            ),
+            "Candidates: 91 USD.",
+        ),
+        (balance.claim_id, 2): (
+            "After the deposit the balance is $77.",
+            computation(
+                "charge - deposit", 77, "USD",
+                binding("charge", 97, f"{dependent.claim_id}@v3"), binding("deposit", 20, "up_4"),
+            ),
+            "Candidates: 97 USD.",
+        ),
+    }
+    approvals = {
+        (upstream.claim_id, 2): ("The corrected amount is $91.", "amount=91 [up_2", "91"),
+        (dependent.claim_id, 3): ("With the fee the charge is $97.", "fee=6 [up_3", "97"),
+        (balance.claim_id, 3): ("After the deposit the balance is $77.",
+                                "deposit=20 [up_4", "77"),
+    }
+    seen_repairs = []
+    seen_reviews = []
 
-    provider = FakeProvider()
+    def scripted_provider(model_prompt, schema):
+        if schema is RevisionOutput:
+            targets = re.findall(r"Target claim: claim_id=(clm_\w+), expected_version=(\d+)",
+                                 model_prompt)
+            assert len(targets) == 1
+            cid, version = targets[0][0], int(targets[0][1])
+            statement, request, expected_diagnostic = revisions[cid, version]
+            assert expected_diagnostic in model_prompt
+            seen_repairs.append((cid, version))
+            return {"updated_findings": statement, "revisions": [{
+                "target_claim_id": cid, "expected_version": version,
+                "new_statement": statement, "computation": request.model_dump(),
+                "revision_notes": "Recomputed from the current supplied source.",
+            }]}
+        assert schema is ReviewerBatchOutput
+        targets = re.findall(r"Claim (clm_\w+) \(version=(\d+),", model_prompt)
+        assert len(targets) == 1
+        cid, version = targets[0][0], int(targets[0][1])
+        seen_reviews.append((cid, version))
+        if (cid, version) == (upstream.claim_id, 1):
+            assert "Statement: The estimate is $75." in model_prompt
+            assert "Use the corrected amount" in model_prompt
+            verdict = {"decision": "needs_revision", "blocking_severity": "blocking",
+                       "rationale": "Use the corrected amount in up_2 in place of the estimate."}
+        else:
+            statement, operand, value = approvals[cid, version]
+            assert f"Statement: {statement}" in model_prompt
+            assert f"computed={value}," in model_prompt
+            assert operand in model_prompt
+            verdict = {
+                "decision": "approve", "rationale": "Matches the scripted source and formula.",
+            }
+        return {"verdicts": [{"claim_id": cid, "claim_version": version, **verdict}]}
+
+    provider = FakeProvider(handler=scripted_provider, max_retries=0)
     executor = ModelExecutor(
         provider=provider, database=db, budget_manager=BudgetManager(db, settings),
         settings=settings,
     )
+    reviewer = ReviewerPool(executor=executor, database=db, settings=settings)
+    initial_review = await reviewer.review_claims(
+        run_id="offline", original_prompt=prompt, plan=plan, target_claims=[upstream],
+    )
+    assert [c.claim_id for c in initial_review.blocking_claims] == [upstream.claim_id]
     repair = TargetedRepairEngine(
         executor=executor, database=db, ledger=ledger, message_bus=MessageBus(db),
-        reviewer_pool=ReviewerPool(executor=executor, database=db, settings=settings),
-        settings=settings,
+        reviewer_pool=reviewer, settings=settings,
     )
-    calls, verdicts, blocked = await repair._revalidate_stale_dependents(
-        run_id="offline", original_prompt=prompt, plan=ExecutionPlan(
-            run_id="offline", goal="Estimate charge", agents=[], tasks=[],
-        ),
-        verdicts_by_key={}, run_deadline_monotonic=None,
+    round_outcome = await repair.resolve_disputes(
+        run_id="offline", original_prompt=prompt, plan=plan,
+        blocking_claims=initial_review.blocking_claims, verdicts=initial_review.verdicts,
     )
-    assert calls == 0 and not provider.calls
-    assert len(blocked) == 1
-    result = blocked[0]
-    assert result.version == 2 and result.status == ClaimStatus.REJECTED
-    assert result.tool_execution_ids != dependent.tool_execution_ids
-    tools = {r.tool_execution_id: r for r in await db.get_tool_executions_for_run("offline")}
-    replay = tools[result.tool_execution_ids[0]]
-    assert replay.computed_result == "81" and not replay.inputs_grounded
-    assert replay.provenance_details["estimate"]["resolved_id"] == f"{upstream.claim_id}@v2"
-    assert replay.provenance_details["estimate"]["candidates"] == ["91 USD"]
-    revision_prompt = _build_revision_prompt(
-        original_prompt=prompt, disputed_claims=[result], evidence_by_id={},
-        verdicts_by_claim_key={(result.claim_id, result.version): verdicts},
-        dependency_findings_text="", tool_by_id=tools,
+    assert seen_repairs == list(revisions)
+    assert seen_reviews == [(upstream.claim_id, 1), *approvals]
+    assert round_outcome.repair_calls == round_outcome.re_review_calls == 3
+
+    trace = await db.get_run_trace("offline")
+    assert trace is not None
+    all_claims = {(c.claim_id, c.version): c for c in trace.claims}
+    tools = {r.tool_execution_id: r for r in trace.tool_executions}
+    accepted = []
+    for (cid, version), (statement, _, value) in approvals.items():
+        current = all_claims[cid, version]
+        assert current.status == ClaimStatus.SUPPORTED
+        assert current.verification_status == VerificationStatus.COMPUTATIONALLY_VERIFIED
+        [tid] = current.tool_execution_ids
+        assert tools[tid].computed_result == value and tools[tid].inputs_grounded
+        assert tid not in all_claims[cid, 1].tool_execution_ids
+        assert any(
+            v.claim_id == cid and v.claim_version == version
+            and v.decision == ReviewDecision.APPROVE and v.reviewer_id != agent.agent_id
+            for v in trace.review_verdicts
+        )
+        accepted.append(ReleaseSegment(
+            segment_type="accepted_claim", text=statement,
+            claim_refs=[ClaimVersionRef(claim_id=cid, claim_version=version)],
+        ))
+
+    for original, old_value, new_value, operand in [
+        (dependent, "81", "91", "estimate"),
+        (balance, "61", "97", "charge"),
+    ]:
+        old = all_claims[original.claim_id, 2]
+        assert old.status == ClaimStatus.REJECTED
+        [tid] = old.tool_execution_ids
+        assert tools[tid].computed_result == old_value and not tools[tid].inputs_grounded
+        assert tools[tid].provenance_details[operand]["candidates"] == [f"{new_value} USD"]
+
+    gate = HonestyGate(db)
+    gate_args = dict(
+        run_id="offline", original_prompt=prompt, plan=plan, all_claims=trace.claims,
+        evidence_list=trace.evidence, tool_executions=trace.tool_executions,
+        verdicts=trace.review_verdicts, incomplete_tasks=[], extra_assumptions=[],
+        extra_missing=[], uncertainties=[], is_partial_run=False,
     )
-    assert "estimate=75" in revision_prompt
-    assert "Candidates: 91 USD." in revision_prompt
+    release = gate.evaluate(synthesis=SynthesisOutput(accepted_segments=accepted), **gate_args)
+    assert release.verification.honesty_gate_passed
+    assert all(value in release.rendered_answer for value in ("$91", "$97", "$77"))
+    assert all(value not in release.rendered_answer for value in ("$75", "$81", "$61"))
+    stale_release = gate.evaluate(
+        synthesis=SynthesisOutput(accepted_segments=[ReleaseSegment(
+            segment_type="accepted_claim", text=dependent.statement,
+            claim_refs=[ClaimVersionRef(claim_id=dependent.claim_id, claim_version=1)],
+        )]),
+        **gate_args,
+    )
+    assert not stale_release.verification.honesty_gate_passed
+    assert "$81" not in stale_release.rendered_answer
+
+    catalog = build_provenance_catalog(
+        original_prompt=prompt, all_claims=trace.claims, tool_records=trace.tool_executions,
+        run_id="offline",
+    )
+    for record in records:
+        assert not catalog.targets_by_key[record.tool_execution_id].is_trusted
+    assert not catalog.targets_by_key[f"{dependent.claim_id}@v1"].is_trusted
 
 
 async def test_invalid_intermediate_and_computation_evidence_cannot_source_operands(run_db):
@@ -275,3 +401,236 @@ async def test_invalid_intermediate_and_computation_evidence_cannot_source_opera
     for record in attempted:
         assert record.success and record.matches_proposed and not record.inputs_grounded
         assert record.provenance_details["subtotal"]["code"] == "untrusted_reference"
+
+
+@pytest.mark.parametrize(("expression", "result", "units", "operand", "other"), [
+    ("fee", 12, "USD", binding("fee", 12, "const:months_per_year"), None),
+    ("unit_cost * item_count", 9, "USD", binding("item_count", 1, "const:one"),
+     binding("unit_cost", 9)),
+    ("p", 0.5, "probability", binding("p", "0.5", "const:fair_coin_probability"), None),
+    ("budget - unit_cost", 91, "USD", binding("budget", 100, "const:percent_scale"),
+     binding("unit_cost", 9)),
+    ("unit_cost * multiplier", 900, "USD", binding("multiplier", 100, "const:percent_scale"),
+     binding("unit_cost", 9)),
+    ("unit_cost + factor", 21, "USD", binding("factor", 12, "const:months_per_year"),
+     binding("unit_cost", 9)),
+])
+async def test_registered_constants_cannot_supply_empirical_operands(
+    run_db, expression, result, units, operand, other,
+):
+    db, _ = run_db
+    record = await DeterministicArithmeticTool(db).execute(
+        run_id="offline", actor="lead", grounded_texts=["The unit cost is $9."],
+        request=computation(expression, result, units, *([operand, other] if other else [operand])),
+    )
+    assert record.success and record.matches_proposed and not record.inputs_grounded
+    assert record.provenance_details[operand.name]["code"] == "invalid_constant_usage"
+
+
+@pytest.mark.parametrize("inline", [0, 1])
+async def test_inline_identity_is_not_an_empirical_result(run_db, inline):
+    db, _ = run_db
+    result = await DeterministicArithmeticTool(db).execute(
+        run_id="offline", actor="lead", grounded_texts=["The count was unavailable."],
+        request=computation(str(inline), inline, "items"),
+    )
+    assert result.matches_proposed and result.has_ungrounded_literals
+    assert not result.inputs_grounded
+
+
+async def test_plan_assumptions_cannot_supply_numbers_or_fairness(run_db):
+    db, _ = run_db
+    prompt = "There were 6 tosses with 3 heads in a field trial. The fee is unavailable."
+    assumptions = ["The fee is $14", "Coins are fair and independent"]
+    catalog = build_provenance_catalog(original_prompt=prompt, assumptions=assumptions)
+    tool = DeterministicArithmeticTool(db)
+    assumed_fee = await tool.execute(
+        run_id="offline", actor="lead", catalog=catalog,
+        request=computation("fee", 14, "USD", binding("fee", 14, "assumption:The fee is $14")),
+    )
+    assumed_prior = await tool.execute(
+        run_id="offline", actor="lead", catalog=catalog,
+        request=computation(
+            "binomial_pmf(n, k, p)", "0.3125", "probability",
+            binding("n", 6), binding("k", 3), binding("p", "0.5", "const:fair_coin_probability"),
+        ),
+    )
+    assert assumed_fee.matches_proposed and not assumed_fee.inputs_grounded
+    assert assumed_fee.provenance_details["fee"]["code"] == "untrusted_reference"
+    assert assumed_prior.matches_proposed and not assumed_prior.inputs_grounded
+    assert assumed_prior.provenance_details["p"]["code"] == "invalid_constant_usage"
+
+
+@pytest.mark.parametrize(("prompt", "operand", "code"), [
+    ("Alpha fee is $34. Beta fee is $27.", binding("alpha_fee", 27, "up_2"), "role_conflict"),
+    ("Alpha fee is $27. Beta fee is $27.", binding("alpha_fee", 27, "up_2"), "role_conflict"),
+    ("Alpha fee is $34. Beta fee is $27.",
+     binding("alpha_fee", 27, "up_2", quote="Beta fee is $27"), "role_conflict"),
+    ("Alpha fee is $27, Beta fee is $27.",
+     binding("alpha_fee", 27, quote="Beta fee is $27"), "role_conflict"),
+    ("Base-case volume is 400 units. Stress-case volume is 540 units.",
+     binding("base_case_volume", 540, "up_2"), "role_conflict"),
+    ("Base-case volume is 540 units. Stress-case volume is 540 units.",
+     binding("stress_case_volume", 540, quote="Base-case volume is 540 units"), "role_conflict"),
+    ("Alpha processing time is 30 seconds. Beta processing time is 30 minutes.",
+     binding("alpha_time", 30, units="minutes"), "unit_conflict"),
+    ("Alpha fee is $27. Beta fee is $27.", binding("alpha_fee", 27), "matched"),
+    ("Alpha fee is $27, Beta fee is $27.", binding("beta_fee", 27), "matched"),
+    ("Base-case volume is 540 units. Stress-case volume is 540 units.",
+     binding("stress_case_volume", 540, "up_2", quote="Stress-case volume is 540"), "matched"),
+    ("A centre completed 18 inspections and found 4 errors.",
+     binding("centre_errors", 4, quote="found 4 errors"), "matched"),
+])
+async def test_operand_context_distinguishes_entities_and_scenarios(run_db, prompt, operand, code):
+    db, _ = run_db
+    record = await DeterministicArithmeticTool(db).execute(
+        run_id="offline", actor="lead", grounded_texts=[prompt],
+        request=computation(operand.name, operand.value, "", operand),
+    )
+    assert record.success and record.matches_proposed
+    assert record.inputs_grounded == (code == "matched")
+    assert record.provenance_details[operand.name]["code"] == code
+    if code == "matched" and operand.name == "beta_fee":
+        assert "beta" in record.provenance_details[operand.name]["source_context"]
+
+
+async def test_failed_revision_remains_auditable_but_cannot_source_operands(run_db):
+    db, _ = run_db
+    ledger = ClaimLedger(db)
+    prompt = "The base charge is $47. The additional charge is $12."
+    _, claims, _ = await ledger.record_specialist_outputs(
+        run_id="offline", agent_id="lead", task_id=None, original_prompt=prompt,
+        dependency_findings_text="", evidence_proposals=[], claim_proposals=[
+            claim("The base charge is $47.", computation("base", 47, "USD", binding("base", 47))),
+            claim("The total is $59.", computation(
+                "base + extra", 59, "USD", binding("base", 47, "clm_1"),
+                binding("extra", 12, "up_2"),
+            )),
+        ],
+    )
+    original, downstream = claims
+    with pytest.raises(ClaimRevisionError, match="cycle"):
+        await ledger.apply_targeted_revision(
+            run_id="offline", target_claim_id=original.claim_id, expected_version=1,
+            new_statement="The base charge is $59.", author_agent_id="lead",
+            original_prompt=prompt, computation_request=computation(
+                "total", 59, "USD", binding("total", 59, downstream.claim_id),
+            ),
+        )
+
+    latest = await db.get_claims_for_run("offline", latest_only=True)
+    records = await db.get_tool_executions_for_run("offline")
+    attached = {tid for c in latest for tid in c.tool_execution_ids}
+    [orphan] = [r for r in records if r.tool_execution_id not in attached]
+    assert orphan.success and orphan.inputs_grounded and orphan.matches_proposed
+    assert all(c.version == 1 for c in latest)
+    catalog = build_provenance_catalog(
+        original_prompt=prompt, all_claims=latest, tool_records=records, run_id="offline",
+    )
+    result = await DeterministicArithmeticTool(db).execute(
+        run_id="offline", actor="lead", catalog=catalog,
+        request=computation("total", 59, "USD", binding("total", 59, orphan.tool_execution_id)),
+    )
+    assert result.success and result.matches_proposed and not result.inputs_grounded
+    assert "not attached" in result.provenance_details["total"]["note"]
+
+    # The catalogue must reject the downstream result even before the graph
+    # has propagated the rejected status to the dependent claim.
+    await db.update_claim_verification_state(
+        run_id="offline", claim_id=original.claim_id, version=1,
+        status=ClaimStatus.REJECTED, verification_status=VerificationStatus.CONTRADICTED,
+    )
+    after_rejection = build_provenance_catalog(
+        original_prompt=prompt, all_claims=await db.get_claims_for_run("offline", latest_only=True),
+        tool_records=records, run_id="offline",
+    )
+    assert not after_rejection.targets_by_key[downstream.tool_execution_ids[0]].is_trusted
+    assert not after_rejection.targets_by_key[downstream.claim_id].is_trusted
+
+
+
+@pytest.mark.parametrize("source_type", ["dependency_finding", "user_prompt"])
+async def test_assumed_value_cannot_be_released_as_a_given_fact(run_db, source_type):
+    db, settings = run_db
+    prompt = "Check whether the fee is known."
+    plan = ExecutionPlan(run_id="offline", goal="Check fee", assumptions=["The fee is $14."])
+    ledger = ClaimLedger(db)
+    evidence, claims, _ = await ledger.record_specialist_outputs(
+        run_id="offline", agent_id="lead", task_id=None, original_prompt=prompt,
+        dependency_findings_text="The fee is $14.",
+        evidence_proposals=[ProposedEvidence(
+            source_type=source_type, source_ref="citation",
+            excerpt=prompt if source_type == "user_prompt" else "The fee is $14.",
+        )],
+        claim_proposals=[ProposedClaim(
+            statement="The fee is $14.", category=ClaimCategory.GIVEN_FACT, evidence_indices=[0],
+        )],
+    )
+    assert evidence[0].verified_in_input
+    provider = FakeProvider()
+    executor = ModelExecutor(
+        provider=provider, database=db, budget_manager=BudgetManager(db, settings),
+        settings=settings,
+    )
+    review = await ReviewerPool(executor=executor, database=db, settings=settings).review_claims(
+        run_id="offline", original_prompt=prompt, plan=plan,
+    )
+    assert not provider.calls
+    assert review.blocking_claims[0].status == ClaimStatus.REJECTED
+    report = HonestyGate(db).evaluate(
+        run_id="offline", original_prompt=prompt, plan=plan,
+        synthesis=SynthesisOutput(accepted_segments=[ReleaseSegment(
+            segment_type="accepted_claim", text=claims[0].statement,
+            claim_refs=[ClaimVersionRef(claim_id=claims[0].claim_id, claim_version=1)],
+        )]),
+        all_claims=review.blocking_claims, evidence_list=evidence, tool_executions=[],
+        verdicts=review.verdicts, incomplete_tasks=[], extra_assumptions=[], extra_missing=[],
+        uncertainties=[], is_partial_run=False,
+    )
+    assert not report.verification.honesty_gate_passed
+    assert not report.assumptions
+    assert "$14" not in report.rendered_answer
+
+
+async def test_provenance_accepts_time_conversion_and_observed_probability(run_db):
+    db, _ = run_db
+    tool = DeterministicArithmeticTool(db)
+    duration = await tool.execute(
+        run_id="offline", actor="lead", grounded_texts=["Elapsed time is 2 hours."],
+        request=computation(
+            "elapsed * minutes_per_hour", 120, "minutes", binding("elapsed", 2, units="hours"),
+            binding("minutes_per_hour", 60, "const:minutes_per_hour", units="minutes/hour"),
+        ),
+    )
+    empirical = await tool.execute(
+        run_id="offline", actor="lead",
+        grounded_texts=["There are 6 trials and 1 target success. Probability per trial is 0.2."],
+        request=computation(
+            "binomial_pmf(n, k, p)", "0.393216", "probability",
+            binding("n", 6), binding("k", 1), binding("p", "0.2", "up_2", units="ratio"),
+        ),
+    )
+    assert duration.inputs_grounded and duration.matches_proposed
+    assert empirical.inputs_grounded and empirical.matches_proposed
+
+
+async def test_invalid_declared_premise_cannot_seed_a_same_response_intermediate(run_db):
+    db, _ = run_db
+    ledger = ClaimLedger(db)
+    _, _, records = await ledger.record_specialist_outputs(
+        run_id="offline", agent_id="lead", task_id=None,
+        original_prompt="The package weighs 42 kg.", dependency_findings_text="",
+        evidence_proposals=[],
+        claim_proposals=[
+            claim("The package weighs 42 kg.", computation(
+                "weight", 42, "kg", binding("weight", 42),
+            )).model_copy(update={"premise_claim_ids": ["clm_unknown"]}),
+            claim("The shipment weighs 42 kg.", computation(
+                "weight", 42, "kg", binding("weight", 42, "clm_1"),
+            )),
+        ],
+    )
+    assert all(record.success and record.matches_proposed for record in records)
+    assert all(not record.inputs_grounded for record in records)
+    assert records[0].provenance_details["__claim_premises__"]["values"] == ["clm_unknown"]
+    assert records[1].provenance_details["weight"]["code"] == "unknown_reference"

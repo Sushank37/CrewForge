@@ -25,7 +25,11 @@ from crewforge.schemas import (
     VerificationSummary,
 )
 from crewforge.storage.database import Database
-from crewforge.tools.arithmetic import extract_numbers_from_text
+from crewforge.tools.arithmetic import (
+    arithmetic_lineage_issue,
+    extract_numbers_from_text,
+    make_tool_target,
+)
 
 _APPROVED_VERIFICATION_STATES = frozenset(
     {
@@ -190,15 +194,30 @@ class HonestyGate:
         approved_recommendations: list[tuple[ReleaseSegment, list[Claim]]] = []
         used_claim_ids: list[str] = []
 
+        tool_owners = {tid: c for c in all_claims for tid in c.tool_execution_ids}
+        current_calculations = {
+            tid: tool_by_id[tid]
+            for claim in supported_claims
+            for tid in claim.tool_execution_ids
+            if claim.category == ClaimCategory.COMPUTATION
+            and tid in tool_by_id and make_tool_target(tool_by_id[tid]).is_trusted
+            and not arithmetic_lineage_issue(
+                tool_by_id[tid], tool_by_id, latest_by_id, tool_owners,
+            )
+        }
+
         allowed_numbers = extract_numbers_from_text(original_prompt)
         for evd in evidence_list:
-            if evd.verified_in_input:
+            if evd.verified_in_input and evd.source_type in {"user_prompt", "external_retrieved"}:
                 allowed_numbers.update(extract_numbers_from_text(evd.excerpt))
-        for rec in tool_executions:
-            if rec.success and rec.inputs_grounded and rec.computed_result is not None:
-                allowed_numbers.update(extract_numbers_from_text(rec.computed_result))
+        for rec in current_calculations.values():
+            assert rec.computed_result is not None
+            allowed_numbers.update(extract_numbers_from_text(rec.computed_result))
         for claim in supported_claims:
-            allowed_numbers.update(extract_numbers_from_text(claim.statement))
+            if claim.category != ClaimCategory.COMPUTATION or any(
+                tid in current_calculations for tid in claim.tool_execution_ids
+            ):
+                allowed_numbers.update(extract_numbers_from_text(claim.statement))
 
         def _validate_claim_ref(
             cid: str,
@@ -231,9 +250,11 @@ class HonestyGate:
                         f"Claim '{cid}' depends on unverified/stale premise '{pref.claim_id}'."
                     )
                 if (
-                    p_latest.is_material
-                    and require_supported
-                    and p_latest.status != ClaimStatus.SUPPORTED
+                    require_supported
+                    and (
+                        p_latest.category == ClaimCategory.ASSUMPTION
+                        or (p_latest.is_material and p_latest.status != ClaimStatus.SUPPORTED)
+                    )
                 ):
                     return None, (
                         f"Claim '{cid}' depends on unsupported material premise '{pref.claim_id}'."
@@ -300,8 +321,8 @@ class HonestyGate:
                     )
 
             if require_supported:
-                if not latest.is_material:
-                    return None, f"Non-material claim '{cid}' cannot be released as accepted fact."
+                if not latest.is_material or latest.category == ClaimCategory.ASSUMPTION:
+                    return None, f"Non-factual claim '{cid}' cannot be released as accepted fact."
                 if latest.status != ClaimStatus.SUPPORTED:
                     return (
                         None,
@@ -330,23 +351,17 @@ class HonestyGate:
                     return None, f"Claim '{cid}' v{cver} lacks an independent approval verdict."
                 if any(v.reviewer_id == latest.author_agent_id for v in c_verdicts):
                     return None, f"Claim '{cid}' v{cver} has an invalid self-review verdict."
-                if latest.category == ClaimCategory.COMPUTATION:
-                    recs = [
-                        tool_by_id[tid] for tid in latest.tool_execution_ids if tid in tool_by_id
-                    ]
-                    if not any(
-                        r.success
-                        and r.inputs_grounded
-                        and not r.has_ungrounded_literals
-                        and r.matches_proposed is not False
-                        for r in recs
-                    ):
-                        return (
-                            None,
-                            f"Numeric claim '{cid}' lacks grounded arithmetic verification.",
-                        )
+                if latest.category == ClaimCategory.COMPUTATION and not any(
+                    tid in current_calculations for tid in latest.tool_execution_ids
+                ):
+                    return (
+                        None,
+                        f"Numeric claim '{cid}' lacks grounded arithmetic verification.",
+                    )
                 if latest.category == ClaimCategory.EXTERNAL_FACT and not any(
-                    eid in evidence_by_id and evidence_by_id[eid].verified_in_input
+                    eid in evidence_by_id
+                    and evidence_by_id[eid].verified_in_input
+                    and evidence_by_id[eid].source_type == "external_retrieved"
                     for eid in latest.evidence_ids
                 ):
                     return None, f"External factual claim '{cid}' lacks retrieved evidence."
