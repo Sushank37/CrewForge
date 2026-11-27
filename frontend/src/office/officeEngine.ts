@@ -20,6 +20,73 @@ export const SPECIALIST_DESKS = [
   { x: 165, y: 215 },
 ];
 
+export type OperationalState =
+  | "idle"
+  | "active_inference"
+  | "dependency_waiting"
+  | "quota_waiting"
+  | "reviewing"
+  | "revising"
+  | "failed"
+  | "completed";
+
+export interface OfficeLayout {
+  width: number;
+  height: number;
+  cols: number;
+  rows: number;
+  leadDesk: { x: number; y: number };
+  reviewBay: { x: number; y: number };
+  desks: Array<{ x: number; y: number; row: number; col: number }>;
+}
+
+export function computeOfficeLayout(specialistCount: number): OfficeLayout {
+  if (specialistCount <= 3) {
+    return {
+      width: OFFICE_WIDTH,
+      height: OFFICE_HEIGHT,
+      cols: 3,
+      rows: 1,
+      leadDesk: LEAD_DESK,
+      reviewBay: REVIEW_BAY,
+      desks: SPECIALIST_DESKS.slice(0, 3).map((d, idx) => ({
+        x: d.x,
+        y: d.y,
+        row: 0,
+        col: idx,
+      })),
+    };
+  }
+  const cols = specialistCount <= 6 ? 3 : 4;
+  const rows = Math.ceil(specialistCount / cols);
+  const colSpacing = 215;
+  const rowSpacing = 132;
+  const leftMargin = 165;
+  const startY = 305;
+  const width = Math.max(OFFICE_WIDTH, leftMargin + (cols - 1) * colSpacing + 290);
+  const height = Math.max(OFFICE_HEIGHT, startY + (rows - 1) * rowSpacing + 125);
+  const desks: Array<{ x: number; y: number; row: number; col: number }> = [];
+  for (let i = 0; i < specialistCount; i += 1) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    desks.push({
+      x: leftMargin + col * colSpacing,
+      y: startY + row * rowSpacing,
+      row,
+      col,
+    });
+  }
+  return {
+    width,
+    height,
+    cols,
+    rows,
+    leadDesk: { x: Math.round(width / 2), y: LEAD_DESK.y },
+    reviewBay: { x: width - 130, y: 312 },
+    desks,
+  };
+}
+
 export interface OfficeActorState {
   id: string;
   role: string;
@@ -34,6 +101,8 @@ export interface OfficeActorState {
   bubble: string | null;
   bubbleUntil: number;
   deskPos: { x: number; y: number };
+  operationalState?: OperationalState;
+  currentOperation?: string;
 }
 
 export type PacketKind = "task" | "message" | "result" | "revision" | "review";
@@ -205,11 +274,28 @@ export function applyTraceToOffice(
   const processed = new Set(base.processedEventKeys);
   let note = base.lastInteractionNote;
 
-  // Ensure every dynamic specialist from roster exists in the office (entering from door!)
+  // Ensure every dynamic specialist from roster gets a unique, non-overlapping workstation
   const specialists = (trace.roster || []).filter((a) => a.role.toLowerCase() !== "lead");
+  const layout = computeOfficeLayout(specialists.length);
+  actors.lead = {
+    ...actors.lead,
+    deskPos: layout.leadDesk,
+    targetX: layout.leadDesk.x,
+    targetY: layout.leadDesk.y,
+    x: prev.runId === trace.run_id ? actors.lead.x : layout.leadDesk.x,
+    y: prev.runId === trace.run_id ? actors.lead.y : layout.leadDesk.y,
+  };
+  actors.reviewer = {
+    ...actors.reviewer,
+    deskPos: layout.reviewBay,
+    targetX: layout.reviewBay.x,
+    targetY: layout.reviewBay.y,
+    x: prev.runId === trace.run_id ? actors.reviewer.x : layout.reviewBay.x,
+    y: prev.runId === trace.run_id ? actors.reviewer.y : layout.reviewBay.y,
+  };
   specialists.forEach((spec, idx) => {
+    const desk = layout.desks[idx];
     if (!actors[spec.agent_id]) {
-      const desk = SPECIALIST_DESKS[idx % SPECIALIST_DESKS.length];
       actors[spec.agent_id] = {
         id: spec.agent_id,
         role: spec.role,
@@ -224,6 +310,18 @@ export function applyTraceToOffice(
         bubble: "Joining team",
         bubbleUntil: nowMs + 3500,
         deskPos: desk,
+        operationalState: "idle",
+        currentOperation: "Joining team",
+      };
+    } else if (
+      actors[spec.agent_id].deskPos.x !== desk.x ||
+      actors[spec.agent_id].deskPos.y !== desk.y
+    ) {
+      actors[spec.agent_id] = {
+        ...actors[spec.agent_id],
+        deskPos: desk,
+        targetX: desk.x,
+        targetY: desk.y,
       };
     }
   });
@@ -481,6 +579,86 @@ export function applyTraceToOffice(
       }
       default:
         break;
+    }
+  });
+
+  // Derive honest per-actor operationalState and currentOperation from trace state
+  const tasks = trace.tasks || [];
+  const completedTaskIds = new Set(
+    tasks.filter((t) => String(t.status).toLowerCase() === "completed").map((t) => t.task_id)
+  );
+  Object.keys(actors).forEach((id) => {
+    const actor = actors[id];
+    if (id === "lead") {
+      if (isRunning) {
+        actor.operationalState = trace.waiting_for_provider
+          ? "quota_waiting"
+          : events.some((e) => e.event_type === "synthesis_started")
+            ? "active_inference"
+            : "active_inference";
+        actor.currentOperation = trace.waiting_for_provider
+          ? trace.waiting_reason || "Waiting for provider quota"
+          : events.some((e) => e.event_type === "synthesis_started")
+            ? "Synthesizing verified final answer"
+            : "Orchestrating execution plan";
+      } else {
+        const outcome = classifyReleaseOutcome(trace);
+        actor.operationalState =
+          trace.status === "failed" || outcome === "blocked" ? "failed" : "completed";
+        actor.currentOperation =
+          outcome === "blocked"
+            ? "Release blocked by Honesty Gate"
+            : outcome === "partial"
+              ? "Partial verified release"
+              : "Delivered final answer";
+      }
+      return;
+    }
+    if (id === "reviewer") {
+      if (isRunning && trace.waiting_for_provider) {
+        actor.operationalState = "quota_waiting";
+        actor.currentOperation = "Paused during provider quota wait";
+      } else if (actor.pose === "reviewing") {
+        actor.operationalState = "reviewing";
+        actor.currentOperation = `Inspecting ${verdicts.length} verdict(s)`;
+      } else if (!isRunning) {
+        actor.operationalState = trace.status === "failed" ? "failed" : "completed";
+        actor.currentOperation = `${verdicts.length} review verdict(s) recorded`;
+      } else {
+        actor.operationalState = "idle";
+        actor.currentOperation = "Standing by for specialist claims";
+      }
+      return;
+    }
+    const myTasks = tasks.filter((t) => t.assigned_agent_id === id);
+    const activeTask = myTasks.find((t) => String(t.status).toLowerCase() === "running" || String(t.status).toLowerCase() === "in_progress");
+    const failedTask = myTasks.find((t) => String(t.status).toLowerCase() === "failed");
+    const pendingTask = myTasks.find((t) => String(t.status).toLowerCase() === "pending");
+    if (isRunning && trace.waiting_for_provider) {
+      actor.operationalState = "quota_waiting";
+      actor.currentOperation = trace.waiting_reason || "Waiting for provider quota";
+    } else if (failedTask || trace.status === "failed") {
+      actor.operationalState = "failed";
+      actor.currentOperation = failedTask ? `Failed: ${failedTask.title || failedTask.task_id}` : "Run failed";
+    } else if (activeTask) {
+      actor.operationalState = "active_inference";
+      actor.currentOperation = `Working: ${activeTask.title || activeTask.task_id}`;
+    } else if (pendingTask) {
+      const deps = pendingTask.depends_on_task_ids || pendingTask.depends_on || [];
+      const waitingDeps = deps.filter((d) => !completedTaskIds.has(d));
+      if (waitingDeps.length > 0) {
+        actor.operationalState = "dependency_waiting";
+        actor.currentOperation = `Waiting on ${waitingDeps.join(", ")}`;
+      } else {
+        actor.operationalState = "idle";
+        actor.currentOperation = `Queued: ${pendingTask.title || pendingTask.task_id}`;
+      }
+    } else if (myTasks.length > 0 && myTasks.every((t) => String(t.status).toLowerCase() === "completed")) {
+      actor.operationalState = "completed";
+      actor.currentOperation = `Completed ${myTasks.length} task(s)`;
+    } else if (actor.pose === "working") {
+      actor.operationalState = "active_inference";
+      actor.currentOperation = actor.bubble || "Running inference";
     }
   });
 

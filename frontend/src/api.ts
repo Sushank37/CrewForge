@@ -95,7 +95,12 @@ export const api = {
     reqJson<{ runs: Array<{ run_id: string; mode: string; status: string; model: string; created_at: string }> }>(
       "/api/live/runs"
     ),
-  getLiveRun: (runId: string) => reqJson<TracePayload>(`/api/live/runs/${encodeURIComponent(runId)}`),
+  getLiveRun: (runId: string, sinceSeq?: number) =>
+    reqJson<TracePayload>(
+      `/api/live/runs/${encodeURIComponent(runId)}${
+        sinceSeq && sinceSeq > 0 ? `?since_seq=${sinceSeq}` : ""
+      }`
+    ),
   listReplayFiles: () =>
     reqJson<{ files: Array<{ filename: string; run_id: string; status: string; model: string }> }>(
       "/api/replay/files"
@@ -105,7 +110,14 @@ export const api = {
   getBenchmark: () => reqJson<BenchmarkReport>("/api/benchmark"),
   authMe: () => reqJson<AuthMeResponse>("/api/auth/me"),
   loginWithGoogle: (idToken: string) =>
-    reqJson<{ authenticated: boolean; user: AuthUser; csrf_token: string }>("/api/auth/google", {
+    reqJson<{
+      authenticated: boolean;
+      requires_email_verification?: boolean;
+      email?: string;
+      message?: string;
+      user?: AuthUser;
+      csrf_token?: string;
+    }>("/api/auth/google", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id_token: idToken }),

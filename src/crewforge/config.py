@@ -139,8 +139,8 @@ class CrewForgeSettings(BaseSettings):
     revision_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
     synthesis_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
 
-    max_workers: int = Field(default=4, ge=1, le=8)
-    max_tasks: int = Field(default=6, ge=1, le=12)
+    max_workers: int = Field(default=6, ge=1, le=32)
+    max_tasks: int = Field(default=8, ge=1, le=64)
     max_communication_rounds: int = Field(default=1, ge=0, le=3)
     max_revision_rounds: int = Field(default=1, ge=0, le=3)
     max_message_chars: int = Field(default=1000, ge=100, le=8000)

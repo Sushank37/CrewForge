@@ -778,7 +778,7 @@ class HonestyGate:
         release_mode: Literal["full", "partial", "blocked"]
         if gate_passed:
             release_mode = "full"
-        elif has_usable_output or dedup_unresolved or clean_missing:
+        elif has_usable_output or (is_partial_run and (dedup_unresolved or clean_missing)):
             release_mode = "partial"
         else:
             release_mode = "blocked"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import math
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
@@ -603,6 +604,15 @@ def _extract_ast_numeric_literals(node: ast.AST) -> list[Decimal]:
     return literals
 
 
+def _to_bounded_int(val: Decimal, *, name: str, min_val: int = 0, max_val: int = 1000) -> int:
+    if val != val.to_integral_value():
+        raise MalformedExpressionError(f"{name} must be an integer, got {val}.")
+    iv = int(val)
+    if iv < min_val or iv > max_val:
+        raise UnsafeExpressionError(f"{name} ({iv}) outside safe bounds [{min_val}, {max_val}].")
+    return iv
+
+
 def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
     if isinstance(node, ast.Expression):
         return _eval_ast_node(node.body, env)
@@ -695,8 +705,68 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
         if not isinstance(node.func, ast.Name) or node.keywords:
             raise UnsafeExpressionError("Only simple named allowlisted function calls are allowed.")
         fn_name = node.func.id
-        if fn_name not in {"sum", "min", "max", "avg", "abs", "round"}:
+        allowed_funcs = {
+            "sum",
+            "min",
+            "max",
+            "avg",
+            "abs",
+            "round",
+            "comb",
+            "C",
+            "perm",
+            "P",
+            "factorial",
+            "binomial_pmf",
+            "binomial_cdf",
+            "binomial_sf",
+        }
+        if fn_name not in allowed_funcs:
             raise UnsafeExpressionError(f"Disallowed function '{fn_name}'.")
+
+        # Support bounded `sum(expr for var in range(start, stop))`
+        if (
+            fn_name == "sum"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.GeneratorExp)
+        ):
+            gen = node.args[0]
+            if len(gen.generators) != 1:
+                raise UnsafeExpressionError("Only single-loop generator sum() is allowed.")
+            comp = gen.generators[0]
+            if comp.ifs or not isinstance(comp.target, ast.Name):
+                raise UnsafeExpressionError(
+                    "Generator sum() requires simple `for var in range(...)`."
+                )
+            if (
+                not isinstance(comp.iter, ast.Call)
+                or not isinstance(comp.iter.func, ast.Name)
+                or comp.iter.func.id != "range"
+                or comp.iter.keywords
+                or len(comp.iter.args) not in {1, 2}
+            ):
+                raise UnsafeExpressionError(
+                    "Generator sum() only supports range(stop) or range(start, stop)."
+                )
+            r_args = [
+                _to_bounded_int(
+                    _eval_ast_node(a, env), name="range bound", min_val=-1000, max_val=1000
+                )
+                for a in comp.iter.args
+            ]
+            start_i, stop_i = (0, r_args[0]) if len(r_args) == 1 else (r_args[0], r_args[1])
+            if stop_i - start_i > 200:
+                raise UnsafeExpressionError("Generator range exceeds safe limit (200 iterations).")
+            loop_var = comp.target.id
+            total = Decimal(0)
+            with localcontext() as ctx:
+                ctx.prec = 28
+                for idx in range(start_i, stop_i):
+                    child_env = {**env, loop_var: Decimal(idx)}
+                    total += _eval_ast_node(gen.elt, child_env)
+            if not total.is_finite() or abs(total) > _MAX_MAGNITUDE:
+                raise UnsafeExpressionError("Computed value exceeds safe numerical bounds.")
+            return total
 
         args: list[Decimal] = []
         for arg in node.args:
@@ -730,6 +800,60 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
                     raise UnsafeExpressionError("round() precision exceeds safe bounds.")
                 quant = Decimal("1").scaleb(-digits)
                 return args[0].quantize(quant)
+            if fn_name in {"comb", "C"}:
+                if len(args) != 2:
+                    raise MalformedExpressionError(f"{fn_name}() takes exactly 2 arguments (n, k).")
+                n_i = _to_bounded_int(args[0], name="n", min_val=0, max_val=1000)
+                k_i = _to_bounded_int(args[1], name="k", min_val=0, max_val=1000)
+                res = Decimal(math.comb(n_i, k_i))
+                if abs(res) > _MAX_MAGNITUDE:
+                    raise UnsafeExpressionError("Computed value exceeds safe numerical bounds.")
+                return res
+            if fn_name in {"perm", "P"}:
+                if len(args) != 2:
+                    raise MalformedExpressionError(f"{fn_name}() takes exactly 2 arguments (n, k).")
+                n_i = _to_bounded_int(args[0], name="n", min_val=0, max_val=1000)
+                k_i = _to_bounded_int(args[1], name="k", min_val=0, max_val=1000)
+                res = Decimal(math.perm(n_i, k_i))
+                if abs(res) > _MAX_MAGNITUDE:
+                    raise UnsafeExpressionError("Computed value exceeds safe numerical bounds.")
+                return res
+            if fn_name == "factorial":
+                if len(args) != 1:
+                    raise MalformedExpressionError("factorial() takes exactly 1 argument.")
+                n_i = _to_bounded_int(args[0], name="n", min_val=0, max_val=170)
+                res = Decimal(math.factorial(n_i))
+                if abs(res) > _MAX_MAGNITUDE:
+                    raise UnsafeExpressionError("Computed value exceeds safe numerical bounds.")
+                return res
+            if fn_name in {"binomial_pmf", "binomial_cdf", "binomial_sf"}:
+                if len(args) != 3:
+                    raise MalformedExpressionError(
+                        f"{fn_name}() takes exactly 3 arguments (n, k, p)."
+                    )
+                n_i = _to_bounded_int(args[0], name="n", min_val=0, max_val=500)
+                k_i = _to_bounded_int(args[1], name="k", min_val=0, max_val=n_i)
+                p_val = args[2]
+                if p_val < 0 or p_val > 1:
+                    raise MalformedExpressionError("Probability p must be in [0, 1].")
+                q_val = Decimal(1) - p_val
+                if fn_name == "binomial_pmf":
+                    return Decimal(math.comb(n_i, k_i)) * (p_val**k_i) * (q_val ** (n_i - k_i))
+                if fn_name == "binomial_cdf":
+                    return sum(
+                        (
+                            Decimal(math.comb(n_i, i)) * (p_val**i) * (q_val ** (n_i - i))
+                            for i in range(0, k_i + 1)
+                        ),
+                        Decimal(0),
+                    )
+                return sum(
+                    (
+                        Decimal(math.comb(n_i, i)) * (p_val**i) * (q_val ** (n_i - i))
+                        for i in range(k_i, n_i + 1)
+                    ),
+                    Decimal(0),
+                )
 
     raise UnsafeExpressionError(f"Disallowed AST construct: {type(node).__name__}.")
 

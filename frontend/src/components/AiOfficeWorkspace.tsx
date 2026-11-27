@@ -1,20 +1,16 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FullBodyCharacter } from "../characters/FullBodyCharacter";
 import {
-  LEAD_DESK,
   OFFICE_DOOR,
-  OFFICE_HEIGHT,
-  OFFICE_WIDTH,
   OfficePacket,
   OfficeSimState,
-  REVIEW_BAY,
-  SPECIALIST_DESKS,
   applyTraceToOffice,
   classifyReleaseOutcome,
+  computeOfficeLayout,
   createInitialOfficeState,
   stepOfficeSimulation,
 } from "../office/officeEngine";
-import type { ReleaseOutcome } from "../office/officeEngine";
+import type { OperationalState, ReleaseOutcome } from "../office/officeEngine";
 import type { TracePayload } from "../types";
 
 interface AiOfficeProps {
@@ -243,18 +239,75 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
   const [collapsed, setCollapsed] = useState(false);
   const [sim, setSim] = useState<OfficeSimState>(() => createInitialOfficeState());
   const [nowMs, setNowMs] = useState<number>(() => performance.now());
+  const [wallNowMs, setWallNowMs] = useState<number>(() => Date.now());
+  const [selectedActorId, setSelectedActorId] = useState<string | null>(null);
+  const [showTimeline, setShowTimeline] = useState<boolean>(true);
+  const [zoom, setZoom] = useState<number>(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const simRef = useRef<OfficeSimState>(sim);
   const rafRef = useRef<number | null>(null);
 
   const stage = deriveStage(trace, isRunning);
   const events = trace?.execution_events || [];
+  const specialists = useMemo(
+    () => (trace?.roster || []).filter((a) => a.role.toLowerCase() !== "lead"),
+    [trace?.roster]
+  );
+  const layout = useMemo(() => computeOfficeLayout(specialists.length), [specialists.length]);
 
-  const elapsed =
-    trace?.latency_ms !== null && trace?.latency_ms !== undefined
-      ? `${(trace.latency_ms / 1000).toFixed(1)}s`
-      : isRunning
-      ? "Live"
-      : "—";
+  useEffect(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, [trace?.run_id, specialists.length]);
+
+  useEffect(() => {
+    if (!isRunning) return;
+    const id = window.setInterval(() => {
+      setWallNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [isRunning]);
+
+  const elapsed = (() => {
+    if (trace?.latency_ms !== null && trace?.latency_ms !== undefined) {
+      return `${(trace.latency_ms / 1000).toFixed(1)}s`;
+    }
+    if (isRunning && trace?.created_at) {
+      const start = Date.parse(trace.created_at);
+      if (!Number.isNaN(start)) {
+        return `${Math.max(0, (wallNowMs - start) / 1000).toFixed(0)}s`;
+      }
+    }
+    return isRunning ? "Live" : "—";
+  })();
+
+  const stateBadgeLabel = (st?: OperationalState): string => {
+    switch (st) {
+      case "active_inference":
+        return "Active Inference";
+      case "dependency_waiting":
+        return "Dependency Wait";
+      case "quota_waiting":
+        return "Quota Wait";
+      case "reviewing":
+        return "Reviewing";
+      case "revising":
+        return "Revising";
+      case "failed":
+        return "Failed";
+      case "completed":
+        return "Completed";
+      default:
+        return "Idle";
+    }
+  };
+
+  const vbWidth = layout.width / zoom;
+  const vbHeight = layout.height / zoom;
+  const vbX = (layout.width - vbWidth) / 2 - pan.x;
+  const vbY = (layout.height - vbHeight) / 2 - pan.y;
+  const selectedActor = selectedActorId ? sim.actors[selectedActorId] || null : null;
 
   // Ingest new trace updates (handling batched events cleanly)
   useEffect(() => {
@@ -356,9 +409,86 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
 
       {!collapsed && (
         <>
-          <div className="office-2d-viewport">
+          <div className="office-controls">
+            <div className="office-controls-left">
+              <span className="muted" style={{ fontSize: 11.5 }}>
+                {specialists.length} specialist(s) · {layout.rows} row(s) · {trace?.usage?.model_calls || 0} model call(s)
+              </span>
+              {selectedActor && (
+                <button
+                  type="button"
+                  className="btn-ghost btn-xs"
+                  onClick={() => setSelectedActorId(null)}
+                >
+                  Clear selection
+                </button>
+              )}
+            </div>
+            <div className="office-controls-right">
+              <button
+                type="button"
+                className="btn-ghost btn-xs"
+                onClick={() => setShowTimeline((v) => !v)}
+              >
+                {showTimeline ? "Hide Timeline" : "Show Timeline"}
+              </button>
+              <button
+                type="button"
+                className="btn-ghost btn-xs"
+                onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.15).toFixed(2))))}
+                title="Zoom out"
+              >
+                −
+              </button>
+              <button
+                type="button"
+                className="btn-ghost btn-xs"
+                onClick={() => {
+                  setZoom(1);
+                  setPan({ x: 0, y: 0 });
+                }}
+                title="Fit to view"
+              >
+                Fit ({Math.round(zoom * 100)}%)
+              </button>
+              <button
+                type="button"
+                className="btn-ghost btn-xs"
+                onClick={() => setZoom((z) => Math.min(2.2, Number((z + 0.15).toFixed(2))))}
+                title="Zoom in"
+              >
+                +
+              </button>
+            </div>
+          </div>
+
+          <div
+            className="office-2d-viewport"
+            onWheel={(e) => {
+              if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) > 0) {
+                const factor = e.deltaY > 0 ? -0.08 : 0.08;
+                setZoom((z) => Math.min(2.2, Math.max(0.5, Number((z + factor).toFixed(2)))));
+              }
+            }}
+            onPointerDown={(e) => {
+              if ((e.target as HTMLElement).closest("[data-actor-id]")) return;
+              dragRef.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+            }}
+            onPointerMove={(e) => {
+              if (!dragRef.current) return;
+              const dx = (e.clientX - dragRef.current.x) / zoom;
+              const dy = (e.clientY - dragRef.current.y) / zoom;
+              setPan({ x: dragRef.current.panX + dx, y: dragRef.current.panY + dy });
+            }}
+            onPointerUp={() => {
+              dragRef.current = null;
+            }}
+            onPointerLeave={() => {
+              dragRef.current = null;
+            }}
+          >
             <svg
-              viewBox={`0 0 ${OFFICE_WIDTH} ${OFFICE_HEIGHT}`}
+              viewBox={`${vbX} ${vbY} ${vbWidth} ${vbHeight}`}
               className="office-2d-svg"
               role="img"
               aria-label="CrewForge 2D Miniature AI Office"
@@ -379,23 +509,19 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
               </defs>
 
               {/* Back Wall */}
-              <rect x="0" y="0" width={OFFICE_WIDTH} height="132" fill="url(#cf-wall-grad)" />
-              {/* Wall trim */}
-              <rect x="0" y="128" width={OFFICE_WIDTH} height="6" fill="#4338ca" fillOpacity="0.6" />
+              <rect x="0" y="0" width={layout.width} height="132" fill="url(#cf-wall-grad)" />
+              <rect x="0" y="128" width={layout.width} height="6" fill="#4338ca" fillOpacity="0.6" />
 
               {/* Panoramic Windows */}
               <g>
                 <rect x="235" y="16" width="160" height="82" rx="6" fill="url(#cf-win-grad)" stroke="#6366f1" strokeOpacity="0.45" strokeWidth="2" />
-                <rect x="565" y="16" width="160" height="82" rx="6" fill="url(#cf-win-grad)" stroke="#6366f1" strokeOpacity="0.45" strokeWidth="2" />
-                {/* Subtle skyline silhouettes */}
-                <path d="M245 96 V58 H268 V70 H290 V44 H316 V74 H345 V52 H372 V96 Z" fill="#312e81" fillOpacity="0.65" />
-                <path d="M575 96 V62 H600 V48 H628 V68 H656 V42 H686 V66 H715 V96 Z" fill="#312e81" fillOpacity="0.65" />
+                <rect x={layout.width - 395} y="16" width="160" height="82" rx="6" fill="url(#cf-win-grad)" stroke="#6366f1" strokeOpacity="0.45" strokeWidth="2" />
                 <circle cx="360" cy="34" r="5" fill="#fde68a" fillOpacity="0.7" />
-                <circle cx="695" cy="32" r="4" fill="#fde68a" fillOpacity="0.6" />
+                <circle cx={layout.width - 265} cy="32" r="4" fill="#fde68a" fillOpacity="0.6" />
               </g>
 
               {/* Center CrewForge Sign */}
-              <g transform="translate(480, 48)">
+              <g transform={`translate(${layout.leadDesk.x}, 48)`}>
                 <rect x="-72" y="-22" width="144" height="44" rx="10" fill="#0f172a" fillOpacity="0.85" stroke="#818cf8" strokeWidth="1.6" />
                 <text x="0" y="6" textAnchor="middle" fontSize="18" fontWeight="800" fill="#e0e7ff">
                   CrewForge
@@ -429,8 +555,8 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
                 ))}
               </g>
 
-              {/* Right Bookshelf & Watercooler */}
-              <g transform="translate(760, 22)">
+              {/* Right Bookshelf */}
+              <g transform={`translate(${layout.width - 200}, 22)`}>
                 <rect x="0" y="0" width="76" height="96" rx="4" fill="#5c331c" stroke="#3b2011" strokeWidth="1.5" />
                 <line x1="4" y1="30" x2="72" y2="30" stroke="#3b2011" strokeWidth="2" />
                 <line x1="4" y1="62" x2="72" y2="62" stroke="#3b2011" strokeWidth="2" />
@@ -442,22 +568,40 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
               </g>
 
               {/* Floor */}
-              <rect x="0" y="134" width={OFFICE_WIDTH} height={OFFICE_HEIGHT - 134} fill="url(#cf-floor-grad)" />
-              {/* Subtle floorboard lines */}
-              {[180, 230, 280, 330, 380].map((fy) => (
-                <line
-                  key={fy}
-                  x1="0"
-                  y1={fy}
-                  x2={OFFICE_WIDTH}
-                  y2={fy}
-                  stroke="#ffffff"
-                  strokeOpacity="0.04"
-                  strokeWidth="1"
-                />
-              ))}
+              <rect x="0" y="134" width={layout.width} height={layout.height - 134} fill="url(#cf-floor-grad)" />
+              {Array.from({ length: Math.floor((layout.height - 150) / 55) }).map((_, i) => {
+                const fy = 180 + i * 55;
+                return (
+                  <line
+                    key={fy}
+                    x1="0"
+                    y1={fy}
+                    x2={layout.width}
+                    y2={fy}
+                    stroke="#ffffff"
+                    strokeOpacity="0.04"
+                    strokeWidth="1"
+                  />
+                );
+              })}
 
-              {/* Office Entrance Door (where dynamic specialists walk in) */}
+              {/* Department / Row Zone Labels when expanded beyond 1 row */}
+              {layout.rows > 1 &&
+                Array.from({ length: layout.rows }).map((_, r) => (
+                  <text
+                    key={`wing_${r}`}
+                    x="22"
+                    y={275 + r * 132}
+                    fontSize="10"
+                    fontWeight="700"
+                    fill="#94a3b8"
+                    fillOpacity="0.7"
+                  >
+                    {r === 0 ? "Ops Bay A" : `Specialist Wing ${String.fromCharCode(65 + r)}`}
+                  </text>
+                ))}
+
+              {/* Office Entrance Door */}
               <g transform={`translate(${OFFICE_DOOR.x - 24}, ${OFFICE_DOOR.y - 75})`}>
                 <rect x="0" y="0" width="44" height="82" rx="4" fill="#475569" stroke="#94a3b8" strokeWidth="1.5" />
                 <rect x="6" y="8" width="32" height="28" rx="2" fill="#38bdf8" fillOpacity="0.2" />
@@ -467,54 +611,70 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
                 </text>
               </g>
 
-              {/* Potted Plants */}
-              {[
-                { x: 910, y: 155 },
-                { x: 88, y: 390 },
-                { x: 915, y: 390 },
-              ].map((p, i) => (
-                <g key={i} transform={`translate(${p.x}, ${p.y})`}>
-                  <ellipse cx="0" cy="-16" rx="14" ry="12" fill="#15803d" />
-                  <ellipse cx="-6" cy="-22" rx="8" ry="8" fill="#22c55e" />
-                  <ellipse cx="6" cy="-20" rx="8" ry="8" fill="#16a34a" />
-                  <polygon points="-9,-6 9,-6 7,10 -7,10" fill="#b45309" />
-                </g>
-              ))}
-
-              {/* Desks & Workstations */}
+              {/* Desks & Dynamic Workstations */}
               {renderDesk(
-                LEAD_DESK.x,
-                LEAD_DESK.y + 16,
+                layout.leadDesk.x,
+                layout.leadDesk.y + 16,
                 "#6366f1",
                 sim.actors.lead?.pose === "working",
                 "Lead Command",
                 "desk_lead"
               )}
-              {SPECIALIST_DESKS.slice(0, 3).map((d, idx) =>
-                renderDesk(d.x, d.y + 18, "#38bdf8", false, `Workstation ${idx + 1}`, `desk_sp_${idx}`)
-              )}
+              {layout.desks.map((d, idx) => {
+                const sp = specialists[idx];
+                const actor = sp ? sim.actors[sp.agent_id] : undefined;
+                const isActive = actor?.operationalState === "active_inference";
+                return renderDesk(
+                  d.x,
+                  d.y + 18,
+                  "#38bdf8",
+                  Boolean(isActive),
+                  sp ? sp.role : `Workstation ${idx + 1}`,
+                  `desk_sp_${idx}`
+                );
+              })}
               {renderDesk(
-                REVIEW_BAY.x,
-                REVIEW_BAY.y + 18,
+                layout.reviewBay.x,
+                layout.reviewBay.y + 18,
                 "#10b981",
                 sim.actors.reviewer?.pose === "reviewing",
                 "Review & Gate",
                 "desk_review"
               )}
 
-              {/* Depth-sorted Full-Body Characters */}
-              {sortedActors.map((actor) => (
-                <FullBodyCharacter
-                  key={actor.id}
-                  profile={actor.profile}
-                  pose={actor.pose}
-                  x={actor.x}
-                  y={actor.y}
-                  facing={actor.facing}
-                  roleLabel={actor.role}
-                  bubble={actor.bubble}
-                />
-              ))}
+              {/* Clickable Depth-sorted Full-Body Characters */}
+              {sortedActors.map((actor) => {
+                const isSel = selectedActorId === actor.id;
+                return (
+                  <g
+                    key={actor.id}
+                    data-actor-id={actor.id}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => setSelectedActorId((prev) => (prev === actor.id ? null : actor.id))}
+                  >
+                    {isSel && (
+                      <ellipse
+                        cx={actor.x}
+                        cy={actor.y + 22}
+                        rx="28"
+                        ry="9"
+                        fill="none"
+                        stroke="#fbbf24"
+                        strokeWidth="2.2"
+                      />
+                    )}
+                    <FullBodyCharacter
+                      profile={actor.profile}
+                      pose={actor.pose}
+                      x={actor.x}
+                      y={actor.y}
+                      facing={actor.facing}
+                      roleLabel={actor.role}
+                      bubble={actor.bubble}
+                    />
+                  </g>
+                );
+              })}
 
               {/* Animated Document Handovers, Envelopes, and Revisions */}
               {sim.packets.map((pkt) => renderPacket(pkt, nowMs))}
@@ -525,9 +685,77 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
             <span className="ticker-badge">Office Feed</span>
             <span className="ticker-text">{sim.lastInteractionNote}</span>
             <span className="ticker-meta">
-              {Object.keys(sim.actors).length} active in room · {events.length} events
+              {Object.keys(sim.actors).length} active in room · {events.length} events · click any agent to inspect
             </span>
           </div>
+
+          {selectedActor && (
+            <div className="office-inspector">
+              <div className="office-inspector-head">
+                <div>
+                  <strong>{selectedActor.role}</strong>{" "}
+                  <code style={{ fontSize: 11 }}>{selectedActor.id}</code>
+                </div>
+                <span className={`state-badge state-${selectedActor.operationalState || "idle"}`}>
+                  {stateBadgeLabel(selectedActor.operationalState)}
+                </span>
+              </div>
+              <div className="muted" style={{ fontSize: 12 }}>
+                Current operation: {selectedActor.currentOperation || "Idle"}
+              </div>
+              {(() => {
+                const tasks = (trace?.tasks || []).filter(
+                  (t) => t.assigned_agent_id === selectedActor.id
+                );
+                const claims = (trace?.claims || []).filter(
+                  (c) => c.author_agent_id === selectedActor.id
+                );
+                const verdicts =
+                  selectedActor.id === "reviewer" ? trace?.review_verdicts || [] : [];
+                return (
+                  <div className="office-inspector-grid">
+                    {tasks.length > 0 && (
+                      <div>
+                        <strong>Tasks ({tasks.length}):</strong>{" "}
+                        {tasks.map((t) => `${t.title || t.task_id} [${t.status}]`).join(" · ")}
+                      </div>
+                    )}
+                    {claims.length > 0 && (
+                      <div>
+                        <strong>Claims ({claims.length}):</strong>{" "}
+                        {claims.map((c) => `${c.claim_id}@v${c.version} (${c.status})`).join(" · ")}
+                      </div>
+                    )}
+                    {verdicts.length > 0 && (
+                      <div>
+                        <strong>Verdicts ({verdicts.length}):</strong>{" "}
+                        {verdicts
+                          .slice(-4)
+                          .map((v) => `${v.claim_id}: ${v.decision || v.verdict}`)
+                          .join(" · ")}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {showTimeline && events.length > 0 && (
+            <div className="office-timeline" aria-label="Live Activity Timeline">
+              {events
+                .slice(-12)
+                .reverse()
+                .map((ev, idx) => (
+                  <div key={ev.event_id || `${ev.seq}_${idx}`} className="office-timeline-row">
+                    <span className="timeline-seq">#{ev.seq}</span>
+                    <span className="timeline-type">{ev.event_type}</span>
+                    <span className="timeline-actor">{ev.actor || "system"}</span>
+                    <span className="timeline-msg">{ev.message || ""}</span>
+                  </div>
+                ))}
+            </div>
+          )}
         </>
       )}
     </section>

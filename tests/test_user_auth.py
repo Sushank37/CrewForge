@@ -102,11 +102,22 @@ async def test_google_and_verified_email_auth_cookies_csrf_and_privacy(tmp_path:
             json={"id_token": "valid-google-token-alice"},
         )
         assert login_resp.status_code == 200
-        login_data = login_resp.json()
+        # New Google registration requires Email OTP verification before activation!
+        assert login_resp.json()["authenticated"] is False
+        assert login_resp.json()["requires_email_verification"] is True
+        assert "crewforge_session=" not in "; ".join(login_resp.headers.get_list("set-cookie"))
+
+        verify_google = await dev1.post(
+            "/api/auth/email/verify",
+            headers=remote_headers,
+            json={"email": "alice@example.com", "code": sent_codes["alice@example.com"]},
+        )
+        assert verify_google.status_code == 200
+        login_data = verify_google.json()
         alice_uid = login_data["user"]["user_id"]
         assert alice_uid.startswith("usr_")
         csrf_1 = login_data["csrf_token"]
-        set_cookie_hdr = "; ".join(login_resp.headers.get_list("set-cookie"))
+        set_cookie_hdr = "; ".join(verify_google.headers.get_list("set-cookie"))
         assert "crewforge_session=" in set_cookie_hdr
         assert "HttpOnly" in set_cookie_hdr
         assert "Secure" in set_cookie_hdr
@@ -272,7 +283,14 @@ async def test_email_delivery_requires_config_subject_replacement_blocked_and_ra
             "/api/auth/google", headers=remote_hdrs, json={"id_token": "alice-google-1"}
         )
         assert a_login.status_code == 200
-        a_csrf = a_login.json()["csrf_token"]
+        assert a_login.json()["requires_email_verification"] is True
+        a_act = await browser_a.post(
+            "/api/auth/email/verify",
+            headers=remote_hdrs,
+            json={"email": "alice@example.com", "code": sent_codes["alice@example.com"]},
+        )
+        assert a_act.status_code == 200
+        a_csrf = a_act.json()["csrf_token"]
         a_chat = await browser_a.post(
             "/api/chats",
             headers={**remote_hdrs, "X-CSRF-Token": a_csrf},

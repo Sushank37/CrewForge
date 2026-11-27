@@ -176,7 +176,7 @@ async def verify_google_id_token(
         claims = await raw_claims if inspect.isawaitable(raw_claims) else raw_claims
     else:
         if not client_id:
-            raise ValueError("Google OAuth client ID is not configured on the server.")
+            raise ValueError("Google sign-in is currently unavailable.")
         jwk_client = jwt.PyJWKClient(_GOOGLE_JWKS_URL)
         signing_key = jwk_client.get_signing_key_from_jwt(token)
         claims = jwt.decode(
@@ -229,6 +229,7 @@ class AuthStore:
                     user_id TEXT PRIMARY KEY,
                     email TEXT UNIQUE,
                     email_verified INTEGER NOT NULL DEFAULT 0,
+                    account_activated INTEGER NOT NULL DEFAULT 1,
                     google_sub TEXT UNIQUE,
                     display_name TEXT,
                     created_at TEXT NOT NULL,
@@ -262,6 +263,11 @@ class AuthStore:
                 );
                 """
             )
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "account_activated" not in cols:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN account_activated INTEGER NOT NULL DEFAULT 1"
+                )
             conn.commit()
         finally:
             conn.close()
@@ -272,6 +278,9 @@ class AuthStore:
             "user_id": str(row["user_id"]),
             "email": row["email"],
             "email_verified": bool(row["email_verified"]),
+            "account_activated": bool(row["account_activated"])
+            if "account_activated" in row
+            else True,
             "google_linked": bool(row["google_sub"]),
             "display_name": row["display_name"],
             "created_at": row["created_at"],
@@ -339,9 +348,9 @@ class AuthStore:
                     ).fetchone()
                     if owner_conflict is not None:
                         raise ValueError("Email is already associated with another account.")
+                    activated = bool(row["account_activated"])
                     conn.execute(
-                        "UPDATE users SET email = ?, email_verified = 1, last_login_at = ? "
-                        "WHERE user_id = ?",
+                        "UPDATE users SET email = ?, last_login_at = ? WHERE user_id = ?",
                         (norm_email, now, row["user_id"]),
                     )
                     conn.commit()
@@ -349,7 +358,9 @@ class AuthStore:
                         "SELECT * FROM users WHERE user_id = ?", (row["user_id"],)
                     ).fetchone()
                     assert updated is not None
-                    return self._user_dict(updated)
+                    out = self._user_dict(updated)
+                    out["requires_email_verification"] = not activated
+                    return out
 
                 existing_email = conn.execute(
                     "SELECT * FROM users WHERE email = ?",
@@ -361,9 +372,11 @@ class AuthStore:
                         raise ValueError(
                             "This email is already linked to a different Google account."
                         )
-                    if not bool(existing_email["email_verified"]):
+                    if not bool(existing_email["email_verified"]) or not bool(
+                        existing_email["account_activated"]
+                    ):
                         raise ValueError(
-                            "Cannot link Google sign-in to an unverified email account."
+                            "Please verify your email address before linking Google sign-in."
                         )
                     conn.execute(
                         "UPDATE users SET google_sub = ?, last_login_at = ? WHERE user_id = ?",
@@ -375,13 +388,17 @@ class AuthStore:
                         (existing_email["user_id"],),
                     ).fetchone()
                     assert updated is not None
-                    return self._user_dict(updated)
+                    out = self._user_dict(updated)
+                    out["requires_email_verification"] = False
+                    return out
 
+                # Brand-new Google registration: require email OTP verification before activation
                 user_id = f"usr_{secrets.token_hex(8)}"
                 conn.execute(
                     "INSERT INTO users "
-                    "(user_id, email, email_verified, google_sub, display_name, created_at, "
-                    "last_login_at) VALUES (?, ?, 1, ?, ?, ?, ?)",
+                    "(user_id, email, email_verified, account_activated, google_sub, "
+                    "display_name, created_at, last_login_at) "
+                    "VALUES (?, ?, 0, 0, ?, ?, ?, ?)",
                     (user_id, norm_email, sub, clean_name, now, now),
                 )
                 conn.commit()
@@ -389,7 +406,9 @@ class AuthStore:
                     "SELECT * FROM users WHERE user_id = ?", (user_id,)
                 ).fetchone()
                 assert created is not None
-                return self._user_dict(created)
+                out = self._user_dict(created)
+                out["requires_email_verification"] = True
+                return out
             finally:
                 conn.close()
 
@@ -496,7 +515,8 @@ class AuthStore:
                 ).fetchone()
                 if existing is not None:
                     conn.execute(
-                        "UPDATE users SET email_verified = 1, last_login_at = ? WHERE user_id = ?",
+                        "UPDATE users SET email_verified = 1, account_activated = 1, "
+                        "last_login_at = ? WHERE user_id = ?",
                         (now_iso, existing["user_id"]),
                     )
                     conn.commit()
@@ -510,8 +530,9 @@ class AuthStore:
                 display_name = norm_email.split("@")[0][:80]
                 conn.execute(
                     "INSERT INTO users "
-                    "(user_id, email, email_verified, google_sub, display_name, created_at, "
-                    "last_login_at) VALUES (?, ?, 1, NULL, ?, ?, ?)",
+                    "(user_id, email, email_verified, account_activated, google_sub, "
+                    "display_name, created_at, last_login_at) "
+                    "VALUES (?, ?, 1, 1, NULL, ?, ?, ?)",
                     (user_id, norm_email, display_name, now_iso, now_iso),
                 )
                 conn.commit()
@@ -533,6 +554,9 @@ class AuthStore:
         """Create an HttpOnly browser session bound to a permanent user_id and CSRF token."""
         if not user_id or user_id == "default":
             raise ValueError("Browser sessions cannot bind to the default development workspace.")
+        user = self.get_user(user_id)
+        if user is None or not user.get("account_activated", False):
+            raise ValueError("Account must be verified before starting a session.")
         raw_session = f"cfb_{secrets.token_urlsafe(32)}"
         csrf_token = secrets.token_urlsafe(24)
         now_dt = _utc_now()

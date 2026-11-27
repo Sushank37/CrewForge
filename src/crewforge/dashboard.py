@@ -385,8 +385,17 @@ def create_dashboard_app(
         run_id = request.path_params["run_id"]
         mgr = registry.get_current_session()
         trace_store = ReadOnlyTraceStore(db_path=mgr.db_path)
+        raw_since = request.query_params.get("since_seq")
+        since_seq: int | None = None
+        if raw_since is not None and raw_since.strip():
+            try:
+                since_seq = int(raw_since)
+                if since_seq < 0:
+                    raise ValueError("since_seq must be non-negative")
+            except ValueError:
+                return JSONResponse({"error": "Invalid since_seq parameter."}, status_code=400)
         try:
-            payload = await trace_store.get_run_payload(run_id)
+            payload = await trace_store.get_run_payload(run_id, since_seq=since_seq)
             if payload.get("status") == "running":
                 wait_state = mgr.get_provider_wait_state(run_id)
                 if wait_state:
@@ -570,6 +579,21 @@ def create_dashboard_app(
                 email_verified=claims["email_verified"],
                 display_name=claims.get("name"),
             )
+            if user.get("requires_email_verification"):
+                registry.auth_store.request_email_verification(
+                    user["email"], delivery_fn=email_delivery_fn
+                )
+                return JSONResponse(
+                    {
+                        "authenticated": False,
+                        "requires_email_verification": True,
+                        "email": user["email"],
+                        "message": (
+                            "Please enter the 6-digit verification code sent to your email "
+                            "to activate your new account."
+                        ),
+                    }
+                )
             sess = registry.auth_store.create_browser_session(
                 user_id=user["user_id"], auth_provider="google"
             )
@@ -581,6 +605,21 @@ def create_dashboard_app(
                 }
             )
             return _set_auth_cookies(resp, request, sess)
+        except EmailDeliveryNotConfiguredError:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Email verification is temporarily unavailable, so new account "
+                        "registrations cannot be completed right now."
+                    )
+                },
+                status_code=503,
+            )
+        except EmailDeliveryError:
+            return JSONResponse(
+                {"error": "Unable to send verification email right now. Please try again."},
+                status_code=502,
+            )
         except Exception as exc:
             return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=401)
 
@@ -613,10 +652,21 @@ def create_dashboard_app(
                 email, delivery_fn=email_delivery_fn
             )
             return JSONResponse(res)
-        except EmailDeliveryNotConfiguredError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=503)
-        except EmailDeliveryError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=502)
+        except EmailDeliveryNotConfiguredError:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Email sign-in is temporarily unavailable. "
+                        "Please try again later or contact the administrator."
+                    )
+                },
+                status_code=503,
+            )
+        except EmailDeliveryError:
+            return JSONResponse(
+                {"error": "Unable to send verification email right now. Please try again."},
+                status_code=502,
+            )
         except Exception as exc:
             return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
 

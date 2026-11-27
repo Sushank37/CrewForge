@@ -47,34 +47,86 @@ export const ChatView: React.FC<ChatViewProps> = ({
       setActiveTrace(null);
       return;
     }
+    let cancelled = false;
     api
       .getLiveRun(latestAssistantRunId)
-      .then(setActiveTrace)
+      .then((t) => {
+        if (!cancelled) setActiveTrace(t);
+      })
       .catch(() => {
         /* run row may still be initializing */
       });
+    return () => {
+      cancelled = true;
+    };
   }, [latestAssistantRunId]);
 
   useEffect(() => {
     if (!chatId || !activeRunMsg) return;
-    const timer = setInterval(async () => {
+    let cancelled = false;
+    let timerId: number | undefined;
+    let lastSeq = 0;
+
+    const pollOnce = async () => {
+      if (cancelled) return;
       try {
         const updated = await api.getChat(chatId);
+        if (cancelled) return;
         setChat(updated);
-        if (activeRunMsg.run_id) {
-          const t = await api.getLiveRun(activeRunMsg.run_id).catch(() => null);
-          if (t) setActiveTrace(t);
+        const runId = activeRunMsg.run_id;
+        if (runId) {
+          const delta = await api.getLiveRun(runId, lastSeq).catch(() => null);
+          if (cancelled) return;
+          if (delta) {
+            if (typeof delta.latest_seq === "number" && delta.latest_seq > lastSeq) {
+              lastSeq = delta.latest_seq;
+            }
+            setActiveTrace((prev) => {
+              if (!prev || prev.run_id !== delta.run_id || !delta.incremental) {
+                return delta;
+              }
+              const merged = [...(prev.execution_events || [])];
+              const seen = new Set(
+                merged.map((e) => e.event_id || `${e.seq}:${e.event_type}:${e.actor || ""}`)
+              );
+              for (const ev of delta.execution_events || []) {
+                const k = ev.event_id || `${ev.seq}:${ev.event_type}:${ev.actor || ""}`;
+                if (!seen.has(k)) {
+                  seen.add(k);
+                  merged.push(ev);
+                }
+              }
+              merged.sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0));
+              return { ...delta, execution_events: merged, incremental: false };
+            });
+          }
         }
-        const stillRunning = updated.messages.some((m) => m.role === "assistant" && m.status === "running");
+        const stillRunning = updated.messages.some(
+          (m) => m.role === "assistant" && m.status === "running"
+        );
         if (!stillRunning) {
           onChatUpdated();
+          return;
         }
       } catch {
         /* transient poll ignore */
       }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [chatId, activeRunMsg, onChatUpdated]);
+      if (!cancelled) {
+        timerId = window.setTimeout(() => {
+          void pollOnce();
+        }, 650);
+      }
+    };
+
+    timerId = window.setTimeout(() => {
+      void pollOnce();
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      if (timerId !== undefined) window.clearTimeout(timerId);
+    };
+  }, [chatId, activeRunMsg?.message_id, activeRunMsg?.run_id, onChatUpdated]);
 
   const handleAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;

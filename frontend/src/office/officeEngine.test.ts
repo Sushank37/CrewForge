@@ -6,6 +6,7 @@ import {
   SPECIALIST_DESKS,
   applyTraceToOffice,
   classifyReleaseOutcome,
+  computeOfficeLayout,
   createInitialOfficeState,
   stepOfficeSimulation,
 } from "./officeEngine";
@@ -152,5 +153,58 @@ describe("2D Office Animation Engine (complete recorded run_0edd437ada29 trace)"
     const s1 = applyTraceToOffice(s0, waitingTrace, true, 2000);
     expect(s1.actors.lead.pose).toBe("waiting");
     expect(s1.actors.lead.bubble).toContain("42.5s");
+  });
+
+  it("scales dynamically for >6 specialists without overlapping desks and tracks dependency waiting", () => {
+    const layout8 = computeOfficeLayout(8);
+    expect(layout8.rows).toBe(2);
+    expect(layout8.desks.length).toBe(8);
+    const coords = new Set(layout8.desks.map((d) => `${d.x},${d.y}`));
+    expect(coords.size).toBe(8);
+
+    const roster = Array.from({ length: 8 }, (_, i) => ({
+      agent_id: `agt_s${i + 1}`,
+      role: `Specialist ${i + 1}`,
+    }));
+    const trace8: TracePayload = {
+      run_id: "run_scale_8",
+      mode: "network",
+      status: "running",
+      provider: "openai",
+      model: "gpt-5.4",
+      is_historical_replay: false,
+      roster,
+      tasks: [
+        {
+          task_id: "t1",
+          title: "Primary analysis",
+          assigned_agent_id: "agt_s1",
+          depends_on: [],
+          status: "running",
+        },
+        {
+          task_id: "t2",
+          title: "Dependent synthesis",
+          assigned_agent_id: "agt_s5",
+          depends_on: ["t1"],
+          status: "pending",
+        },
+      ],
+      execution_events: [
+        { seq: 1, event_type: "plan_created", actor: "lead", message: "Planned 8 specialists" },
+        { seq: 2, event_type: "task_started", actor: "agt_s1", message: "Started t1" },
+      ],
+      peer_messages: [],
+      evidence: [],
+      claims: [],
+      review_verdicts: [],
+      tool_executions: [],
+    };
+
+    const sim = applyTraceToOffice(createInitialOfficeState(), trace8, true, 1000);
+    const deskCoords = new Set(roster.map((r) => `${sim.actors[r.agent_id].deskPos.x},${sim.actors[r.agent_id].deskPos.y}`));
+    expect(deskCoords.size).toBe(8);
+    expect(sim.actors.agt_s1.operationalState).toBe("active_inference");
+    expect(sim.actors.agt_s5.operationalState).toBe("dependency_waiting");
   });
 });

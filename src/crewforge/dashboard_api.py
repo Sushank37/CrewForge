@@ -673,9 +673,22 @@ class ReadOnlyTraceStore:
         )
         return normalize_trace_payload(export, is_historical_replay=False)
 
-    async def get_run_payload(self, run_id: str) -> dict[str, Any]:
+    async def get_run_payload(
+        self, run_id: str, *, since_seq: int | None = None
+    ) -> dict[str, Any]:
         """Load and sanitize a single run trace from the read-only demo database."""
-        return await asyncio.to_thread(self._get_run_payload_sync, run_id)
+        payload = await asyncio.to_thread(self._get_run_payload_sync, run_id)
+        events = payload.get("execution_events") or []
+        latest_seq = max((int(e.get("seq", 0)) for e in events), default=0)
+        payload["latest_seq"] = latest_seq
+        if since_seq is not None and since_seq > 0:
+            payload["execution_events"] = [
+                e for e in events if int(e.get("seq", 0)) > since_seq
+            ]
+            payload["incremental"] = True
+        else:
+            payload["incremental"] = False
+        return payload
 
 
 class ReplayStore:

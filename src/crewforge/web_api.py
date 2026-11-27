@@ -95,10 +95,10 @@ class JudgeSettingsUpdate(BaseModel):
     openai_reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     allow_paid_runs: bool | None = None
     max_output_tokens: int | None = Field(default=None, ge=256, le=32768)
-    max_workers: int | None = Field(default=None, ge=1, le=6)
-    max_tasks: int | None = Field(default=None, ge=1, le=8)
-    max_concurrency: int | None = Field(default=None, ge=1, le=6)
-    max_model_calls_per_run: int | None = Field(default=None, ge=1, le=32)
+    max_workers: int | None = Field(default=None, ge=1, le=32)
+    max_tasks: int | None = Field(default=None, ge=1, le=64)
+    max_concurrency: int | None = Field(default=None, ge=1, le=32)
+    max_model_calls_per_run: int | None = Field(default=None, ge=1, le=128)
     max_cost_per_run_usd: float | None = Field(default=None, ge=0.0, le=5.0)
     total_budget_ceiling_usd: float | None = Field(default=None, ge=0.0, le=100.0)
     custom_input_price_per_1m: float | None = Field(default=None, ge=0.0, le=1000.0)

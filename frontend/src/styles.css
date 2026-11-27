@@ -554,3 +554,75 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 
   align-items: center;
   gap: 8px;
 }
+
+/* Scalable Office Controls, Inspector & Live Timeline */
+.office-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.office-controls-left,
+.office-controls-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.office-inspector {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.office-inspector-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.office-inspector-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.state-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.state-active_inference { background: rgba(99, 102, 241, 0.18); color: #818cf8; }
+.state-dependency_waiting { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
+.state-quota_waiting { background: rgba(245, 158, 11, 0.22); color: #fbbf24; }
+.state-reviewing { background: rgba(20, 184, 166, 0.18); color: var(--teal); }
+.state-failed { background: rgba(239, 68, 68, 0.18); color: var(--red); }
+.state-completed { background: rgba(16, 185, 129, 0.18); color: var(--green); }
+.office-timeline {
+  max-height: 125px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  padding: 6px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+}
+.office-timeline-row {
+  display: grid;
+  grid-template-columns: 36px 150px 110px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+.timeline-seq { color: var(--muted); font-family: monospace; }
+.timeline-type { font-weight: 600; color: var(--accent); }
+.timeline-actor { color: var(--teal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-msg { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
