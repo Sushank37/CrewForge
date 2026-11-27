@@ -1,10 +1,39 @@
-# CrewForge — Judge Quickstart
+# CrewForge — Judge Quickstart (SEED Hackathon 2026)
 
-CrewForge is a model-agnostic, self-assembling multi-agent network exposed via **Model Context Protocol (MCP)** (`solve`, `baseline`, `trace`) and observed through **CrewForge Mission Control** (`crewforge-dashboard`).
+CrewForge exposes a **dedicated public, unauthenticated Streamable HTTP MCP endpoint** (`/mcp`) for official SEED Hackathon 2026 judging — judges need **only the public HTTPS URL** (`https://<cloud-host>/mcp`), with **no login, password, API key, token, VPN, tunnel, or IP/country restrictions**.
+
+> **Note:** Previous tunnel/token instructions are superseded for official judging. The separate browser workspace (`crewforge-dashboard`) remains authenticated and isolated from the public evaluation service.
 
 ---
 
-## 1. Prerequisites & Fresh Installation
+## 1. Connect Directly with Only the Public MCP URL
+
+Configure any MCP-compatible client (Claude Desktop, Cursor, ChatGPT MCP connector, MCP Inspector) with:
+
+```json
+{
+  "mcpServers": {
+    "crewforge-public": {
+      "url": "https://<cloud-host>/mcp"
+    }
+  }
+}
+```
+
+### Available Public MCP Tools (6 Tools)
+
+1. `run_task(prompt, reference_documents)` — Enqueue a genuine multi-agent CrewForge task and immediately return `task_id`.
+2. `get_task_status(task_id)` — Poll live execution state (`queued`, `running`, `completed`, `partial`, `failed`, `cancelled`), `progress`, and `current_stage`.
+3. `get_task_result(task_id)` — Retrieve the final `answer`, `sources`, `evidence`, `verification` status, and `unresolved_requirements`.
+4. `get_task_trace(task_id)` — Inspect sanitized `agents`, `assignments`, `messages`, `tool_executions`, `review_decisions`, and `claims_and_evidence_lineage`.
+5. `run_single_agent(prompt, reference_documents)` — Enqueue the equivalent single-agent baseline using the same server-side model and inputs.
+6. `cancel_task(task_id)` — Safely cancel a queued or running task.
+
+> **Privacy Notice:** Anonymous public evaluation tasks submitted to `/mcp` are not private personal workspaces. Do not submit confidential personal data.
+
+---
+
+## 2. Local Prerequisites & Fresh Installation (Optional Local Run)
 
 - **Python:** `3.12` (`>=3.12,<3.13`)
 - **Package manager:** `uv` (`https://docs.astral.sh/uv/`)
@@ -15,16 +44,11 @@ cd CrewForge
 uv sync --python 3.12
 ```
 
----
-
-## 2. Local MCP vs. Remotely Hosted Assistants
-
-- **Local MCP-compatible clients** (e.g., Claude Desktop, Cursor, Antigravity, local MCP Inspector) run on your machine and connect directly to `crewforge-mcp` over **stdio** or `http://127.0.0.1:8000/mcp` (**Streamable HTTP**).
-- **Remotely hosted web assistants** (browser-only chat apps without a local MCP bridge) **cannot** reach `127.0.0.1` on your laptop directly. Do **not** expose an unauthenticated public tunnel to your local MCP server; use a local MCP client or the CLI (`crewforge solve` / `crewforge-dashboard`) instead.
+See [docs/public_cloud_deployment.md](public_cloud_deployment.md) for cloud deployment and external MCP verification steps.
 
 ---
 
-## 3. Recommended Demonstration Configuration (Validated GPT-6 Luna Cloud Profile)
+## 3. Recommended Demonstration Configuration (Local / Self-Hosted)
 
 For live evaluation, use the validated **GPT-6 Luna** cloud reasoning profile. Keep `CREWFORGE_ALLOW_PAID_RUNS=false` permanently in `.env` and pass `CREWFORGE_ALLOW_PAID_RUNS=true` **only** in the temporary `crewforge-mcp` process environment.
 

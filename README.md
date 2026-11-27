@@ -25,7 +25,8 @@ CrewForge is a model-agnostic, self-assembling multi-agent intelligence network 
   - `OpenAIProvider.generate_structured` uses `responses.create` with strict JSON Schema (`to_strict_json_schema`) to capture `provider_response_id`, `response_status`, `incomplete_reason`, `reasoning_tokens`, and `cached_input_tokens` before validation.
   - Failed structured calls with known usage (e.g., `incomplete` at `max_output_tokens`, refusal, or `ValidationError`) reconcile exact cost (`status="reconciled"`, `outcome="failed"`) without incrementing `successful_operations`.
   - Accurate `stages_executed` and `stage_telemetry` reflect persisted work rather than feature flags.
-- **MCP Server (`FastMCP`) & CLI:** Exposes `solve(prompt)`, `baseline(prompt)`, and `trace(run_id)` over `stdio` (`stderr`-only logging) and localhost `streamable-http`.
+- **Public Unauthenticated Evaluation MCP Service (`public_mcp_service.py` / `crewforge-public-mcp`):** Dedicated cloud-ready Streamable HTTP MCP endpoint at `/mcp` (plus `/health`) requiring **only the public HTTPS URL** (no login, token, API key, VPN, or tunnel). Exposes 6 async tools (`run_task`, `get_task_status`, `get_task_result`, `get_task_trace`, `run_single_agent`, `cancel_task`) with durable SQLite job persistence, server-side provider secrets, and complete isolation from private browser accounts. See [docs/public_cloud_deployment.md](docs/public_cloud_deployment.md).
+- **Local / Authenticated MCP Server (`FastMCP`) & CLI:** Exposes `solve(prompt)`, `baseline(prompt)`, and `trace(run_id)` over `stdio` (`stderr`-only logging) and localhost `streamable-http`.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ROADMAP.md](docs/ROADMAP.md) for full details.
 

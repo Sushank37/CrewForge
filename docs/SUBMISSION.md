@@ -43,8 +43,9 @@ flowchart LR
 ## 5. Implemented Capabilities
 
 - Dynamic multi-agent planner, scheduler, peer message bus, targeted claim repair, and Honesty Gate (`src/crewforge/core/`).
-- `FastMCP` server (`crewforge-mcp`) supporting `stdio` and localhost `streamable-http` (`solve`, `baseline`, `trace`).
-- Read-only `crewforge-dashboard` (`127.0.0.1:8765`) with Live Monitor (`mode=ro`), Historical Replay, and Benchmark V2 views.
+- Dedicated unauthenticated public Streamable HTTP MCP service (`crewforge-public-mcp`) exposing async job tools (`run_task`, `get_task_status`, `get_task_result`, `get_task_trace`, `run_single_agent`, `cancel_task`) with production `Dockerfile` ([docs/public_cloud_deployment.md](public_cloud_deployment.md)).
+- `FastMCP` local server (`crewforge-mcp`) supporting `stdio` and localhost `streamable-http` (`solve`, `baseline`, `trace`).
+- Authenticated browser workspace & Mission Control (`crewforge-dashboard`) with Live Monitor, Historical Replay, and Benchmark views.
 - Reproducible blind evaluation harness (`src/crewforge/evaluation/`).
 
 ## 6. Installation, MCP Configuration & Mission Control Startup

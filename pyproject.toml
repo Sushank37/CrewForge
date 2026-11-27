@@ -22,6 +22,7 @@ dev = [
 [project.scripts]
 crewforge = "crewforge.cli:main"
 crewforge-mcp = "crewforge.mcp_server:main"
+crewforge-public-mcp = "crewforge.public_mcp_service:main"
 crewforge-dashboard = "crewforge.dashboard:main"
 
 [build-system]

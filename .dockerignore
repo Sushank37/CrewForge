@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+.crewforge
+frontend/node_modules
+frontend/dist
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests
