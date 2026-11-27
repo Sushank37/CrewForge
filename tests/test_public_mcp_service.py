@@ -692,3 +692,140 @@ async def test_public_mcp_production_openai_provider_network_and_baseline_with_d
     await mgr.shutdown()
 
 
+async def test_public_mcp_idempotency_stable_with_documents_failures_and_restarts(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "idem_docs.db"
+    budget_path = tmp_path / "idem_budget.db"
+    settings = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="fake-public-model",
+        openai_api_key="sk-offline",
+        db_path=db_path,
+        budget_authority_path=budget_path,
+        allow_paid_runs=False,
+        max_cost_per_run_usd=0.0,
+        max_cumulative_cost_usd=0.0,
+    )
+    provider_calls = 0
+
+    def _counting_handler(prompt: str, response_model: Any) -> Any:
+        nonlocal provider_calls
+        provider_calls += 1
+        return _scripted_handler(prompt, response_model)
+
+    mgr = PublicJobManager(
+        settings=settings,
+        db_path=db_path,
+        budget_db_path=budget_path,
+        provider_factory=lambda s: FakeProvider(
+            handler=_counting_handler,
+            provider_name="fake-public",
+            model_name=s.model,
+            delay_seconds=0.05,
+        ),
+    )
+
+    docs = [{"title": "Policy", "content": "Budget cap is 420 USD."}]
+    first = await mgr.enqueue_task(
+        prompt="Verify policy.",
+        reference_documents=docs,
+        mode="network",
+        idempotency_key="doc-idem-1",
+    )
+    assert first["accepted"] is True
+    assert first["deduplicated"] is False
+
+    # Wait briefly so retrieved_at timestamp would differ, then submit identical docs
+    await asyncio.sleep(0.02)
+    second = await mgr.enqueue_task(
+        prompt="Verify policy.",
+        reference_documents=[{"title": "Policy", "content": "Budget cap is 420 USD."}],
+        mode="network",
+        idempotency_key="doc-idem-1",
+    )
+    assert second["accepted"] is True
+    assert second["deduplicated"] is True
+    assert second["task_id"] == first["task_id"]
+
+    # Changed document content with same idempotency_key must conflict
+    changed = await mgr.enqueue_task(
+        prompt="Verify policy.",
+        reference_documents=[{"title": "Policy", "content": "Budget cap is 999 USD."}],
+        mode="network",
+        idempotency_key="doc-idem-1",
+    )
+    assert changed["accepted"] is False
+    assert changed["error_code"] == "idempotency_conflict"
+
+    for _ in range(40):
+        st = await mgr.get_task_status(first["task_id"])
+        if st["status"] in {"completed", "partial", "failed"}:
+            break
+        await asyncio.sleep(0.05)
+    calls_after_first = provider_calls
+    await mgr.shutdown()
+
+    # Simulate a failed/interrupted job in SQLite (including legacy hash with retrieved_at)
+    legacy_docs_json = json.dumps(
+        [
+            {
+                "doc_id": "doc_1",
+                "title": "Doc",
+                "content": "Legacy content",
+                "source_ref": "doc_1",
+                "reliability": "medium",
+                "retrieved_at": "2026-01-01T00:00:00Z",
+            }
+        ]
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO public_jobs (
+                task_id, mode, status, prompt, reference_documents_json,
+                idempotency_key, request_hash,
+                current_stage, progress, provider, model,
+                result_json, error, created_at, updated_at, completed_at
+            ) VALUES (
+                'tsk_pub_legacy_running', 'network', 'running', 'Legacy prompt',
+                ?, 'legacy-idem-1', 'old_hash_with_retrieved_at',
+                'specialist_execution', 0.4, 'openai', 'fake-public-model',
+                NULL, NULL, '2026-11-27T00:00:00Z', '2026-11-27T00:00:00Z', NULL
+            )
+            """,
+            (legacy_docs_json,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Restart marks interrupted job failed; repeated request returns existing failed task
+    # without triggering duplicate inference!
+    mgr_restarted = PublicJobManager(
+        settings=settings,
+        db_path=db_path,
+        budget_db_path=budget_path,
+        provider_factory=lambda s: FakeProvider(
+            handler=_counting_handler,
+            provider_name="fake-public",
+            model_name=s.model,
+        ),
+    )
+    retry_after_restart = await mgr_restarted.enqueue_task(
+        prompt="Legacy prompt",
+        reference_documents=[{"title": "Doc", "content": "Legacy content"}],
+        mode="network",
+        idempotency_key="legacy-idem-1",
+    )
+    assert retry_after_restart["accepted"] is True
+    assert retry_after_restart["deduplicated"] is True
+    assert retry_after_restart["task_id"] == "tsk_pub_legacy_running"
+    assert retry_after_restart["status"] == "failed"
+    assert provider_calls == calls_after_first
+    await mgr_restarted.shutdown()
+
+
+

@@ -60,6 +60,61 @@ def _enum_val(val: Any) -> str:
     return str(val.value if hasattr(val, "value") else val)
 
 
+def _compute_stable_request_hash(
+    mode: str,
+    prompt: str,
+    docs: list[ReferenceDocument],
+) -> str:
+    """Compute a deterministic hash from normalized inputs, excluding generated timestamps."""
+    stable_docs = [
+        {
+            "doc_id": d.doc_id,
+            "title": d.title,
+            "content": d.content,
+            "source_ref": d.source_ref,
+            "reliability": _enum_val(d.reliability),
+        }
+        for d in docs
+    ]
+    payload = json.dumps(
+        {"mode": mode, "prompt": prompt, "documents": stable_docs},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _legacy_row_matches_hash(existing: sqlite3.Row, mode: str, req_hash: str) -> bool:
+    """Check legacy persisted jobs whose request_hash may have included retrieved_at."""
+    if existing["request_hash"] == req_hash:
+        return True
+    try:
+        raw_docs = json.loads(str(existing["reference_documents_json"] or "[]"))
+        stable_docs = [
+            {
+                "doc_id": str(d.get("doc_id") or ""),
+                "title": str(d.get("title") or ""),
+                "content": str(d.get("content") or ""),
+                "source_ref": str(d.get("source_ref") or ""),
+                "reliability": str(d.get("reliability") or "medium"),
+            }
+            for d in raw_docs
+            if isinstance(d, dict)
+        ]
+        legacy_payload = json.dumps(
+            {
+                "mode": mode,
+                "prompt": str(existing["prompt"] or ""),
+                "documents": stable_docs,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(legacy_payload.encode()).hexdigest() == req_hash
+    except Exception:
+        return False
+
+
 def _normalize_reference_documents(
     raw_docs: list[dict[str, Any] | str] | None,
 ) -> list[ReferenceDocument]:
@@ -340,9 +395,7 @@ class PublicJobManager:
                 raise ValueError("idempotency_key exceeds 128 character limit.")
         docs = _normalize_reference_documents(reference_documents)
         docs_json = json.dumps([d.model_dump(mode="json") for d in docs])
-        req_hash = hashlib.sha256(
-            f"{mode}:{cleaned_prompt}:{docs_json}".encode()
-        ).hexdigest()
+        req_hash = _compute_stable_request_hash(mode, cleaned_prompt, docs)
         task_id = f"tsk_pub_{secrets.token_hex(16)}"
         now = _utc_iso()
         provider_name = self.settings.provider.value
@@ -357,7 +410,7 @@ class PublicJobManager:
                         (mode, cleaned_idem),
                     ).fetchone()
                     if existing is not None:
-                        if existing["request_hash"] != req_hash:
+                        if not _legacy_row_matches_hash(existing, mode, req_hash):
                             return {
                                 "accepted": False,
                                 "retryable": False,
@@ -366,24 +419,19 @@ class PublicJobManager:
                                     "idempotency_key was already used with different task inputs."
                                 ),
                             }
-                        if existing["status"] in {"queued", "running", "completed", "partial"}:
-                            return {
-                                "accepted": True,
-                                "deduplicated": True,
-                                "task_id": existing["task_id"],
-                                "status": existing["status"],
-                                "mode": mode,
-                                "provider": existing["provider"],
-                                "model": existing["model"],
-                                "notice": (
-                                    "Existing task returned for idempotency_key; duplicate "
-                                    "execution prevented."
-                                ),
-                            }
-                        conn.execute(
-                            "UPDATE public_jobs SET idempotency_key = NULL WHERE task_id = ?",
-                            (existing["task_id"],),
-                        )
+                        return {
+                            "accepted": True,
+                            "deduplicated": True,
+                            "task_id": existing["task_id"],
+                            "status": existing["status"],
+                            "mode": mode,
+                            "provider": existing["provider"],
+                            "model": existing["model"],
+                            "notice": (
+                                "Existing task returned for idempotency_key; duplicate "
+                                "execution prevented."
+                            ),
+                        }
 
                 active_row = conn.execute(
                     "SELECT COUNT(*) AS cnt FROM public_jobs WHERE status IN ('queued', 'running')"
@@ -558,10 +606,11 @@ class PublicJobManager:
             )
         except Exception as exc:
             safe_err = sanitize_error_message(str(exc))
-            logger.exception(
-                "Unhandled error in public task %s (mode=%s): %s",
+            logger.error(
+                "Unhandled error in public task %s (mode=%s, exc_type=%s): %s",
                 task_id,
                 mode,
+                type(exc).__name__,
                 safe_err,
             )
             self._update_job(
