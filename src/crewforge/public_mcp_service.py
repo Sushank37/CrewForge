@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -19,9 +20,11 @@ from typing import Any, Literal
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from crewforge.config import (
@@ -43,6 +46,7 @@ logger = logging.getLogger("crewforge.public_mcp")
 _MAX_PROMPT_CHARS = 32_000
 _MAX_REFERENCE_DOCS = 20
 _MAX_TOTAL_DOC_CHARS = 200_000
+_MAX_PUBLIC_REQUEST_BYTES = 512 * 1024
 _TERMINAL_STATUSES = frozenset({"completed", "partial", "failed", "cancelled"})
 
 
@@ -132,6 +136,7 @@ class PublicJobManager:
         budget_db_path: str | Path | None = None,
         provider_factory: Callable[[CrewForgeSettings], ModelProvider] | None = None,
         max_concurrent_jobs: int | None = None,
+        max_pending_jobs: int | None = None,
     ) -> None:
         base_settings = settings or CrewForgeSettings()
         resolved_db = Path(
@@ -165,6 +170,12 @@ class PublicJobManager:
             else int(os.environ.get("CREWFORGE_PUBLIC_MAX_CONCURRENT_JOBS", "4"))
         )
         self._max_concurrent_jobs = max(1, min(16, int(raw_conc)))
+        raw_pend = (
+            max_pending_jobs
+            if max_pending_jobs is not None
+            else int(os.environ.get("CREWFORGE_PUBLIC_MAX_PENDING_JOBS", "12"))
+        )
+        self._max_pending_jobs = max(1, min(100, int(raw_pend)))
         self._semaphore: asyncio.Semaphore | None = None
         self._lock = threading.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -189,6 +200,8 @@ class PublicJobManager:
                     status TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     reference_documents_json TEXT NOT NULL,
+                    idempotency_key TEXT,
+                    request_hash TEXT,
                     current_stage TEXT NOT NULL,
                     progress REAL NOT NULL,
                     provider TEXT NOT NULL,
@@ -199,6 +212,21 @@ class PublicJobManager:
                     updated_at TEXT NOT NULL,
                     completed_at TEXT
                 )
+                """
+            )
+            cols = {
+                str(r["name"])
+                for r in conn.execute("PRAGMA table_info(public_jobs)").fetchall()
+            }
+            if "idempotency_key" not in cols:
+                conn.execute("ALTER TABLE public_jobs ADD COLUMN idempotency_key TEXT")
+            if "request_hash" not in cols:
+                conn.execute("ALTER TABLE public_jobs ADD COLUMN request_hash TEXT")
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_public_jobs_idempotency
+                ON public_jobs (mode, idempotency_key)
+                WHERE idempotency_key IS NOT NULL
                 """
             )
             conn.commit()
@@ -286,6 +314,7 @@ class PublicJobManager:
         prompt: str,
         reference_documents: list[dict[str, Any] | str] | None = None,
         mode: Literal["network", "baseline"],
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Validate inputs, persist a queued job, launch background execution, and return ID."""
         cleaned_prompt = (prompt or "").strip()
@@ -293,7 +322,16 @@ class PublicJobManager:
             raise ValueError("prompt must be a non-empty string.")
         if len(cleaned_prompt) > _MAX_PROMPT_CHARS:
             raise ValueError(f"prompt exceeds {_MAX_PROMPT_CHARS} character limit.")
+        cleaned_idem: str | None = None
+        if idempotency_key is not None and idempotency_key.strip():
+            cleaned_idem = idempotency_key.strip()
+            if len(cleaned_idem) > 128:
+                raise ValueError("idempotency_key exceeds 128 character limit.")
         docs = _normalize_reference_documents(reference_documents)
+        docs_json = json.dumps([d.model_dump(mode="json") for d in docs])
+        req_hash = hashlib.sha256(
+            f"{mode}:{cleaned_prompt}:{docs_json}".encode()
+        ).hexdigest()
         task_id = f"tsk_pub_{secrets.token_hex(16)}"
         now = _utc_iso()
         provider_name = self.settings.provider.value
@@ -302,19 +340,77 @@ class PublicJobManager:
         with self._lock:
             conn = self._connect()
             try:
+                if cleaned_idem is not None:
+                    existing = conn.execute(
+                        "SELECT * FROM public_jobs WHERE mode = ? AND idempotency_key = ?",
+                        (mode, cleaned_idem),
+                    ).fetchone()
+                    if existing is not None:
+                        if existing["request_hash"] != req_hash:
+                            return {
+                                "accepted": False,
+                                "retryable": False,
+                                "error_code": "idempotency_conflict",
+                                "message": (
+                                    "idempotency_key was already used with different task inputs."
+                                ),
+                            }
+                        if existing["status"] in {"queued", "running", "completed", "partial"}:
+                            return {
+                                "accepted": True,
+                                "deduplicated": True,
+                                "task_id": existing["task_id"],
+                                "status": existing["status"],
+                                "mode": mode,
+                                "provider": existing["provider"],
+                                "model": existing["model"],
+                                "notice": (
+                                    "Existing task returned for idempotency_key; duplicate "
+                                    "execution prevented."
+                                ),
+                            }
+                        conn.execute(
+                            "UPDATE public_jobs SET idempotency_key = NULL WHERE task_id = ?",
+                            (existing["task_id"],),
+                        )
+
+                active_row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM public_jobs WHERE status IN ('queued', 'running')"
+                ).fetchone()
+                active_cnt = int(active_row["cnt"]) if active_row is not None else 0
+                if active_cnt >= self._max_pending_jobs:
+                    return {
+                        "accepted": False,
+                        "retryable": True,
+                        "error_code": "capacity_exhausted",
+                        "status": "rejected_capacity",
+                        "retry_after_seconds": 15,
+                        "active_jobs": active_cnt,
+                        "max_pending_jobs": self._max_pending_jobs,
+                        "message": (
+                            "Public evaluation queue is temporarily at capacity. "
+                            "Please retry shortly."
+                        ),
+                    }
+
                 conn.execute(
                     """
                     INSERT INTO public_jobs (
                         task_id, mode, status, prompt, reference_documents_json,
+                        idempotency_key, request_hash,
                         current_stage, progress, provider, model,
                         result_json, error, created_at, updated_at, completed_at
-                    ) VALUES (?, ?, 'queued', ?, ?, 'queued', 0.0, ?, ?, NULL, NULL, ?, ?, NULL)
+                    ) VALUES (
+                        ?, ?, 'queued', ?, ?, ?, ?, 'queued', 0.0, ?, ?, NULL, NULL, ?, ?, NULL
+                    )
                     """,
                     (
                         task_id,
                         mode,
                         cleaned_prompt,
-                        json.dumps([d.model_dump(mode="json") for d in docs]),
+                        docs_json,
+                        cleaned_idem,
+                        req_hash,
                         provider_name,
                         model_name,
                         now,
@@ -329,6 +425,8 @@ class PublicJobManager:
         self._tasks[task_id] = bg
         bg.add_done_callback(lambda _t: self._tasks.pop(task_id, None))
         return {
+            "accepted": True,
+            "deduplicated": False,
             "task_id": task_id,
             "status": "queued",
             "mode": mode,
@@ -486,8 +584,16 @@ class PublicJobManager:
         else:
             gate = trace.honesty_gate
             v_sum = run_res.verification
+            verification_occurred = gate is not None and (
+                len(trace.review_verdicts) > 0
+                or (
+                    v_sum is not None
+                    and v_sum.material_claim_count > 0
+                    and v_sum.review_completeness is not None
+                )
+            )
             verification_info = {
-                "independent_verification_performed": True,
+                "independent_verification_performed": verification_occurred,
                 "honesty_gate_passed": v_sum.honesty_gate_passed if v_sum else False,
                 "release_mode": gate.release_mode if gate else "unknown",
                 "execution_completed": v_sum.execution_completed if v_sum else False,
@@ -594,7 +700,11 @@ class PublicJobManager:
             "answer": "",
             "sources": [],
             "evidence": [],
-            "verification": None,
+            "verification": {
+                "independent_verification_performed": False,
+                "honesty_gate_passed": None,
+                "release_mode": "not_executed",
+            },
             "unresolved_requirements": [],
             "error": row["error"],
         }
@@ -605,12 +715,35 @@ class PublicJobManager:
         if row is None:
             return {"found": False, "task_id": task_id, "error": "Task not found."}
 
+        trace = None
         db = Database(self.db_path)
         try:
             await db.initialize()
             trace = await db.get_run_trace(row["task_id"])
+        except Exception:
+            trace = None
         finally:
             await db.close()
+
+        if trace is None:
+            return {
+                "found": True,
+                "trace_available": False,
+                "task_id": row["task_id"],
+                "mode": row["mode"],
+                "status": row["status"],
+                "current_stage": row["current_stage"],
+                "agents": [],
+                "assignments": [],
+                "messages": [],
+                "tool_executions": [],
+                "review_decisions": [],
+                "claims_and_evidence_lineage": [],
+                "honesty_gate": None,
+                "events": [],
+                "error": row["error"],
+                "notice": "Anonymous public evaluation task — not a private personal workspace.",
+            }
 
         plan = trace.plan
         agents = (
@@ -786,6 +919,7 @@ def create_public_mcp_server(job_manager: PublicJobManager) -> FastMCP:
     mcp = FastMCP(
         name="crewforge-public",
         streamable_http_path="/mcp",
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
     @mcp.tool(
@@ -799,12 +933,14 @@ def create_public_mcp_server(job_manager: PublicJobManager) -> FastMCP:
     async def run_task(
         prompt: str,
         reference_documents: list[dict[str, Any] | str] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Submit a task to the CrewForge multi-agent network and return task_id immediately."""
         return await job_manager.enqueue_task(
             prompt=prompt,
             reference_documents=reference_documents,
             mode="network",
+            idempotency_key=idempotency_key,
         )
 
     @mcp.tool(
@@ -849,12 +985,14 @@ def create_public_mcp_server(job_manager: PublicJobManager) -> FastMCP:
     async def run_single_agent(
         prompt: str,
         reference_documents: list[dict[str, Any] | str] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Submit a task to the single-agent baseline and return task_id immediately."""
         return await job_manager.enqueue_task(
             prompt=prompt,
             reference_documents=reference_documents,
             mode="baseline",
+            idempotency_key=idempotency_key,
         )
 
     @mcp.tool(
@@ -867,6 +1005,30 @@ def create_public_mcp_server(job_manager: PublicJobManager) -> FastMCP:
     return mcp
 
 
+class _PublicRequestLimitMiddleware(BaseHTTPMiddleware):
+    """Enforce request payload size limits without restricting Host or requiring auth."""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > _MAX_PUBLIC_REQUEST_BYTES:
+                    return JSONResponse(
+                        {"error": "Request body exceeds 512 KB limit.", "retryable": False},
+                        status_code=413,
+                    )
+            except ValueError:
+                return JSONResponse({"error": "Invalid Content-Length header."}, status_code=400)
+        if request.method in ("POST", "PUT", "PATCH"):
+            body = await request.body()
+            if len(body) > _MAX_PUBLIC_REQUEST_BYTES:
+                return JSONResponse(
+                    {"error": "Request body exceeds 512 KB limit.", "retryable": False},
+                    status_code=413,
+                )
+        return await call_next(request)
+
+
 def create_public_mcp_app(
     *,
     settings: CrewForgeSettings | None = None,
@@ -874,6 +1036,7 @@ def create_public_mcp_app(
     budget_db_path: str | Path | None = None,
     provider_factory: Callable[[CrewForgeSettings], ModelProvider] | None = None,
     max_concurrent_jobs: int | None = None,
+    max_pending_jobs: int | None = None,
 ) -> Starlette:
     """Create the standalone public unauthenticated Streamable HTTP MCP ASGI app."""
     job_manager = PublicJobManager(
@@ -882,6 +1045,7 @@ def create_public_mcp_app(
         budget_db_path=budget_db_path,
         provider_factory=provider_factory,
         max_concurrent_jobs=max_concurrent_jobs,
+        max_pending_jobs=max_pending_jobs,
     )
     mcp = create_public_mcp_server(job_manager)
     mcp_http_app = mcp.streamable_http_app()
@@ -902,6 +1066,7 @@ def create_public_mcp_app(
                 "provider": job_manager.settings.provider.value,
                 "model": job_manager.settings.model,
                 "active_jobs": job_manager.active_job_count(),
+                "max_pending_jobs": job_manager._max_pending_jobs,
                 "notice": (
                     "Public unauthenticated evaluation endpoint. Anonymous evaluation tasks "
                     "are not private personal workspaces."
@@ -916,6 +1081,7 @@ def create_public_mcp_app(
         ],
         lifespan=_lifespan,
     )
+    app.add_middleware(_PublicRequestLimitMiddleware)
     app.state.job_manager = job_manager
     return app
 

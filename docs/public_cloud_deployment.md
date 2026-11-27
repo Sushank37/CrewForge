@@ -9,8 +9,10 @@ This guide covers deploying the dedicated **unauthenticated public evaluation MC
 ## 1. Architecture & Isolation
 
 - **Endpoint:** `https://<your-cloud-host>/mcp` (Streamable HTTP) and `https://<your-cloud-host>/health`
+- **Single Replica + Persistent Storage:** Deploy as **1 replica (`replicas = 1`)** with a persistent volume mounted at `/data` so SQLite WAL job/budget state and in-memory background tasks stay consistent without cross-replica split-brain.
 - **No Judge Auth Required:** Judges connect using only the public HTTPS URL.
 - **Anonymous Public Evaluation Notice:** Evaluation tasks submitted to `/mcp` are not private personal workspaces. Do not submit confidential personal data.
+- **Resource & Queue Bounds:** Requests are capped at `512 KB`, prompts at `32,000` chars, reference documents at `20` docs / `200,000` chars, concurrent jobs via `CREWFORGE_PUBLIC_MAX_CONCURRENT_JOBS` (default `4`), and pending queue size via `CREWFORGE_PUBLIC_MAX_PENDING_JOBS` (default `12`, returning retryable `capacity_exhausted` errors when full). Both `run_task` and `run_single_agent` support optional `idempotency_key`.
 - **Server-Side Inference & Budget Protection:**
   - Model provider, model name, API key, and spending caps are configured **only** via server-side environment secrets.
   - Callers cannot supply arbitrary `openai_base_url` / `ollama_base_url` endpoints or access private networks.

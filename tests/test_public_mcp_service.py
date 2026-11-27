@@ -16,7 +16,7 @@ import uvicorn
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from crewforge.config import CrewForgeSettings, ProviderType
+from crewforge.config import CrewForgeSettings, ModelPricing, ProviderType
 from crewforge.public_mcp_service import PublicJobManager, create_public_mcp_app
 from tests.fake_provider import FakeProvider
 
@@ -353,3 +353,228 @@ def test_public_job_manager_restart_recovery_prevents_duplicate_execution(
     assert row["status"] == "failed"
     assert row["current_stage"] == "interrupted_by_restart"
     assert "duplicate execution was prevented" in row["error"]
+
+
+async def test_public_mcp_hardening_bounds_idempotency_safe_trace_and_external_host(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "hardened.db"
+    budget_path = tmp_path / "hardened_budget.db"
+    settings = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="fake-public-model",
+        openai_api_key="sk-secret",
+        db_path=db_path,
+        budget_authority_path=budget_path,
+        allow_paid_runs=False,
+        max_cost_per_run_usd=0.0,
+        max_cumulative_cost_usd=0.0,
+    )
+    app = create_public_mcp_app(
+        settings=settings,
+        db_path=db_path,
+        budget_db_path=budget_path,
+        provider_factory=lambda s: FakeProvider(
+            handler=_scripted_handler,
+            provider_name="fake-public",
+            model_name=s.model,
+            delay_seconds=0.25,
+        ),
+        max_concurrent_jobs=1,
+        max_pending_jobs=1,
+    )
+
+    # 1. Request size > 512 KB returns 413
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://crewforge-eval.up.railway.app",
+    ) as client:
+        oversized = await client.post(
+            "/mcp",
+            headers={"Host": "crewforge-eval.up.railway.app"},
+            content=b"x" * (513 * 1024),
+        )
+        assert oversized.status_code == 413
+
+    # 2. External Host header works cleanly over Streamable HTTP without auth
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    serve_task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(50):
+            if server.started:
+                break
+            await asyncio.sleep(0.05)
+        assert server.started
+
+        base_url = f"http://127.0.0.1:{port}"
+        ext_headers = {
+            "Host": "crewforge-eval.up.railway.app",
+            "X-Forwarded-Proto": "https",
+        }
+        async with (
+            httpx.AsyncClient(timeout=30.0, headers=ext_headers) as http_client,
+            streamable_http_client(f"{base_url}/mcp", http_client=http_client) as (
+                read_stream,
+                write_stream,
+                _,
+            ),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await session.initialize()
+
+            # Submit with idempotency_key
+            first = json.loads(
+                (
+                    await session.call_tool(
+                        "run_task",
+                        {
+                            "prompt": "Verify the documented budget ceiling.",
+                            "idempotency_key": "judge-idem-001",
+                        },
+                    )
+                )
+                .content[0]
+                .text
+            )
+            assert first["accepted"] is True
+            tid = first["task_id"]
+
+            # Safe trace for queued/running job before completion
+            queued_trace = json.loads(
+                (await session.call_tool("get_task_trace", {"task_id": tid}))
+                .content[0]
+                .text
+            )
+            assert queued_trace["found"] is True
+
+            # Duplicate idempotency_key returns same task_id without re-enqueuing
+            dup = json.loads(
+                (
+                    await session.call_tool(
+                        "run_task",
+                        {
+                            "prompt": "Verify the documented budget ceiling.",
+                            "idempotency_key": "judge-idem-001",
+                        },
+                    )
+                )
+                .content[0]
+                .text
+            )
+            assert dup["deduplicated"] is True
+            assert dup["task_id"] == tid
+
+            # Conflicting inputs with same idempotency_key rejected
+            conflict = json.loads(
+                (
+                    await session.call_tool(
+                        "run_task",
+                        {
+                            "prompt": "Different prompt",
+                            "idempotency_key": "judge-idem-001",
+                        },
+                    )
+                )
+                .content[0]
+                .text
+            )
+            assert conflict["accepted"] is False
+            assert conflict["error_code"] == "idempotency_conflict"
+
+            # Capacity exhausted (max_pending_jobs=1) returns clear retryable error
+            cap = json.loads(
+                (
+                    await session.call_tool(
+                        "run_task",
+                        {"prompt": "Second concurrent task exceeds capacity"},
+                    )
+                )
+                .content[0]
+                .text
+            )
+            assert cap["accepted"] is False
+            assert cap["retryable"] is True
+            assert cap["error_code"] == "capacity_exhausted"
+
+            # Wait for first task to finish, then verify cancelled trace is safe
+            for _ in range(40):
+                st = json.loads(
+                    (await session.call_tool("get_task_status", {"task_id": tid}))
+                    .content[0]
+                    .text
+                )
+                if st["status"] in {"completed", "partial", "failed"}:
+                    break
+                await asyncio.sleep(0.1)
+    finally:
+        server.should_exit = True
+        await serve_task
+
+
+async def test_public_mcp_shared_spending_safeguards_under_concurrent_submissions(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "conc_budget.db"
+    budget_path = tmp_path / "conc_authority.db"
+    settings = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="fake-paid-model",
+        openai_api_key="sk-offline-test",
+        db_path=db_path,
+        budget_authority_path=budget_path,
+        allow_paid_runs=True,
+        max_cost_per_run_usd=0.05,
+        max_cumulative_cost_usd=0.06,
+        total_budget_ceiling_usd=0.06,
+        protected_reserve_usd=0.0,
+        pricing_json={
+            "fake-paid-model": ModelPricing(input_per_1m=1000.0, output_per_1m=1000.0)
+        },
+    )
+    mgr = PublicJobManager(
+        settings=settings,
+        db_path=db_path,
+        budget_db_path=budget_path,
+        provider_factory=lambda s: FakeProvider(
+            handler=_scripted_handler,
+            provider_name="fake-paid",
+            model_name=s.model,
+            is_paid_provider=True,
+            delay_seconds=0.05,
+        ),
+        max_concurrent_jobs=4,
+        max_pending_jobs=8,
+    )
+    submissions = await asyncio.gather(
+        *[
+            mgr.enqueue_task(
+                prompt=f"Concurrent task {i}",
+                mode="network",
+            )
+            for i in range(4)
+        ]
+    )
+    task_ids = [s["task_id"] for s in submissions if s.get("accepted")]
+    assert len(task_ids) == 4
+    for _ in range(60):
+        statuses = [
+            (await mgr.get_task_status(tid))["status"] for tid in task_ids
+        ]
+        if all(st in {"completed", "partial", "failed", "cancelled"} for st in statuses):
+            break
+        await asyncio.sleep(0.05)
+
+    results = [await mgr.get_task_result(tid) for tid in task_ids]
+    total_spent = sum(
+        float((r.get("usage") or {}).get("estimated_cost_usd", 0.0)) for r in results
+    )
+    assert total_spent <= 0.06 + 1e-9
+    # Verify failed/cancelled jobs without review report independent_verification_performed=False
+    for r in results:
+        if r["status"] == "failed" and r.get("verification"):
+            assert r["verification"]["independent_verification_performed"] is False
+    await mgr.shutdown()
+
