@@ -578,3 +578,117 @@ async def test_public_mcp_shared_spending_safeguards_under_concurrent_submission
             assert r["verification"]["independent_verification_performed"] is False
     await mgr.shutdown()
 
+
+async def test_public_mcp_production_openai_provider_network_and_baseline_with_default_pricing(
+    tmp_path: Path,
+) -> None:
+    """Reproduce Railway cloud profile + adaptive capacity + DEFAULT_MODEL_PRICING."""
+    from types import SimpleNamespace
+
+    from crewforge.providers.openai_provider import OpenAIProvider
+
+    class _FakeResponses:
+        async def create(self, **kwargs: Any) -> Any:
+            schema_name = (
+                kwargs.get("text", {}).get("format", {}).get("name", "")
+                if isinstance(kwargs.get("text"), dict)
+                else ""
+            )
+            prompt = str(kwargs.get("input", ""))
+            if schema_name in {"ExecutionPlan", "PlannerOutput"}:
+                payload = _scripted_handler(prompt, type("PlannerOutput", (), {}))
+            elif schema_name in {"WorkerOutput", "SpecialistOutput"}:
+                payload = _scripted_handler(prompt, type("SpecialistOutput", (), {}))
+            elif schema_name in {"ReviewBatchOutput", "ReviewerBatchOutput"}:
+                payload = _scripted_handler(prompt, type("ReviewerBatchOutput", (), {}))
+            elif schema_name == "SynthesisOutput":
+                payload = _scripted_handler(prompt, type("SynthesisOutput", (), {}))
+            elif schema_name == "BaselineModelOutput":
+                payload = _scripted_handler(prompt, type("BaselineModelOutput", (), {}))
+            elif schema_name == "BaselineCritiqueOutput":
+                payload = _scripted_handler(prompt, type("BaselineCritiqueOutput", (), {}))
+            else:
+                raise AssertionError(f"Unexpected OpenAI schema: {schema_name}")
+            return SimpleNamespace(
+                id="resp_mock_123",
+                status="completed",
+                incomplete_details=None,
+                model="gpt-6-luna",
+                output_text=json.dumps(payload),
+                output=[],
+                usage=SimpleNamespace(
+                    input_tokens=100,
+                    output_tokens=50,
+                    total_tokens=150,
+                    input_tokens_details=SimpleNamespace(cached_tokens=0),
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=10),
+                ),
+            )
+
+    class _FakeAsyncOpenAI:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+        async def close(self) -> None:
+            return None
+
+    db_path = tmp_path / "prod_openai.db"
+    budget_path = tmp_path / "prod_openai_budget.db"
+    # Note: NO explicit pricing_json — relies on DEFAULT_MODEL_PRICING for gpt-6-luna!
+    settings = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="gpt-6-luna",
+        openai_api_key="sk-mocked-only-never-sent",
+        cloud_reasoning_profile=True,
+        allow_paid_runs=True,
+        max_cost_per_run_usd=0.05,
+        max_cumulative_cost_usd=1.0,
+        protected_reserve_usd=0.0,
+        db_path=db_path,
+        budget_authority_path=budget_path,
+    )
+    assert settings.effective_max_workers > 3  # adaptive by default
+
+    mgr = PublicJobManager(
+        settings=settings,
+        db_path=db_path,
+        budget_db_path=budget_path,
+        provider_factory=lambda s: OpenAIProvider(
+            model=s.model,
+            api_key="sk-mocked-only-never-sent",
+            client=_FakeAsyncOpenAI(),  # type: ignore[arg-type]
+            reasoning_effort=s.openai_reasoning_effort,
+            provider_label=s.provider.value,
+        ),
+    )
+
+    net_sub = await mgr.enqueue_task(
+        prompt="Verify the documented budget ceiling.",
+        mode="network",
+    )
+    base_sub = await mgr.enqueue_task(
+        prompt="Verify the documented budget ceiling.",
+        mode="baseline",
+    )
+    for tid in (net_sub["task_id"], base_sub["task_id"]):
+        for _ in range(50):
+            st = await mgr.get_task_status(tid)
+            if st["status"] in {"completed", "partial", "failed"}:
+                break
+            await asyncio.sleep(0.05)
+
+    net_res = await mgr.get_task_result(net_sub["task_id"])
+    base_res = await mgr.get_task_result(base_sub["task_id"])
+    net_trace = await mgr.get_task_trace(net_sub["task_id"])
+
+    assert net_res["status"] in {"completed", "partial"}, net_res.get("error")
+    assert net_res["answer"]
+    assert net_trace["found"] is True
+    assert len(net_trace["agents"]) == 1
+    assert base_res["status"] == "completed", base_res.get("error")
+    assert "420 USD" in base_res["answer"]
+    assert base_res["verification"]["independent_verification_performed"] is False
+    await mgr.shutdown()
+
+

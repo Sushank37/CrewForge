@@ -12,6 +12,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -28,6 +29,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from crewforge.config import (
+    DEFAULT_MODEL_PRICING,
     BudgetAllocationCategory,
     CrewForgeSettings,
     configure_logging,
@@ -152,6 +154,7 @@ class PublicJobManager:
                 str(resolved_db.with_name("public_mcp_budget.db")),
             )
         )
+        merged_pricing = {**DEFAULT_MODEL_PRICING, **base_settings.pricing_json}
         self.settings = base_settings.model_copy(
             update={
                 "db_path": resolved_db,
@@ -159,6 +162,7 @@ class PublicJobManager:
                 "budget_authority_path": resolved_budget_db,
                 "budget_allocation_category": BudgetAllocationCategory.GENERAL,
                 "enable_http_retrieval": False,
+                "pricing_json": merged_pricing,
             }
         )
         self.db_path = resolved_db
@@ -177,9 +181,11 @@ class PublicJobManager:
         )
         self._max_pending_jobs = max(1, min(100, int(raw_pend)))
         self._semaphore: asyncio.Semaphore | None = None
+        self._db_init_lock: asyncio.Lock | None = None
         self._lock = threading.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._init_job_table()
+        Database(self.db_path).initialize_sync()
         self.recover_interrupted_jobs()
 
     def _connect(self) -> sqlite3.Connection:
@@ -303,6 +309,11 @@ class PublicJobManager:
             self._semaphore = asyncio.Semaphore(self._max_concurrent_jobs)
         return self._semaphore
 
+    def _ensure_db_init_lock(self) -> asyncio.Lock:
+        if self._db_init_lock is None:
+            self._db_init_lock = asyncio.Lock()
+        return self._db_init_lock
+
     def _build_provider(self) -> ModelProvider:
         if self._provider_factory is not None:
             return self._provider_factory(self.settings)
@@ -424,6 +435,14 @@ class PublicJobManager:
         bg = asyncio.create_task(self._execute_job(task_id, cleaned_prompt, docs, mode))
         self._tasks[task_id] = bg
         bg.add_done_callback(lambda _t: self._tasks.pop(task_id, None))
+        logger.info(
+            "Enqueued public task %s (mode=%s, provider=%s, model=%s, docs=%d)",
+            task_id,
+            mode,
+            provider_name,
+            model_name,
+            len(docs),
+        )
         return {
             "accepted": True,
             "deduplicated": False,
@@ -448,11 +467,20 @@ class PublicJobManager:
     ) -> None:
         sem = self._ensure_semaphore()
         db: Database | None = None
+        provider: ModelProvider | None = None
+        start_perf = time.perf_counter()
         try:
             async with sem:
                 row = self._get_job_row(task_id)
                 if row is None or row["status"] == "cancelled":
                     return
+                logger.info(
+                    "Starting public task %s (mode=%s, provider=%s, model=%s)",
+                    task_id,
+                    mode,
+                    self.settings.provider.value,
+                    self.settings.model,
+                )
                 self._update_job(
                     task_id,
                     status="running",
@@ -460,7 +488,8 @@ class PublicJobManager:
                     progress=0.05,
                 )
                 db = Database(self.db_path)
-                await db.initialize()
+                async with self._ensure_db_init_lock():
+                    await db.initialize()
                 authority = UnifiedBudgetAuthority(
                     settings=self.settings,
                     migrate_default_dbs=False,
@@ -500,16 +529,27 @@ class PublicJobManager:
 
                 payload = await self._format_result_payload(db, task_id, run_res, docs)
                 final_status = self._map_run_status(run_res.status)
+                safe_err = sanitize_error_message(run_res.error) if run_res.error else None
                 self._update_job(
                     task_id,
                     status=final_status,
                     current_stage="completed" if final_status != "failed" else "failed",
                     progress=1.0,
                     result_json=json.dumps(payload),
-                    error=sanitize_error_message(run_res.error) if run_res.error else None,
+                    error=safe_err,
                     completed_at=_utc_iso(),
                 )
+                elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
+                logger.info(
+                    "Finished public task %s (mode=%s, status=%s, elapsed_ms=%.1f, error=%s)",
+                    task_id,
+                    mode,
+                    final_status,
+                    elapsed_ms,
+                    safe_err or "none",
+                )
         except asyncio.CancelledError:
+            logger.info("Cancelled public task %s (mode=%s)", task_id, mode)
             self._update_job(
                 task_id,
                 status="cancelled",
@@ -517,14 +557,24 @@ class PublicJobManager:
                 completed_at=_utc_iso(),
             )
         except Exception as exc:
+            safe_err = sanitize_error_message(str(exc))
+            logger.exception(
+                "Unhandled error in public task %s (mode=%s): %s",
+                task_id,
+                mode,
+                safe_err,
+            )
             self._update_job(
                 task_id,
                 status="failed",
                 current_stage="failed",
-                error=sanitize_error_message(str(exc)),
+                error=safe_err,
                 completed_at=_utc_iso(),
             )
         finally:
+            if provider is not None and hasattr(provider, "aclose"):
+                with contextlib.suppress(Exception):
+                    await provider.aclose()  # type: ignore[attr-defined]
             if db is not None:
                 with contextlib.suppress(Exception):
                     await db.close()
@@ -617,11 +667,11 @@ class PublicJobManager:
             "sources": list(seen_sources.values()),
             "evidence": evidence_items,
             "verification": verification_info,
-            "unresolved_requirements": list(run_res.incomplete_tasks),
-            "missing_information": list(run_res.missing_information),
-            "assumptions": list(run_res.assumptions),
-            "confidence_notes": list(run_res.confidence_notes),
-            "specialist_roles": list(run_res.specialist_roles),
+            "unresolved_requirements": list(run_res.incomplete_tasks or ()),
+            "missing_information": list(run_res.missing_information or ()),
+            "assumptions": list(run_res.assumptions or ()),
+            "confidence_notes": run_res.confidence_notes,
+            "specialist_roles": list(run_res.specialist_roles or ()),
             "usage": run_res.usage.model_dump(mode="json"),
             "error": sanitize_error_message(run_res.error) if run_res.error else None,
         }
