@@ -14,9 +14,10 @@ from crewforge.core.reviewer import ReviewerPool
 from crewforge.prompts.worker import build_worker_system_prompt
 from crewforge.schemas import (
     AgentSpec,
+    ArithmeticRequest,
+    ArithmeticVariableBinding,
     Claim,
     ClaimStatus,
-    ClaimVersionRef,
     Evidence,
     ExecutionEvent,
     ExecutionPlan,
@@ -26,7 +27,11 @@ from crewforge.schemas import (
     VerificationStatus,
 )
 from crewforge.storage.database import CrossRunReferenceError, Database
-from crewforge.tools.arithmetic import ProvenanceCatalog, build_provenance_catalog
+from crewforge.tools.arithmetic import (
+    ProvenanceCatalog,
+    build_provenance_catalog,
+    provenance_failures,
+)
 
 
 @dataclass
@@ -89,7 +94,9 @@ def _build_revision_prompt(
                 f"computed={rec.computed_result} {rec.units}, "
                 f"inputs_grounded={rec.inputs_grounded}, success={rec.success}, "
                 f"inputs=[{bindings_str}]"
+                + (f" | Tool error: {rec.error}" if rec.error else "")
             )
+            tool_lines.extend(f"    - {failure}" for failure in provenance_failures(rec))
         blocks.append(
             f"Target claim: claim_id={claim.claim_id}, expected_version={claim.version}, "
             f"category={claim.category.value}\n"
@@ -129,8 +136,63 @@ def _build_revision_prompt(
         "objection only concerns citations or wording, set `computation` to null to preserve the "
         "existing verified calculation unless recalculation is necessary. When supplying a new\n"
         "`computation` (`ArithmeticRequest`), use plain numeric strings without currency "
-        "symbols.\n\n"
+        "symbols. Use each failed operand's diagnostic and a verbatim source_quote when the "
+        "alias contains multiple quantities. Derive any subtotal, difference, complement, or "
+        "rate inside the formula or cite the current verified prior calculation. Include operand "
+        "units on bindings and the output unit on the computation. Recompute stale calculations "
+        "from current source values.\n\n"
         + "\n\n".join(blocks)
+    )
+
+
+def _rebind_calculation(
+    claim: Claim,
+    tools: dict[str, ToolExecutionRecord],
+    owners: dict[str, Claim],
+    latest: dict[str, Claim],
+) -> ArithmeticRequest | None:
+    if len(claim.tool_execution_ids) != 1:
+        return None
+    record = tools.get(claim.tool_execution_ids[0])
+    if record is None:
+        return None
+
+    rebound = False
+    bindings = []
+    for name, value in record.variables.items():
+        ref = record.input_provenance_refs.get(name, "")
+        detail = record.provenance_details.get(name, {})
+        quote = detail.get("source_quote")
+        resolved_id = detail.get("resolved_id", "")
+        owner = owners.get(detail.get("source_tool_execution_id") or resolved_id)
+        if detail.get("kind") == "supported_claim":
+            premise_id = resolved_id.partition("@v")[0]
+        else:
+            premise_id = owner.claim_id if owner else ""
+        if premise := latest.get(premise_id):
+            ref = f"{premise.claim_id}@v{premise.version}"
+            quote = None
+            rebound = True
+
+        units = detail.get("units", "")
+        if premise_id and not units:
+            units = detail.get("source_units", "")
+            if units == "%" and detail.get("value") != detail.get("source_value"):
+                units = "ratio"
+        bindings.append(ArithmeticVariableBinding(
+            name=name, value=value, provenance_ref=ref, source_quote=quote, units=units,
+        ))
+
+    if not rebound:
+        return None
+    # Reuse existing operand values and the proposed result as checks. A changed
+    # premise must fail grounding and return to targeted repair with its new value.
+    return ArithmeticRequest(
+        expression=record.expression,
+        variable_bindings=bindings,
+        proposed_result=record.proposed_result,
+        units=record.units,
+        assumptions=record.assumptions,
     )
 
 
@@ -323,6 +385,7 @@ class TargetedRepairEngine:
                     verified_evidence=[e for e in fresh_trace.evidence if e.verified_in_input],
                     all_claims=fresh_trace.claims,
                     tool_records=fresh_trace.tool_executions,
+                    assumptions=plan.assumptions,
                     run_id=run_id,
                 )
                 revision_prompt = _build_revision_prompt(
@@ -406,6 +469,7 @@ class TargetedRepairEngine:
                             additional_evidence_ids=evd_ids,
                             premise_claim_ids=rev.premise_claim_ids or None,
                             computation_request=rev.computation,
+                            plan_assumptions=plan.assumptions,
                             assumptions=rev.assumptions or None,
                             revision_notes=rev.revision_notes,
                             is_unresolved=rev.is_unresolved,
@@ -508,6 +572,11 @@ class TargetedRepairEngine:
             latest_all = await self._db.get_claims_for_run(run_id, latest_only=True)
             latest_by_id = {c.claim_id: c for c in latest_all}
             ready: list[Claim] = []
+            trace = await self._db.get_run_trace(run_id)
+            if trace is None:
+                break
+            tools = {t.tool_execution_id: t for t in trace.tool_executions}
+            owners = {tid: c for c in trace.claims for tid in c.tool_execution_ids}
 
             for claim in latest_all:
                 if not (
@@ -529,35 +598,19 @@ class TargetedRepairEngine:
                 if not all_supported:
                     continue
 
-                refreshed_refs = [
-                    ClaimVersionRef(claim_id=uid, claim_version=latest_by_id[uid].version)
-                    for uid in up_ids
-                ]
-                # Create a new claim version (preserving original v1 premise_refs & review history).
-                new_claim = await self._ledger.revise_claim(
-                    prior_claim=claim,
+                new_claim = await self._ledger.apply_targeted_revision(
+                    run_id=run_id,
+                    target_claim_id=claim.claim_id,
+                    expected_version=claim.version,
                     new_statement=claim.statement,
                     author_agent_id=claim.author_agent_id,
-                    task_id=claim.task_id,
-                    revision_notes=(
-                        "Upstream premises verified; created new version for dependent "
-                        "revalidation."
-                    ),
+                    original_prompt=original_prompt,
+                    premise_claim_ids=up_ids,
+                    computation_request=_rebind_calculation(claim, tools, owners, latest_by_id),
+                    plan_assumptions=plan.assumptions,
+                    revision_notes="Revalidate dependent claim using current premise versions.",
                 )
-                await self._db.refresh_claim_premise_refs(
-                    run_id=run_id,
-                    claim_id=new_claim.claim_id,
-                    version=new_claim.version,
-                    premise_refs=refreshed_refs,
-                )
-                ready.append(
-                    new_claim.model_copy(
-                        update={
-                            "premise_refs": refreshed_refs,
-                            "status": ClaimStatus.ASSERTED,
-                        }
-                    )
-                )
+                ready.append(new_claim)
 
             if not ready:
                 break

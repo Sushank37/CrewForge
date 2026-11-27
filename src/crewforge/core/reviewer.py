@@ -22,6 +22,7 @@ from crewforge.schemas import (
     VerificationStatus,
 )
 from crewforge.storage.database import Database
+from crewforge.tools.arithmetic import arithmetic_lineage_issue, provenance_failures
 
 REVIEWER_EVIDENCE_ID = "reviewer_evidence"
 REVIEWER_NUMBERS_ID = "reviewer_numbers"
@@ -200,6 +201,7 @@ class ReviewerPool:
         evidence_by_id: dict[str, Evidence],
         tool_by_id: dict[str, ToolExecutionRecord],
         latest_by_id: dict[str, Claim],
+        tool_owners: dict[str, Claim] | None = None,
     ) -> tuple[ReviewVerdict | None, ClaimStatus | None, VerificationStatus | None]:
         """Apply zero-cost deterministic checks prior to LLM review."""
         if not claim.is_material:
@@ -310,16 +312,36 @@ class ReviewerPool:
                     review_dimension="numbers",
                     decision=ReviewDecision.NEEDS_REVISION,
                     rationale=(
-                        "Arithmetic expression evaluated, but one or more inputs or inline "
-                        "constants lack valid resolvable provenance in prompt, docs, or claims."
+                        "Arithmetic provenance failed. "
+                        + (" ".join(provenance_failures(ungrounded)) or
+                           "One or more operands lack a valid source.")
                     ),
                     required_correction=(
-                        "Bind every variable and empirical constant to grounded provenance aliases."
+                        "Rebind each failed operand or derive it from verified inputs."
                     ),
                     blocking_severity="blocking",
                     blocking_issues=["Ungrounded arithmetic inputs or inline constants"],
                 )
                 return verdict, ClaimStatus.REJECTED, VerificationStatus.UNSUPPORTED
+
+            for record in records:
+                issue = arithmetic_lineage_issue(
+                    record, tool_by_id, latest_by_id, tool_owners or {},
+                )
+                if issue:
+                    verdict = ReviewVerdict(
+                        run_id=run_id,
+                        claim_id=claim.claim_id,
+                        claim_version=claim.version,
+                        reviewer_id=REVIEWER_NUMBERS_ID,
+                        review_dimension="numbers",
+                        decision=ReviewDecision.NEEDS_REVISION,
+                        rationale=issue,
+                        required_correction="Recompute using the current verified operand sources.",
+                        blocking_severity="blocking",
+                        blocking_issues=["Stale arithmetic provenance"],
+                    )
+                    return verdict, ClaimStatus.REJECTED, VerificationStatus.UNSUPPORTED
 
         if claim.category == ClaimCategory.EXTERNAL_FACT:
             verified_evds = [
@@ -436,6 +458,7 @@ class ReviewerPool:
         latest_by_id = {c.claim_id: c for c in latest_all}
         evidence_by_id = {e.evidence_id: e for e in trace.evidence}
         tool_by_id = {t.tool_execution_id: t for t in trace.tool_executions}
+        tool_owners = {tid: c for c in trace.claims for tid in c.tool_execution_ids}
 
         claims_to_review = (
             [latest_by_id[c.claim_id] for c in target_claims if c.claim_id in latest_by_id]
@@ -457,6 +480,7 @@ class ReviewerPool:
                 evidence_by_id=evidence_by_id,
                 tool_by_id=tool_by_id,
                 latest_by_id=latest_by_id,
+                tool_owners=tool_owners,
             )
             if verdict is not None and next_status is not None and next_ver_status is not None:
                 await self._db.insert_review_verdict(verdict)

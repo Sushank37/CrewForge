@@ -124,6 +124,7 @@ class SpecialistWorker:
             all_claims=all_claims_run,
             tool_records=prior_tools,
             assumptions=plan.assumptions,
+            run_id=run_id,
         )
 
         system_prompt = build_worker_system_prompt(agent)
@@ -179,6 +180,7 @@ class SpecialistWorker:
             dependency_findings_text=dependency_text_blob,
             evidence_proposals=output.evidence_proposals,
             claim_proposals=output.claims,
+            plan_assumptions=plan.assumptions,
         )
         sent_messages = (
             await self._bus.dispatch_instructions(
@@ -269,6 +271,7 @@ class SpecialistWorker:
             dependency_findings_text=f"{prior_findings}\n{inbound_blob}",
             evidence_proposals=followup.evidence_proposals,
             claim_proposals=followup.new_claims,
+            plan_assumptions=plan.assumptions,
         )
 
         updated_claims: list[Claim] = list(new_claims)
@@ -291,6 +294,7 @@ class SpecialistWorker:
                     additional_evidence_ids=evd_ids,
                     premise_claim_ids=rev.premise_claim_ids or None,
                     computation_request=rev.computation,
+                    plan_assumptions=plan.assumptions,
                     assumptions=rev.assumptions or None,
                     revision_notes=rev.revision_notes,
                     is_unresolved=rev.is_unresolved,

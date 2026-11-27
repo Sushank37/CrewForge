@@ -477,6 +477,11 @@ class ArithmeticVariableBinding(BaseModel):
     name: str = Field(min_length=1)
     value: str | int | float
     provenance_ref: str = Field(default="")
+    source_quote: str | None = Field(
+        default=None, max_length=300,
+        description="Verbatim passage within the referenced source identifying this operand.",
+    )
+    units: str = Field(default="", description="Units of this operand, when known.")
 
 
 class ArithmeticRequest(BaseModel):
@@ -485,7 +490,7 @@ class ArithmeticRequest(BaseModel):
     expression: str = Field(min_length=1, max_length=256)
     variable_bindings: list[ArithmeticVariableBinding] = Field(default_factory=list)
     proposed_result: str | int | float | None = None
-    units: str = ""
+    units: str = Field(default="", description="Units of the calculation result.")
     assumptions: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")

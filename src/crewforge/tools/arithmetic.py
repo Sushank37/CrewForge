@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 from crewforge.schemas import (
     ArithmeticRequest,
     Claim,
+    ClaimCategory,
     ClaimStatus,
     Evidence,
     ExecutionEvent,
@@ -31,35 +33,27 @@ _NUMBER_RE = re.compile(
 )
 _WORD_RE = re.compile(r"[a-z]+")
 
-_UNIT_CONFLICT_GROUPS: tuple[frozenset[str], ...] = (
-    frozenset(
-        {
-            "ms",
-            "millisecond",
-            "milliseconds",
-            "sec",
-            "second",
-            "seconds",
-            "min",
-            "minute",
-            "minutes",
-            "hr",
-            "hour",
-            "hours",
-            "day",
-            "days",
-            "month",
-            "months",
-            "yr",
-            "year",
-            "years",
-        }
-    ),
-    frozenset(
-        {"usd", "dollar", "dollars", "inr", "rupee", "rupees", "eur", "euro", "euros", "gbp"}
-    ),
-    frozenset({"%", "percent", "percentage", "point", "points"}),
+_SOURCE_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])[-+−]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)"
+    r"(?:[kKmMbB](?![A-Za-z])|\s*%)?(?![A-Za-z0-9_])"
 )
+_CURRENCY_UNITS = {"$": "usd", "₹": "inr", "€": "eur", "£": "gbp", "¥": "jpy"}
+_FIXED_CONSTANTS = {
+    "zero": Decimal(0),
+    "one": Decimal(1),
+    "percent_scale": Decimal(100),
+    "percentage_scale": Decimal(100),
+    "percent_factor": Decimal(100),
+    "percent_conversion": Decimal(100),
+    "months_per_year": Decimal(12),
+    "hours_per_day": Decimal(24),
+    "minutes_per_hour": Decimal(60),
+    "seconds_per_minute": Decimal(60),
+    "seconds_per_hour": Decimal(3600),
+    "milliseconds_per_second": Decimal(1000),
+}
+_FAIR_COIN = re.compile(r"\bfair(?: and independent)? coins?\b|\bcoins? (?:is|are) fair\b", re.I)
+
 _EXACT_UNIT_NORMALIZATIONS = {
     "ms": "ms",
     "millisecond": "ms",
@@ -83,12 +77,28 @@ _EXACT_UNIT_NORMALIZATIONS = {
     "usd": "usd",
     "dollar": "usd",
     "dollars": "usd",
+    "eur": "eur",
+    "euro": "eur",
+    "euros": "eur",
+    "gbp": "gbp",
+    "jpy": "jpy",
     "inr": "inr",
     "rupee": "inr",
     "rupees": "inr",
     "%": "%",
     "percent": "%",
     "percentage": "%",
+    "point": "points",
+    "points": "points",
+    "gr": "g",
+    "g": "g",
+    "kg": "kg",
+    "gram": "g",
+    "grams": "g",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "ratio": "ratio",
+    "probability": "ratio",
 }
 
 
@@ -111,6 +121,8 @@ class ProvenanceTarget:
     units: str = ""
     is_trusted: bool = True
     rejection_reason: str | None = None
+    numeric_value: Decimal | None = None
+    tool_execution_id: str | None = None
 
 
 @dataclass
@@ -196,8 +208,12 @@ def build_provenance_catalog(
     for evd in verified_evidence or []:
         if run_id is not None and evd.run_id != run_id:
             continue
-        is_ok = bool(evd.verified_in_input)
-        reason = None if is_ok else f"Evidence '{evd.evidence_id}' is unverified."
+        is_ok = evd.verified_in_input and evd.source_type in {"user_prompt", "external_retrieved"}
+        reason = (
+            None if is_ok else
+            f"Evidence '{evd.evidence_id}' is not a verified primary source. "
+            "Cite the original source, a supported claim, or its verified calculation."
+        )
         # Preserve stable doc_1..doc_N aliases for primary ingested/retrieved documents
         # without letting specialist sub-excerpts overwrite them.
         is_specialist = str(evd.created_by or "").startswith("agt_")
@@ -253,93 +269,150 @@ def build_provenance_catalog(
             if doc_alias:
                 catalog.targets_by_key[doc_alias] = agg_target
 
-    # Compute latest version per claim_id to detect stale claim versions immediately.
-    scoped_claims = [
-        c for c in (all_claims or []) if run_id is None or c.run_id == run_id
-    ]
-    scoped_tools = [
-        r for r in (tool_records or []) if run_id is None or r.run_id == run_id
-    ]
-    latest_ver_by_id: dict[str, int] = {}
+    scoped_claims = [c for c in all_claims or [] if run_id is None or c.run_id == run_id]
+    latest_by_id: dict[str, Claim] = {}
     for claim in scoped_claims:
-        prev_ver = latest_ver_by_id.get(claim.claim_id, 0)
-        if claim.version > prev_ver:
-            latest_ver_by_id[claim.claim_id] = claim.version
+        previous = latest_by_id.get(claim.claim_id)
+        if previous is None or claim.version > previous.version:
+            latest_by_id[claim.claim_id] = claim
 
-    valid_tool_ids: set[str] = {
-        rec.tool_execution_id
-        for rec in scoped_tools
-        if (
-            rec.success
-            and rec.inputs_grounded
-            and not rec.has_ungrounded_literals
-            and rec.matches_proposed is not False
-            and rec.computed_result is not None
-        )
+    scoped_tools = {
+        r.tool_execution_id: r for r in tool_records or [] if run_id is None or r.run_id == run_id
     }
+    owners = {tid: c for c in scoped_claims for tid in c.tool_execution_ids}
+    for tid, record in scoped_tools.items():
+        owner = owners.get(tid)
+        latest = latest_by_id.get(owner.claim_id) if owner is not None else None
+        if latest is not None and (
+            tid not in latest.tool_execution_ids or latest.status in {
+                ClaimStatus.REJECTED, ClaimStatus.STALE, ClaimStatus.UNRESOLVED,
+            }
+        ):
+            issue = f"Calculation '{tid}' belongs to a superseded or unverified claim."
+        else:
+            issue = arithmetic_lineage_issue(record, scoped_tools, latest_by_id, owners)
+        catalog.targets_by_key[tid] = make_tool_target(record, rejection_reason=issue)
 
     for claim in scoped_claims:
-        is_latest = claim.version == latest_ver_by_id.get(claim.claim_id, -1)
+        is_latest = claim.version == latest_by_id[claim.claim_id].version
         is_supported = (
             claim.status == ClaimStatus.SUPPORTED
-            and claim.verification_status.value
-            in {
-                "provenance_validated",
-                "computationally_verified",
+            and claim.verification_status.value in {
+                "provenance_validated", "computationally_verified",
                 "independently_reviewed_inference",
             }
         )
-        is_verified_asserted = (
-            claim.status == ClaimStatus.ASSERTED
-            and any(tid in valid_tool_ids for tid in claim.tool_execution_ids)
-        )
-        is_ok = is_latest and (is_supported or is_verified_asserted)
-        if not is_latest:
-            reason = f"Stale claim reference '{claim.claim_id}' v{claim.version}."
-        elif not (is_supported or is_verified_asserted):
-            reason = (
-                f"Premise claim '{claim.claim_id}' has status "
-                f"'{claim.status.value}', not supported."
-            )
-        else:
-            reason = None
+        valid_results = [
+            catalog.targets_by_key[tid] for tid in claim.tool_execution_ids
+            if tid in catalog.targets_by_key and catalog.targets_by_key[tid].is_trusted
+        ]
+        result = valid_results[0] if len(valid_results) == 1 else None
         ver_key = f"{claim.claim_id}@v{claim.version}"
-        t_ver = ProvenanceTarget(
+        issue = None
+        if not is_latest:
+            issue = f"Stale claim reference '{ver_key}'. Cite the current version."
+        elif (
+            claim.category == ClaimCategory.COMPUTATION and claim.tool_execution_ids and not result
+        ):
+            issue = f"Claim '{ver_key}' lacks a unique current, grounded calculation."
+        elif not is_supported and not (
+            claim.status == ClaimStatus.ASSERTED
+            and claim.category == ClaimCategory.COMPUTATION and result
+        ):
+            issue = f"Premise claim '{ver_key}' has status '{claim.status.value}'."
+        target = ProvenanceTarget(
             alias=ver_key,
             kind="supported_claim",
             target_id=ver_key,
-            text=claim.statement,
-            is_trusted=is_ok,
-            rejection_reason=reason,
+            text=result.text if result else claim.statement,
+            units=result.units if result else "",
+            is_trusted=issue is None,
+            rejection_reason=issue,
+            numeric_value=result.numeric_value if result else None,
+            tool_execution_id=result.tool_execution_id if result else None,
         )
-        catalog.targets_by_key[ver_key] = t_ver
+        catalog.targets_by_key[ver_key] = target
         if is_latest:
-            catalog.targets_by_key[claim.claim_id] = t_ver
-
-    for rec in scoped_tools:
-        if rec.success and rec.inputs_grounded and rec.computed_result is not None:
-            t_tool = ProvenanceTarget(
-                alias=rec.tool_execution_id,
-                kind="tool_result",
-                target_id=rec.tool_execution_id,
-                text=f"{rec.computed_result} {rec.units}".strip(),
-                units=rec.units,
-                is_trusted=True,
-            )
-            catalog.targets_by_key[rec.tool_execution_id] = t_tool
-        else:
-            t_bad = ProvenanceTarget(
-                alias=rec.tool_execution_id,
-                kind="tool_result",
-                target_id=rec.tool_execution_id,
-                text=rec.error or "",
-                units=rec.units,
-                is_trusted=False,
-                rejection_reason=f"Tool execution '{rec.tool_execution_id}' is not grounded/valid.",
-            )
-            catalog.targets_by_key[rec.tool_execution_id] = t_bad
+            catalog.targets_by_key[claim.claim_id] = target
 
     return catalog
+
+
+def make_tool_target(
+    record: ToolExecutionRecord, *, rejection_reason: str | None = None,
+) -> ProvenanceTarget:
+    value = record.computed_result
+    valid = (
+        record.success and record.inputs_grounded and not record.has_ungrounded_literals
+        and record.matches_proposed is not False and record.formula_appropriate is not False
+        and value is not None
+    )
+    return ProvenanceTarget(
+        alias=record.tool_execution_id,
+        kind="tool_result",
+        target_id=record.tool_execution_id,
+        text=f"{value} {record.units}".strip() if valid else "",
+        units=record.units,
+        is_trusted=valid and rejection_reason is None,
+        rejection_reason=rejection_reason or (
+            None if valid else f"Calculation '{record.tool_execution_id}' is not verified."
+        ),
+        numeric_value=Decimal(value) if valid and value is not None else None,
+        tool_execution_id=record.tool_execution_id,
+    )
+
+
+def arithmetic_lineage_issue(
+    record: ToolExecutionRecord,
+    tools: dict[str, ToolExecutionRecord],
+    latest_claims: dict[str, Claim],
+    owners: dict[str, Claim],
+) -> str | None:
+    """Check the recorded operand sources against current claim versions and tool results."""
+    pending = [record]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        tid = current.tool_execution_id
+        if tid in seen:
+            continue
+        seen.add(tid)
+        owner = owners.get(tid)
+        if owner is not None and current is not record:
+            latest = latest_claims[owner.claim_id]
+            if tid not in latest.tool_execution_ids or latest.status in {
+                ClaimStatus.REJECTED, ClaimStatus.STALE, ClaimStatus.UNRESOLVED,
+            }:
+                return f"Calculation '{tid}' belongs to a superseded or unverified claim."
+        for detail in current.provenance_details.values():
+            if detail.get("kind") == "supported_claim":
+                ref = str(detail.get("resolved_id", ""))
+                cid, _, version = ref.partition("@v")
+                premise = latest_claims.get(cid)
+                if premise is None or str(premise.version) != version or premise.status in {
+                    ClaimStatus.REJECTED, ClaimStatus.STALE, ClaimStatus.UNRESOLVED,
+                }:
+                    return f"Operand source '{ref}' is stale or unsupported. Recompute the claim."
+            source_id = detail.get("source_tool_execution_id")
+            if source_id is None and detail.get("kind") == "tool_result":
+                source_id = detail.get("resolved_id")
+            if source_id:
+                source = tools.get(source_id)
+                if source is None or not make_tool_target(source).is_trusted:
+                    return f"Operand calculation '{source_id}' is unavailable or invalid."
+                pending.append(source)
+    return None
+
+
+def provenance_failures(record: ToolExecutionRecord) -> list[str]:
+    """Render the persisted per-operand failures for review and targeted repair."""
+    return [
+        f"{name}={detail.get('value', ', '.join(detail.get('values', [])))} "
+        f"[{detail.get('ref') or 'no reference'}]: {detail.get('note', 'Invalid provenance.')}"
+        + (f" Candidates: {', '.join(detail['candidates'])}." if detail.get("candidates") else "")
+        for name, detail in record.provenance_details.items()
+        if detail.get("grounded") is False
+    ]
 
 
 def _parse_decimal(raw: str | int | float, *, field_name: str = "value") -> Decimal:
@@ -445,7 +518,9 @@ def _extract_word_number_spans(text: str) -> list[tuple[Decimal, int, int, str]]
         j = i
         consumed_any = False
         while j < n:
-            w, _, w_end = tokens[j]
+            w, w_start, w_end = tokens[j]
+            if j > i and text[tokens[j - 1][2]:w_start].strip():
+                break
             if w == "-":
                 j += 1
                 continue
@@ -529,30 +604,95 @@ _COMMA_SEP_RE = re.compile(r"(?<!\d),(?!\d)")
 _COPULA_RE = re.compile(r"(?:\b(?:is|was|are|were|equals)\b|=|:)", re.IGNORECASE)
 
 
-def _extract_numeric_occurrences(text: str) -> list[tuple[Decimal, Decimal | None, str, str]]:
-    """Return list of (raw_value, pct_ratio_value, raw_token, local_context_window)."""
-    raw_spans: list[tuple[Decimal, Decimal | None, int, int, str]] = []
-    for match in _NUMBER_RE.finditer(text):
+@dataclass(frozen=True)
+class _NumericOccurrence:
+    value: Decimal
+    ratio: Decimal | None
+    token: str
+    context: str
+    start: int
+    end: int
+    units: str
+
+    def matches(self, value: Decimal, units: str) -> bool:
+        if self.ratio is not None:
+            return (self.value == value and units != "ratio") or (
+                self.ratio == value and units != "%"
+            )
+        if self.value == value:
+            return True
+        scale = self.units.split(" ", 1)[0]
+        return scale in _WORD_SCALES and self.value * _WORD_SCALES[scale] == value
+
+
+def _normalize_operand_units(units: str) -> str:
+    text = re.sub(r"\s+", " ", units.strip().lower())
+    text = {"percentage point": "points", "percentage points": "points",
+            "percent points": "points", "usd thousands": "thousand usd"}.get(text, text)
+    return _EXACT_UNIT_NORMALIZATIONS.get(text, text)
+
+
+def _units_conflict(declared: str, found: str, *, scaled: bool = False) -> bool:
+    if not declared or not found or declared == found or (declared == "ratio" and found == "%"):
+        return False
+    if scaled and found.partition(" ")[2] == declared:
+        return False
+    # The source parser only emits known explicit units. Compare simple units directly,
+    # leaving compound dimensions (e.g. USD per shipment) to formula review.
+    known = set(_EXACT_UNIT_NORMALIZATIONS.values()) | set(_CURRENCY_UNITS.values())
+    numerator = declared.split(" per ", 1)[0].split("/", 1)[0]
+    return numerator != found and (
+        numerator in known or found.split(" ", 1)[0] in _WORD_SCALES
+    )
+
+
+def _extract_numeric_occurrences(text: str) -> list[_NumericOccurrence]:
+    """Extract source quantities with exact offsets and local operand metadata."""
+    raw_spans: list[tuple[Decimal, Decimal | None, int, int, str, str]] = []
+    for match in _SOURCE_NUMBER_RE.finditer(text):
         token = match.group(0)
-        cleaned = token.replace(",", "")
-        try:
-            if cleaned.endswith("%"):
-                raw_val = Decimal(cleaned[:-1])
-                ratio_val = raw_val / Decimal("100")
-            else:
-                raw_val = Decimal(cleaned)
-                ratio_val = None
-        except InvalidOperation:
+        cleaned = token.replace(",", "").replace("−", "-").strip()
+        suffix = cleaned[-1].lower()
+        before = text[:match.start()]
+        currency = _CURRENCY_UNITS.get(before[-1:], "")
+        prefix = int(bool(currency))
+        if currency and before[-2:-1] in {"-", "−", "+"}:
+            cleaned = ("-" if before[-2:-1] in {"-", "−"} else "+") + cleaned
+            prefix += 1
+        scale_word = re.match(r"\s+(thousand|million|billion)\b", text[match.end():], re.I)
+        scale = {"k": "thousand", "m": "million", "b": "billion"}.get(suffix)
+        # Single-letter scales are recognized for currency, avoiding units such as metres.
+        if scale and not currency:
             continue
-        if not raw_val.is_finite():
+        if scale:
+            cleaned = cleaned[:-1]
+        end = match.end()
+        if scale_word and not scale:
+            scale = scale_word[1].lower()
+            end += scale_word.end()
+        percent_word = re.match(r"\s+percent\b", text[end:], re.I)
+        is_percent = suffix == "%" or bool(percent_word)
+        if percent_word:
+            end += percent_word.end()
+        raw_val = Decimal(cleaned.rstrip("%").strip())
+        ratio_val = raw_val / Decimal(100) if is_percent else None
+        units = "%" if is_percent else currency
+        if scale:
+            units = f"{scale} {units}".strip()
+        raw_spans.append((raw_val, ratio_val, match.start() - prefix, end,
+                          text[match.start() - prefix:end], units))
+    for raw_val, start, end, _token in _extract_word_number_spans(text):
+        if any(start < span[3] and end > span[2] for span in raw_spans):
             continue
-        raw_spans.append((raw_val, ratio_val, match.start(), match.end(), token))
-    for raw_val, start, end, token in _extract_word_number_spans(text):
-        raw_spans.append((raw_val, None, start, end, token))
+        percent = re.match(r"\s+percent\b", text[end:], re.I)
+        if percent:
+            end += percent.end()
+        raw_spans.append((raw_val, raw_val / Decimal(100) if percent else None,
+                          start, end, text[start:end], "%" if percent else ""))
     raw_spans.sort(key=lambda item: item[2])
 
-    results: list[tuple[Decimal, Decimal | None, str, str]] = []
-    for idx, (raw_val, ratio_val, start, end, token) in enumerate(raw_spans):
+    results: list[_NumericOccurrence] = []
+    for idx, (raw_val, ratio_val, start, end, token, units) in enumerate(raw_spans):
         prev_end = raw_spans[idx - 1][3] if idx > 0 else 0
         next_start = raw_spans[idx + 1][2] if idx + 1 < len(raw_spans) else len(text)
 
@@ -589,7 +729,10 @@ def _extract_numeric_occurrences(text: str) -> list[tuple[Decimal, Decimal | Non
                 right_slice = right_slice[: comma_match.start()]
 
         norm_ctx = re.sub(r"\s+", " ", f"{left_slice} {token} {right_slice}").strip().lower()
-        results.append((raw_val, ratio_val, token, norm_ctx))
+        suffix_words = re.match(r"\s*(?:an?\s+)?([A-Za-z]+)", right_slice)
+        if not units and suffix_words:
+            units = _EXACT_UNIT_NORMALIZATIONS.get(suffix_words[1].lower(), "")
+        results.append(_NumericOccurrence(raw_val, ratio_val, token, norm_ctx, start, end, units))
     return results
 
 
@@ -609,35 +752,6 @@ def _var_stem_matches_context(var_name: str, context: str) -> bool:
     return False
 
 
-def _detect_unit_conflict(declared_units: str, context: str) -> bool:
-    if not declared_units.strip():
-        return False
-    decl_tokens = _WORD_RE.findall(declared_units.lower())
-    if "%" in declared_units:
-        decl_tokens.append("%")
-    ctx_tokens = _WORD_RE.findall(context.lower())
-    if "%" in context:
-        ctx_tokens.append("%")
-    decl_norm = {_EXACT_UNIT_NORMALIZATIONS.get(t, t) for t in decl_tokens}
-    ctx_norm = {_EXACT_UNIT_NORMALIZATIONS.get(t, t) for t in ctx_tokens}
-    for group in _UNIT_CONFLICT_GROUPS:
-        d_in = decl_norm & group
-        c_in = ctx_norm & group
-        if d_in and c_in and not (d_in & c_in):
-            # Only reject incompatible physical dimensions when the context explicitly binds
-            # a contradicting dimension unit on the input/quantity itself (not "monthly" rate).
-            if d_in & {"ms", "seconds", "minutes", "hours", "days"} and c_in & {
-                "months",
-                "years",
-                "usd",
-                "inr",
-            }:
-                return True
-            if c_in & {"ms", "seconds"} and d_in & {"months", "years", "usd", "inr"}:
-                return True
-    return False
-
-
 def _check_ast_limits(node: ast.AST, depth: int = 1, counter: list[int] | None = None) -> None:
     if counter is None:
         counter = [0]
@@ -650,16 +764,55 @@ def _check_ast_limits(node: ast.AST, depth: int = 1, counter: list[int] | None =
         _check_ast_limits(child, depth + 1, counter)
 
 
-def _extract_ast_numeric_literals(node: ast.AST) -> list[Decimal]:
-    literals: list[Decimal] = []
-    for child in ast.walk(node):
+def _ungrounded_literals(
+    tree: ast.AST, result_units: str, details: dict[str, dict[str, Any]]
+) -> list[str]:
+    allowed_nodes: set[ast.AST] = set()
+    named_uses = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    legacy_values = Counter(
+        Decimal(detail["value"]) for name, detail in details.items()
+        if name not in named_uses and detail["grounded"]
+    )
+    percent_output = bool(re.search(r"%|\bpercent(?:age)?\b", result_units, re.I))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp):
+            continue
+        if percent_output and isinstance(node.op, ast.Mult):
+            for literal, other in ((node.left, node.right), (node.right, node.left)):
+                if (
+                    isinstance(literal, ast.Constant) and literal.value == 100
+                    and any(isinstance(n, ast.Div) for n in ast.walk(other))
+                ):
+                    allowed_nodes.add(literal)
+        # Legacy rate formulas can divide by 1000 only when the multiplier is bound
+        # to a source rate whose own context explicitly specifies the denominator.
+        if not isinstance(node.op, ast.Mult):
+            continue
+        for quotient, rate in ((node.left, node.right), (node.right, node.left)):
+            if (
+                isinstance(quotient, ast.BinOp) and isinstance(quotient.op, ast.Div)
+                and isinstance(quotient.right, ast.Constant) and quotient.right.value == 1000
+                and isinstance(rate, ast.Name)
+            ):
+                source = details.get(rate.id, {})
+                if source.get("grounded") and source.get("per_denominator") == "1000":
+                    allowed_nodes.add(quotient.right)
+
+    signed_literals = {
+        node.operand: -1 if isinstance(node.op, ast.USub) else 1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant)
+    }
+    failures = []
+    for node in ast.walk(tree):
         if (
-            isinstance(child, ast.Constant)
-            and isinstance(child.value, (int, float))
-            and not isinstance(child.value, bool)
+            isinstance(node, ast.Constant) and type(node.value) in {int, float}
+            and node.value not in {0, 1} and node not in allowed_nodes
         ):
-            literals.append(_parse_decimal(child.value, field_name="literal"))
-    return literals
+            value = Decimal(str(node.value)) * signed_literals.get(node, 1)
+            if legacy_values[value] != 1:
+                failures.append(str(value))
+    return list(dict.fromkeys(failures))
 
 
 def _to_bounded_int(val: Decimal, *, name: str, min_val: int = 0, max_val: int = 1000) -> int:
@@ -1003,65 +1156,108 @@ class DeterministicArithmeticTool:
         self._db = database
 
     @staticmethod
-    def _validate_target_text_match(
-        *,
-        var_name: str,
-        var_val: Decimal,
-        target_text: str,
-        declared_units: str = "",
-    ) -> tuple[bool, str]:
-        occurrences = _extract_numeric_occurrences(target_text)
-        matching_occ: list[tuple[Decimal, Decimal | None, str, str]] = []
-        for occ in occurrences:
-            raw_v, ratio_v, _tok, _ctx = occ
-            if _decimals_match(var_val, raw_v) or (
-                ratio_v is not None and _decimals_match(var_val, ratio_v)
-            ):
-                matching_occ.append(occ)
+    def _match_operand(
+        target: ProvenanceTarget,
+        name: str,
+        value: Decimal,
+        units: str,
+        quote: str | None,
+        original_prompt: str,
+    ) -> tuple[str, str, dict[str, Any]]:
+        text = target.text
+        if target.numeric_value is not None:
+            source_units = _normalize_operand_units(target.units)
+            ratio = target.numeric_value / Decimal(100) if source_units == "%" else None
+            occurrences = [
+                _NumericOccurrence(target.numeric_value, ratio, text, text, 0, len(text),
+                                   source_units)
+            ]
+        else:
+            occurrences = _extract_numeric_occurrences(text)
 
-        if not matching_occ:
+        candidates = occurrences
+        if quote is not None:
+            quote = quote.strip()
+            starts = [m.start() for m in re.finditer(re.escape(quote), text, re.I)] if quote else []
+            if not starts:
+                return "quote_not_found", "Use a verbatim passage from the cited source.", {}
+            candidates = [
+                occ for occ in occurrences
+                if any(start <= occ.start and occ.end <= start + len(quote) for start in starts)
+            ]
+
+        matching = [occ for occ in candidates if occ.matches(value, units)]
+        details = {"candidates": [occ.token for occ in candidates[:12]]}
+        if not matching:
             return (
-                False,
-                f"Value '{var_val}' for variable '{var_name}' not found in referenced target.",
+                "value_not_found",
+                f"{value} is absent from this source selection. Cite the correct passage or "
+                "derive the operand in the expression or a verified prior calculation.",
+                details,
             )
 
-        # Check sign preservation explicitly.
-        if all(
-            (occ[0] < 0) != (var_val < 0) for occ in matching_occ if var_val != 0 and occ[0] != 0
-        ):
-            return False, f"Sign mismatch for variable '{var_name}' against referenced target."
-
-        # Detect unit conflict on the matched occurrence.
-        valid_unit_occ = [
-            occ for occ in matching_occ if not _detect_unit_conflict(declared_units, occ[3])
+        with_units = [
+            occ for occ in matching
+            if not _units_conflict(units, occ.units, scaled=occ.value != value)
+            and (units not in {"%", "ratio"} or occ.ratio is not None or occ.units == units)
         ]
-        if not valid_unit_occ:
-            return (
-                False,
-                f"Unit conflict for variable '{var_name}' ({declared_units}) against target.",
-            )
+        if not with_units:
+            found_units = ", ".join(dict.fromkeys(occ.units or "unspecified" for occ in matching))
+            return "unit_conflict", f"Operand units '{units}' conflict with {found_units}.", details
 
-        # Variable-to-source binding check when multiple distinct numbers sit in target text.
-        if len(var_name) >= 3:
-            matched_with_stem = any(
-                _var_stem_matches_context(var_name, occ[3]) for occ in valid_unit_occ
-            )
-            if not matched_with_stem:
-                other_claims_stem = any(
-                    _var_stem_matches_context(var_name, occ[3])
-                    and not (
-                        _decimals_match(var_val, occ[0])
-                        or (occ[1] is not None and _decimals_match(var_val, occ[1]))
-                    )
-                    for occ in occurrences
+        if quote is None and target.kind != "tool_result":
+            role_matches = [
+                occ for occ in with_units if _var_stem_matches_context(name, occ.context)
+            ]
+            if role_matches:
+                with_units = role_matches
+            elif any(_var_stem_matches_context(name, occ.context) for occ in occurrences):
+                return (
+                    "role_conflict",
+                    f"The inferred role of '{name}' points to a different number in this source. "
+                    "Provide a verbatim source_quote identifying the intended operand.",
+                    details,
                 )
-                if other_claims_stem:
-                    return (
-                        False,
-                        f"Variable '{var_name}' appears bound to wrong number in target.",
-                    )
+            elif target.kind == "prompt_span" and text != original_prompt and any(
+                occ.matches(value, units) and _var_stem_matches_context(name, occ.context)
+                for occ in _extract_numeric_occurrences(original_prompt)
+            ):
+                return (
+                    "role_conflict",
+                    f"'{name}' matches a different prompt passage. Cite its correct alias or "
+                    "provide a verbatim source_quote.",
+                    details,
+                )
+        if quote is not None and target.numeric_value is None:
+            if len(with_units) != 1:
+                return (
+                    "ambiguous_quote", "Quote a passage identifying one numeric occurrence.",
+                    details,
+                )
+            role_parts = [p for p in re.split(r"[_\d]+", name) if len(p) >= 3]
+            if role_parts and not all(
+                _var_stem_matches_context(part, with_units[0].context) for part in role_parts
+            ) and any(
+                occ not in matching
+                and all(_var_stem_matches_context(part, occ.context) for part in role_parts)
+                for occ in occurrences
+            ):
+                return (
+                    "role_conflict", f"The quoted occurrence conflicts with the role '{name}'.",
+                    details,
+                )
 
-        return True, "Matched referenced target."
+        matched = with_units[0]
+        rate_denominator = re.match(r"\s+per\s+(1,?000)\b", text[matched.end:], re.I)
+        return "matched", "Matched referenced quantity.", {
+            "per_denominator": rate_denominator[1].replace(",", "") if rate_denominator else None,
+            "source_token": matched.token,
+            "source_value": str(matched.value),
+            "source_units": matched.units,
+            "source_context": matched.context,
+            "source_start": matched.start,
+            "source_end": matched.end,
+        }
 
     @classmethod
     def check_inputs_grounded(
@@ -1073,165 +1269,84 @@ class DeterministicArithmeticTool:
         catalog: ProvenanceCatalog | None = None,
         declared_assumptions: list[str] | None = None,
         declared_units: str = "",
+        operand_units: dict[str, str] | None = None,
+        source_quotes: dict[str, str] | None = None,
     ) -> tuple[bool, dict[str, dict[str, Any]]]:
-        """Validate every variable against a specific resolvable provenance target."""
-        details: dict[str, dict[str, Any]] = {}
-        if not variables:
-            return True, details
-
-        fallback_prompt = "\n".join(grounded_texts or [])
-        active_catalog = catalog or build_provenance_catalog(
-            original_prompt=fallback_prompt,
+        """Bind each value exactly to a trusted source or a validated constant."""
+        active_catalog = catalog if catalog is not None else build_provenance_catalog(
+            original_prompt="\n".join(grounded_texts or []),
             assumptions=declared_assumptions,
         )
-        all_grounded = True
-
-        for var_name, var_val in variables.items():
-            ref = input_provenance_refs.get(var_name, "").strip()
+        details: dict[str, dict[str, Any]] = {}
+        for name, value in variables.items():
+            ref = input_provenance_refs.get(name, "").strip()
+            units = _normalize_operand_units((operand_units or {}).get(name, declared_units))
+            quote = (source_quotes or {}).get(name)
+            kind = "unknown"
+            resolved_id = ref
+            extra: dict[str, Any] = {}
             if not ref:
-                details[var_name] = {
-                    "ref": ref,
-                    "kind": "missing",
-                    "grounded": False,
-                    "note": "Missing provenance reference.",
-                }
-                all_grounded = False
-                continue
-
-            # 1. Explicit mathematical constant (`const:...`)
-            if ref.startswith("const:"):
-                label = ref[len("const:") :].strip()
-                if not label:
-                    details[var_name] = {
-                        "ref": ref,
-                        "kind": "constant",
-                        "grounded": False,
-                        "note": "Mathematical constant ref must include explicit label.",
-                    }
-                    all_grounded = False
+                kind, code, note = "missing", "missing_reference", "Supply a provenance reference."
+            elif ref.startswith("const:"):
+                kind = "constant"
+                resolved_id = ref.partition(":")[2].strip().lower()
+                expected = _FIXED_CONSTANTS.get(resolved_id)
+                if resolved_id == "fair_coin_probability" and (
+                    _FAIR_COIN.search(active_catalog.original_prompt)
+                    or any(_FAIR_COIN.search(a) for a in active_catalog.assumptions)
+                ):
+                    expected = Decimal("0.5")
+                if expected is None:
+                    code = "unknown_constant"
+                    note = "Use a supported mathematical constant or cite a trusted input."
+                elif value != expected:
+                    code, note = "constant_mismatch", f"{ref} requires the exact value {expected}."
                 else:
-                    details[var_name] = {
-                        "ref": ref,
-                        "kind": "constant",
-                        "resolved_id": label,
-                        "grounded": True,
-                        "note": f"Explicit mathematical constant: {label}",
-                    }
-                continue
-
-            # 2. Explicit assumption (`assumption:...`)
-            if ref.startswith("assumption:"):
-                label = ref[len("assumption:") :].strip().lower()
-                known_assumptions = active_catalog.assumptions | {
-                    a.strip().lower() for a in (declared_assumptions or []) if a.strip()
-                }
-                matched_assump = bool(label) and (
-                    label in known_assumptions
-                    or any(label in a or a in label for a in known_assumptions)
-                )
-                details[var_name] = {
-                    "ref": ref,
-                    "kind": "assumption",
-                    "resolved_id": label,
-                    "grounded": matched_assump,
-                    "note": (
-                        "Resolved to declared assumption."
-                        if matched_assump
-                        else "Assumption reference is not declared in request/plan assumptions."
-                    ),
-                }
-                if not matched_assump:
-                    all_grounded = False
-                continue
-
-            # 3. Direct quoted user-prompt span (`user_prompt:<exact_quote>` or `span:<quote>`)
-            if ref.startswith("user_prompt:") or ref.startswith("span:"):
-                quote = ref.split(":", 1)[1].strip()
-                if not quote or quote.lower() not in active_catalog.original_prompt.lower():
-                    details[var_name] = {
-                        "ref": ref,
-                        "kind": "prompt_span",
-                        "grounded": False,
-                        "note": "Quoted prompt span not found in user prompt.",
-                    }
-                    all_grounded = False
-                    continue
-                ok, note = cls._validate_target_text_match(
-                    var_name=var_name,
-                    var_val=var_val,
-                    target_text=quote,
-                    declared_units=declared_units,
-                )
-                details[var_name] = {
-                    "ref": ref,
-                    "kind": "prompt_span",
-                    "resolved_id": "quoted_span",
-                    "grounded": ok,
-                    "note": note,
-                }
-                if not ok:
-                    all_grounded = False
-                continue
-
-            # 4. General `user_prompt`: only matches prompt text with strict variable/unit checks
-            if ref == "user_prompt":
-                ok, note = cls._validate_target_text_match(
-                    var_name=var_name,
-                    var_val=var_val,
-                    target_text=active_catalog.original_prompt,
-                    declared_units=declared_units,
-                )
-                details[var_name] = {
-                    "ref": ref,
-                    "kind": "prompt_span",
-                    "resolved_id": "original_prompt",
-                    "grounded": ok,
-                    "note": note,
-                }
-                if not ok:
-                    all_grounded = False
-                continue
-
-            # 5. Direct catalog alias / verified ID (`up_k`, `doc_k`, `evd_...`, `clm_...`, `tlx_`)
-            target = active_catalog.targets_by_key.get(ref)
-            if target is None:
-                details[var_name] = {
-                    "ref": ref,
-                    "kind": "unknown",
-                    "grounded": False,
-                    "note": f"Fabricated or unknown provenance target '{ref}'.",
-                }
-                all_grounded = False
-                continue
-
-            if not target.is_trusted:
-                details[var_name] = {
-                    "ref": ref,
-                    "kind": target.kind,
-                    "resolved_id": target.target_id,
-                    "grounded": False,
-                    "note": target.rejection_reason or f"Target '{ref}' is not trusted/supported.",
-                }
-                all_grounded = False
-                continue
-
-            ok, note = cls._validate_target_text_match(
-                var_name=var_name,
-                var_val=var_val,
-                target_text=target.text,
-                declared_units=declared_units,
-            )
-            details[var_name] = {
+                    code, note = "matched", f"Validated {ref} = {expected}."
+            else:
+                target = active_catalog.targets_by_key.get(ref)
+                if ref == "user_prompt" or ref.startswith(("user_prompt:", "span:")):
+                    if ref != "user_prompt":
+                        quote = ref.partition(":")[2].strip()
+                    target = ProvenanceTarget(
+                        "user_prompt", "prompt_span", "original_prompt",
+                        active_catalog.original_prompt,
+                    )
+                elif ref.startswith("assumption:"):
+                    label = ref.partition(":")[2].strip().lower()
+                    target = ProvenanceTarget(
+                        ref, "assumption", label, label,
+                        is_trusted=bool(label) and label in active_catalog.assumptions,
+                        rejection_reason="Cite an exact existing plan assumption with this value.",
+                    )
+                if target is None:
+                    code, note = "unknown_reference", f"'{ref}' is absent from the source catalog."
+                else:
+                    kind, resolved_id = target.kind, target.target_id
+                    if target.tool_execution_id:
+                        extra["source_tool_execution_id"] = target.tool_execution_id
+                    if target.is_trusted:
+                        code, note, match = cls._match_operand(
+                            target, name, value, units, quote, active_catalog.original_prompt,
+                        )
+                        extra.update(match)
+                    else:
+                        code = "untrusted_reference"
+                        note = target.rejection_reason or "Use a trusted, current source."
+            details[name] = {
                 "ref": ref,
-                "kind": target.kind,
-                "resolved_id": target.target_id,
-                "grounded": ok,
+                "kind": kind,
+                "resolved_id": resolved_id,
+                "value": str(value),
+                "units": units,
+                "source_quote": quote,
+                "grounded": code == "matched",
+                "code": code,
                 "note": note,
+                **extra,
             }
-            if not ok:
-                all_grounded = False
 
-        return all_grounded, details
+        return all(detail["grounded"] for detail in details.values()), details
 
     async def execute(
         self,
@@ -1256,60 +1371,45 @@ class DeterministicArithmeticTool:
 
             tree = ast.parse(request.expression.strip(), mode="eval")
             _check_ast_limits(tree)
-            inline_literals = _extract_ast_numeric_literals(tree)
-            units_lower = request.units.lower()
-            prompt_lower = (
-                catalog.original_prompt if catalog is not None else "\n".join(grounded_texts or [])
-            ).lower()
-            is_percent_expr = "%" in request.units or "percent" in units_lower
-            allowed_conversion_consts: set[Decimal] = {Decimal(0), Decimal(1)}
-            if is_percent_expr:
-                allowed_conversion_consts.add(Decimal(100))
-            ctx_blob = f"{units_lower} {prompt_lower}"
-            conversion_rules = (
-                (Decimal(1000), ("per 1,000", "per 1000", "thousand", "kilo", "milli", "km", "kg")),
-                (Decimal(60), ("minute", "min", "second", "sec", "hour", "hr")),
-                (Decimal(24), ("day", "days", "hour", "hours", "hr")),
-                (Decimal(12), ("month", "months", "year", "years", "yr")),
-                (Decimal(365), ("day", "days", "year", "years", "yr")),
+            if len(str_vars) != len(request.variable_bindings):
+                raise MalformedExpressionError("Duplicate variable binding names.")
+            runtime_catalog = catalog if catalog is not None else build_provenance_catalog(
+                original_prompt="\n".join(grounded_texts or []),
             )
-            for const_val, markers in conversion_rules:
-                if any(m in ctx_blob for m in markers):
-                    allowed_conversion_consts.add(const_val)
-            ungrounded_literals = [
-                lit
-                for lit in inline_literals
-                if lit not in allowed_conversion_consts
-                and format_decimal(lit) not in request.input_provenance_refs
-                and not any(_decimals_match(lit, v) for v in parsed_vars.values())
-            ]
-            has_ungrounded_literals = bool(ungrounded_literals)
-
             computed = evaluate_decimal_expression(request.expression, request.variables)
             computed_str = format_decimal(computed)
 
             matches_proposed: bool | None = None
             if request.proposed_result is not None:
                 proposed_dec = _parse_decimal(request.proposed_result, field_name="proposed_result")
+                if (
+                    isinstance(request.proposed_result, str)
+                    and request.proposed_result.strip().endswith("%")
+                    and _normalize_operand_units(request.units) == "%"
+                ):
+                    proposed_dec *= 100
                 matches_proposed = _decimals_match(computed, proposed_dec)
 
             inputs_grounded, prov_details = self.check_inputs_grounded(
                 variables=parsed_vars,
                 input_provenance_refs=request.input_provenance_refs,
-                grounded_texts=grounded_texts,
-                catalog=catalog,
-                declared_assumptions=request.assumptions,
-                declared_units=request.units,
+                catalog=runtime_catalog,
+                operand_units={b.name: b.units for b in request.variable_bindings},
+                source_quotes={
+                    b.name: b.source_quote for b in request.variable_bindings
+                    if b.source_quote is not None
+                },
             )
+            ungrounded_literals = _ungrounded_literals(tree, request.units, prov_details)
+            has_ungrounded_literals = bool(ungrounded_literals)
             if has_ungrounded_literals:
                 inputs_grounded = False
                 prov_details["__expression_literals__"] = {
                     "kind": "inline_literal",
                     "grounded": False,
-                    "values": [format_decimal(x) for x in ungrounded_literals],
-                    "note": (
-                        "Empirical numeric constants inside expression must be grounded variables."
-                    ),
+                    "code": "unbound_literal",
+                    "values": ungrounded_literals,
+                    "note": "Replace each listed literal with a named, source-bound operand.",
                 }
 
             record = ToolExecutionRecord(
