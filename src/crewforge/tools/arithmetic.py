@@ -526,6 +526,7 @@ def extract_numbers_from_text(text: str) -> set[Decimal]:
 
 _SENTENCE_OR_PARA_BREAK_RE = re.compile(r"(?:(?<!\d)\.(?!\d)|;|\n\s*\n)")
 _COMMA_SEP_RE = re.compile(r"(?<!\d),(?!\d)")
+_COPULA_RE = re.compile(r"(?:\b(?:is|was|are|were|equals)\b|=|:)", re.IGNORECASE)
 
 
 def _extract_numeric_occurrences(text: str) -> list[tuple[Decimal, Decimal | None, str, str]]:
@@ -568,6 +569,16 @@ def _extract_numeric_occurrences(text: str) -> list[tuple[Decimal, Decimal | Non
             comma_match = _COMMA_SEP_RE.search(left_slice)
             if comma_match is not None:
                 left_slice = left_slice[comma_match.end() :]
+            elif _COPULA_RE.search(left_slice):
+                # If the prior number was a qualifier inside the subject phrase before `is`/`:`
+                # (e.g. "cost at 100,000 transactions is $50,000"), include the subject prefix.
+                prev_start = raw_spans[idx - 1][2]
+                subj_slice = text[max(0, prev_start - 65) : prev_start]
+                subj_breaks = list(_SENTENCE_OR_PARA_BREAK_RE.finditer(subj_slice))
+                if subj_breaks:
+                    subj_slice = subj_slice[subj_breaks[-1].end() :]
+                if not _COPULA_RE.search(subj_slice):
+                    left_slice = f"{subj_slice} {left_slice}"
 
         right_break = _SENTENCE_OR_PARA_BREAK_RE.search(right_slice)
         if right_break is not None:

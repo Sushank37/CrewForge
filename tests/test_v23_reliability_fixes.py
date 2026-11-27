@@ -687,3 +687,848 @@ async def test_v23_dependency_aware_repair_and_negative_downstream_rejection(
     assert "$99,999" not in result.answer
     rejected = [c for c in trace.claims if c.status == ClaimStatus.REJECTED]
     assert any("99,999" in c.statement for c in rejected)
+
+
+def test_v23_exact_cloud_complex_002_provenance_and_swapped_controls() -> None:
+    """Reproduce exact cost=50000 and transactions=140000 cases plus swapped-quantity controls."""
+    import json
+
+    fixture_path = (
+        Path(__file__).resolve().parent.parent / ".crewforge" / "cloud_complex_test_002.json"
+    )
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    doc1 = Evidence(
+        run_id="run_exact_002",
+        source_type="external_retrieved",
+        source_ref="doc_1",
+        excerpt=data["reference_documents"][0]["content"],
+        verified_in_input=True,
+        created_by="lead",
+    )
+    clm_a100 = Claim(
+        claim_id="clm_a100",
+        run_id="run_exact_002",
+        statement="Vendor A's first-year cost at 100,000 transactions is $50,000.",
+        status=ClaimStatus.SUPPORTED,
+        verification_status=VerificationStatus.PROVENANCE_VALIDATED,
+        version=1,
+        author_agent_id="agt_1",
+    )
+    evd_vendors = Evidence(
+        run_id="run_exact_002",
+        source_type="external_retrieved",
+        source_ref="doc_2",
+        excerpt=(
+            "Vendor Alpha cost is $50,000, Vendor Beta cost is $56,000. "
+            "Setup fee is $10,000 and license cost is $50,000."
+        ),
+        verified_in_input=True,
+        created_by="lead",
+    )
+    cat = build_provenance_catalog(
+        original_prompt=data["prompt"],
+        verified_evidence=[doc1, evd_vendors],
+        all_claims=[clm_a100],
+        run_id="run_exact_002",
+    )
+
+    ok_cost, _ = DeterministicArithmeticTool.check_inputs_grounded(
+        variables={"cost": Decimal("50000")},
+        input_provenance_refs={"cost": "clm_a100"},
+        catalog=cat,
+        declared_units="USD",
+    )
+    assert ok_cost is True
+
+    ok_tx, _ = DeterministicArithmeticTool.check_inputs_grounded(
+        variables={"transactions": Decimal("140000")},
+        input_provenance_refs={"transactions": "doc_1"},
+        catalog=cat,
+    )
+    assert ok_tx is True
+
+    # Swapped-quantity negative controls must remain rejected.
+    swap_vendor, _ = DeterministicArithmeticTool.check_inputs_grounded(
+        variables={"alpha": Decimal("56000")},
+        input_provenance_refs={"alpha": "doc_2"},
+        catalog=cat,
+    )
+    assert swap_vendor is False
+
+    swap_fee, _ = DeterministicArithmeticTool.check_inputs_grounded(
+        variables={"setup_fee": Decimal("50000")},
+        input_provenance_refs={"setup_fee": "doc_2"},
+        catalog=cat,
+    )
+    assert swap_fee is False
+
+    swap_forecast, _ = DeterministicArithmeticTool.check_inputs_grounded(
+        variables={"stress": Decimal("100000")},
+        input_provenance_refs={"stress": "doc_1"},
+        catalog=cat,
+    )
+    assert swap_forecast is False
+
+
+def _load_exact_cloud_complex_002() -> dict[str, Any]:
+    import json
+
+    fixture_path = (
+        Path(__file__).resolve().parent.parent / ".crewforge" / "cloud_complex_test_002.json"
+    )
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
+    """Offline end-to-end regression using exact prompt and 3 docs from cloud_complex_test_002."""
+    data = _load_exact_cloud_complex_002()
+    docs = [
+        ReferenceDocument(
+            doc_id=f"doc_{idx}",
+            title=item["title"],
+            content=item["content"],
+            source_ref=f"doc_{idx}",
+        )
+        for idx, item in enumerate(data["reference_documents"], start=1)
+    ]
+
+    db = Database(tmp_path / "v23_exact_002.db")
+    await db.initialize()
+
+    def _handler(prompt: str, response_model: Any) -> Any:
+        schema_name = response_model.__name__ if response_model is not None else ""
+        if schema_name in {"ExecutionPlan", "PlannerOutput"}:
+            return {
+                "goal": "Evaluate all vendor costs, compliance, recommendation, and capacity.",
+                "user_requirements": [
+                    "Calculate first-year costs for all three vendors at both forecasts",
+                    "Evaluate every mandatory compliance requirement and disqualified vendors",
+                    "Recommend the best eligible vendor",
+                    "Calculate remaining budget under both forecasts and max transactions",
+                ],
+                "acceptance_criteria": [
+                    "All 6 forecast costs, compliance, balances, and max transactions verified",
+                ],
+                "agents": [
+                    {
+                        "agent_ref": "a1",
+                        "role": "Vendor Cost Analyst",
+                        "specialty": "Cost modeling",
+                        "instructions": "Calculate all six vendor forecast costs.",
+                        "capabilities": ["reasoning"],
+                    },
+                    {
+                        "agent_ref": "a2",
+                        "role": "Compliance Analyst",
+                        "specialty": "Compliance",
+                        "instructions": "Evaluate mandatory compliance and recommend vendor.",
+                        "capabilities": ["reasoning"],
+                    },
+                    {
+                        "agent_ref": "a3",
+                        "role": "Capacity Analyst",
+                        "specialty": "Budget & capacity",
+                        "instructions": "Compute remaining budgets and maximum transactions.",
+                        "capabilities": ["reasoning"],
+                    },
+                ],
+                "tasks": [
+                    {
+                        "task_ref": "t1",
+                        "title": "Calculate all six vendor forecast costs",
+                        "description": "Task1: calculate all 6 first-year forecast costs.",
+                        "assigned_agent_ref": "a1",
+                        "depends_on": [],
+                        "expected_deliverables": ["6 grounded vendor cost claims"],
+                    },
+                    {
+                        "task_ref": "t2",
+                        "title": "Evaluate mandatory compliance and recommend",
+                        "description": "Task2: evaluate compliance and recommend best eligible.",
+                        "assigned_agent_ref": "a2",
+                        "depends_on": ["t1"],
+                        "expected_deliverables": ["Compliance and recommendation claims"],
+                    },
+                    {
+                        "task_ref": "t3",
+                        "title": "Calculate remaining budgets and max transactions",
+                        "description": "Task3: compute remaining budgets and max transactions.",
+                        "assigned_agent_ref": "a3",
+                        "depends_on": ["t1", "t2"],
+                        "expected_deliverables": ["Remaining budgets and 150,000 max tx"],
+                    },
+                ],
+                "assumptions": [],
+                "missing_information": [],
+            }
+
+        if schema_name == "SpecialistOutput":
+            if "Task1: calculate all 6" in prompt:
+                return {
+                    "findings": (
+                        "A: $50,000 / $58,000; B: $56,000 / $60,800; C: $45,000 / $52,200."
+                    ),
+                    "evidence_proposals": [
+                        {
+                            "source_type": "external_retrieved",
+                            "source_ref": "doc_1",
+                            "excerpt": (
+                                "Forecast: 100,000 transactions in the base\n"
+                                "            case and 140,000 in the stress case."
+                            ),
+                        },
+                        {
+                            "source_type": "external_retrieved",
+                            "source_ref": "doc_2",
+                            "excerpt": (
+                                "Vendor A: $30,000 fixed annual fee plus\n"
+                                "            $0.20 per transaction."
+                            ),
+                        },
+                        {
+                            "source_type": "external_retrieved",
+                            "source_ref": "doc_2",
+                            "excerpt": (
+                                "Vendor B: $36,000 fixed annual fee plus\n"
+                                "            $0.12 per transaction."
+                            ),
+                        },
+                        {
+                            "source_type": "external_retrieved",
+                            "source_ref": "doc_2",
+                            "excerpt": (
+                                "Vendor C: $27,000 fixed annual fee plus\n"
+                                "            $0.18 per transaction."
+                            ),
+                        },
+                        {
+                            "source_type": "external_retrieved",
+                            "source_ref": "doc_3",
+                            "excerpt": (
+                                "Vendor B: Mandatory first-year onboarding\n"
+                                "            fee of $8,000 in addition to all quoted fees."
+                            ),
+                        },
+                    ],
+                    "claims": [
+                        {
+                            "claim_ref": "a_100",
+                            "statement": (
+                                "Vendor A's first-year cost at 100,000 transactions is $50,000."
+                            ),
+                            "category": "computation",
+                            "evidence_indices": [0, 1],
+                            "requirement_refs": ["req_1"],
+                            "computation": {
+                                "expression": "fixed + rate * transactions",
+                                "variables": {
+                                    "fixed": "30000",
+                                    "rate": "0.20",
+                                    "transactions": "100000",
+                                },
+                                "input_provenance_refs": {
+                                    "fixed": "doc_2",
+                                    "rate": "doc_2",
+                                    "transactions": "doc_1",
+                                },
+                                "proposed_result": "50000",
+                                "units": "USD",
+                            },
+                            "confidence": 0.99,
+                        },
+                        {
+                            "claim_ref": "a_140",
+                            "statement": (
+                                "Vendor A's first-year cost at 140,000 transactions is $58,000."
+                            ),
+                            "category": "computation",
+                            "evidence_indices": [0, 1],
+                            "requirement_refs": ["req_1"],
+                            "computation": {
+                                "expression": "fixed + rate * transactions",
+                                "variables": {
+                                    "fixed": "30000",
+                                    "rate": "0.20",
+                                    "transactions": "140000",
+                                },
+                                "input_provenance_refs": {
+                                    "fixed": "doc_2",
+                                    "rate": "doc_2",
+                                    "transactions": "doc_1",
+                                },
+                                "proposed_result": "58000",
+                                "units": "USD",
+                            },
+                            "confidence": 0.99,
+                        },
+                        {
+                            "claim_ref": "b_100",
+                            "statement": (
+                                "Vendor B's first-year cost at 100,000 transactions is $56,000."
+                            ),
+                            "category": "computation",
+                            "evidence_indices": [0, 2, 4],
+                            "requirement_refs": ["req_1"],
+                            "computation": {
+                                "expression": "fixed + onboarding + rate * transactions",
+                                "variables": {
+                                    "fixed": "36000",
+                                    "onboarding": "8000",
+                                    "rate": "0.12",
+                                    "transactions": "100000",
+                                },
+                                "input_provenance_refs": {
+                                    "fixed": "doc_2",
+                                    "onboarding": "doc_3",
+                                    "rate": "doc_2",
+                                    "transactions": "doc_1",
+                                },
+                                "proposed_result": "56000",
+                                "units": "USD",
+                            },
+                            "confidence": 0.99,
+                        },
+                        {
+                            "claim_ref": "b_140",
+                            "statement": (
+                                "Vendor B's first-year cost at 140,000 transactions is $60,800."
+                            ),
+                            "category": "computation",
+                            "evidence_indices": [0, 2, 4],
+                            "requirement_refs": ["req_1"],
+                            "computation": {
+                                "expression": "fixed + onboarding + rate * transactions",
+                                "variables": {
+                                    "fixed": "36000",
+                                    "onboarding": "8000",
+                                    "rate": "0.12",
+                                    "transactions": "140000",
+                                },
+                                "input_provenance_refs": {
+                                    "fixed": "doc_2",
+                                    "onboarding": "doc_3",
+                                    "rate": "doc_2",
+                                    "transactions": "doc_1",
+                                },
+                                "proposed_result": "60800",
+                                "units": "USD",
+                            },
+                            "confidence": 0.99,
+                        },
+                        {
+                            "claim_ref": "c_100",
+                            "statement": (
+                                "Vendor C's first-year cost at 100,000 transactions is $45,000."
+                            ),
+                            "category": "computation",
+                            "evidence_indices": [0, 3],
+                            "requirement_refs": ["req_1"],
+                            "computation": {
+                                "expression": "fixed + rate * transactions",
+                                "variables": {
+                                    "fixed": "27000",
+                                    "rate": "0.18",
+                                    "transactions": "100000",
+                                },
+                                "input_provenance_refs": {
+                                    "fixed": "doc_2",
+                                    "rate": "doc_2",
+                                    "transactions": "doc_1",
+                                },
+                                "proposed_result": "45000",
+                                "units": "USD",
+                            },
+                            "confidence": 0.99,
+                        },
+                        {
+                            "claim_ref": "c_140",
+                            "statement": (
+                                "Vendor C's first-year cost at 140,000 transactions is $52,200."
+                            ),
+                            "category": "computation",
+                            "evidence_indices": [0, 3],
+                            "requirement_refs": ["req_1"],
+                            "computation": {
+                                "expression": "fixed + rate * transactions",
+                                "variables": {
+                                    "fixed": "27000",
+                                    "rate": "0.18",
+                                    "transactions": "140000",
+                                },
+                                "input_provenance_refs": {
+                                    "fixed": "doc_2",
+                                    "rate": "doc_2",
+                                    "transactions": "doc_1",
+                                },
+                                "proposed_result": "52200",
+                                "units": "USD",
+                            },
+                            "confidence": 0.99,
+                        },
+                    ],
+                    "outgoing_messages": [],
+                    "assumptions": [],
+                    "uncertainties": [],
+                    "missing_information": [],
+                }
+
+            if "Task2: evaluate compliance" in prompt:
+                cids = re.findall(r"clm_[a-z0-9]+", prompt)
+                return {
+                    "findings": (
+                        "Vendor A meets all mandatory requirements. Vendor B is disqualified "
+                        "($60,800 exceeds $60,000 stress budget). Vendor C is disqualified "
+                        "(EU data residency delayed to week 10). Recommend Vendor A."
+                    ),
+                    "evidence_proposals": [
+                        {
+                            "source_type": "external_retrieved",
+                            "source_ref": "doc_1",
+                            "excerpt": (
+                                "Go-live must occur within 8 weeks.\n"
+                                "            EU data residency and MFA must be available\n"
+                                "            at go-live."
+                            ),
+                        },
+                        {
+                            "source_type": "external_retrieved",
+                            "source_ref": "doc_2",
+                            "excerpt": (
+                                "Go-live in 6 weeks.\n"
+                                "            EU residency and MFA available at go-live."
+                            ),
+                        },
+                        {
+                            "source_type": "external_retrieved",
+                            "source_ref": "doc_3",
+                            "excerpt": (
+                                "Vendor C: Revised go-live in 7 weeks.\n"
+                                "            However, EU data residency will only become\n"
+                                "            available in week 10."
+                            ),
+                        },
+                    ],
+                    "claims": [
+                        {
+                            "claim_ref": "comp_a",
+                            "statement": (
+                                "Vendor A satisfies all mandatory requirements: budget <= $60,000 "
+                                "in both forecasts, 6-week go-live, EU residency and MFA at "
+                                "go-live (doc_1, doc_2, doc_3)."
+                            ),
+                            "category": "given_fact",
+                            "evidence_indices": [0, 1],
+                            "requirement_refs": ["req_2"],
+                            "confidence": 0.99,
+                        },
+                        {
+                            "claim_ref": "comp_bc",
+                            "statement": (
+                                "Vendor B is disqualified because its $60,800 stress-case cost "
+                                "exceeds the $60,000 cap, and Vendor C is disqualified because "
+                                "EU data residency is delayed until week 10 (doc_1, doc_3)."
+                            ),
+                            "category": "given_fact",
+                            "evidence_indices": [0, 2],
+                            "requirement_refs": ["req_2"],
+                            "confidence": 0.99,
+                        },
+                        {
+                            "claim_ref": "rec_a",
+                            "statement": "Recommend Vendor A as the lowest-cost eligible vendor.",
+                            "category": "recommendation",
+                            "evidence_indices": [0, 1],
+                            "premise_claim_ids": cids[:2] if cids else [],
+                            "requirement_refs": ["req_3"],
+                            "confidence": 0.99,
+                        },
+                    ],
+                    "outgoing_messages": [],
+                    "assumptions": [],
+                    "uncertainties": [],
+                    "missing_information": [],
+                }
+
+            # Task 3: remaining budgets (using cost=50000 against clm_a100!) & max 150,000 tx
+            a100_match = re.search(
+                r"(clm_[a-z0-9]+) \(v\d+, computation\): Vendor A's first-year cost at 100,000",
+                prompt,
+            )
+            a140_match = re.search(
+                r"(clm_[a-z0-9]+) \(v\d+, computation\): Vendor A's first-year cost at 140,000",
+                prompt,
+            )
+            a100_cid = a100_match.group(1) if a100_match else "doc_2"
+            a140_cid = a140_match.group(1) if a140_match else "doc_2"
+            return {
+                "findings": (
+                    "Vendor A remaining budget: $10,000 (base) and $2,000 (stress); "
+                    "max 150,000 transactions."
+                ),
+                "evidence_proposals": [
+                    {
+                        "source_type": "external_retrieved",
+                        "source_ref": "doc_1",
+                        "excerpt": "First-year spending must not exceed $60,000,",
+                    },
+                    {
+                        "source_type": "external_retrieved",
+                        "source_ref": "doc_2",
+                        "excerpt": (
+                            "Vendor A: $30,000 fixed annual fee plus\n"
+                            "            $0.20 per transaction."
+                        ),
+                    },
+                ],
+                "claims": [
+                    {
+                        "claim_ref": "rem_base",
+                        "statement": (
+                            "Vendor A has $10,000 remaining budget at 100,000 transactions "
+                            "(doc_1, doc_2)."
+                        ),
+                        "category": "computation",
+                        "evidence_indices": [0],
+                        "premise_claim_ids": [a100_cid] if a100_cid.startswith("clm_") else [],
+                        "requirement_refs": ["req_4"],
+                        "computation": {
+                            "expression": "cap - cost",
+                            "variables": {"cap": "60000", "cost": "50000"},
+                            "input_provenance_refs": {"cap": "doc_1", "cost": a100_cid},
+                            "proposed_result": "10000",
+                            "units": "USD",
+                        },
+                        "confidence": 0.99,
+                    },
+                    {
+                        "claim_ref": "rem_stress",
+                        "statement": (
+                            "Vendor A has $2,000 remaining budget at 140,000 transactions "
+                            "(doc_1, doc_2)."
+                        ),
+                        "category": "computation",
+                        "evidence_indices": [0],
+                        "premise_claim_ids": [a140_cid] if a140_cid.startswith("clm_") else [],
+                        "requirement_refs": ["req_4"],
+                        "computation": {
+                            "expression": "cap - cost",
+                            "variables": {"cap": "60000", "cost": "58000"},
+                            "input_provenance_refs": {"cap": "doc_1", "cost": a140_cid},
+                            "proposed_result": "2000",
+                            "units": "USD",
+                        },
+                        "confidence": 0.99,
+                    },
+                    {
+                        "claim_ref": "max_tx",
+                        "statement": (
+                            "Vendor A supports a maximum of 150,000 transactions within the "
+                            "$60,000 budget (doc_1, doc_2)."
+                        ),
+                        "category": "computation",
+                        "evidence_indices": [0, 1],
+                        "requirement_refs": ["req_4"],
+                        "computation": {
+                            "expression": "(cap - fixed) / rate",
+                            "variables": {"cap": "60000", "fixed": "30000", "rate": "0.20"},
+                            "input_provenance_refs": {
+                                "cap": "doc_1",
+                                "fixed": "doc_2",
+                                "rate": "doc_2",
+                            },
+                            "proposed_result": "150000",
+                            "units": "transactions",
+                        },
+                        "confidence": 0.99,
+                    },
+                ],
+                "outgoing_messages": [],
+                "assumptions": [],
+                "uncertainties": [],
+                "missing_information": [],
+            }
+
+        if schema_name == "ReviewerBatchOutput":
+            aliases = re.findall(r"alias=(c\d+)", prompt)
+            return {
+                "verdicts": [
+                    {
+                        "claim_id": alias,
+                        "decision": "approve",
+                        "rationale": "Grounded in cited docs and arithmetic.",
+                        "blocking_severity": "none",
+                        "evidence_refs": [],
+                    }
+                    for alias in aliases
+                ]
+            }
+
+        raise AssertionError(f"Unexpected schema {schema_name}")
+
+    settings = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="fake-exact-002",
+        openai_api_key="sk-offline",
+        db_path=tmp_path / "v23_exact_002.db",
+        budget_authority_path=tmp_path / "v23_exact_002_budget.db",
+        allow_paid_runs=False,
+        max_cost_per_run_usd=0.0,
+        max_cumulative_cost_usd=0.0,
+        max_workers=3,
+        max_tasks=4,
+        max_model_calls_per_run=16,
+        max_revision_rounds=2,
+        enable_peer_messaging=False,
+        separate_review_dimensions=False,
+        enable_deterministic_synthesis_fast_path=True,
+    )
+    provider = FakeProvider(handler=_handler)
+    budget = BudgetManager(db, settings)
+    runner = NetworkRunner(database=db, provider=provider, budget_manager=budget, settings=settings)
+
+    result = await runner.run(data["prompt"], reference_documents=docs)
+    assert result.status == RunStatus.COMPLETED
+    assert result.verification.honesty_gate_passed is True
+    assert result.verification.execution_completed is True
+    assert result.verification.content_released_safely is True
+    assert result.verification.material_claim_count == 11
+    assert result.verification.supported_claim_count == 11
+
+    for expected in (
+        "$50,000",
+        "$58,000",
+        "$56,000",
+        "$60,800",
+        "$45,000",
+        "$52,200",
+        "$10,000",
+        "$2,000",
+        "150,000",
+        "Recommend Vendor A",
+        "Vendor B is disqualified",
+        "Vendor C is disqualified",
+    ):
+        assert expected in result.answer
+
+
+async def test_v23_multilevel_dependency_repair_chain(tmp_path: Path) -> None:
+    """Verify 3-level L1 -> L2 -> L3 repair/revalidation order and premise version refresh."""
+    db = Database(tmp_path / "v23_chain.db")
+    await db.initialize()
+
+    review_sequence: list[list[str]] = []
+
+    def _handler(prompt: str, response_model: Any) -> Any:
+        schema_name = response_model.__name__ if response_model is not None else ""
+        if schema_name in {"ExecutionPlan", "PlannerOutput"}:
+            return {
+                "goal": "3-level dependency chain",
+                "user_requirements": ["L1 cost", "L2 headroom", "L3 recommendation"],
+                "acceptance_criteria": ["L1 repaired before L2 and L3 revalidated"],
+                "agents": [
+                    {
+                        "agent_ref": "a1",
+                        "role": "Analyst 1",
+                        "specialty": "L1",
+                        "instructions": "Emit L1.",
+                        "capabilities": ["reasoning"],
+                    },
+                    {
+                        "agent_ref": "a2",
+                        "role": "Analyst 2",
+                        "specialty": "L2",
+                        "instructions": "Emit L2.",
+                        "capabilities": ["reasoning"],
+                    },
+                    {
+                        "agent_ref": "a3",
+                        "role": "Analyst 3",
+                        "specialty": "L3",
+                        "instructions": "Emit L3.",
+                        "capabilities": ["reasoning"],
+                    },
+                ],
+                "tasks": [
+                    {
+                        "task_ref": "t1",
+                        "title": "Level 1",
+                        "description": "Stage1",
+                        "assigned_agent_ref": "a1",
+                        "depends_on": [],
+                        "expected_deliverables": ["L1"],
+                    },
+                    {
+                        "task_ref": "t2",
+                        "title": "Level 2",
+                        "description": "Stage2",
+                        "assigned_agent_ref": "a2",
+                        "depends_on": ["t1"],
+                        "expected_deliverables": ["L2"],
+                    },
+                    {
+                        "task_ref": "t3",
+                        "title": "Level 3",
+                        "description": "Stage3",
+                        "assigned_agent_ref": "a3",
+                        "depends_on": ["t2"],
+                        "expected_deliverables": ["L3"],
+                    },
+                ],
+                "assumptions": [],
+                "missing_information": [],
+            }
+
+        if schema_name == "SpecialistOutput":
+            if "Stage1" in prompt:
+                return {
+                    "findings": "L1 cost is $50,000.",
+                    "evidence_proposals": [
+                        {
+                            "source_type": "user_prompt",
+                            "source_ref": "up_1",
+                            "excerpt": "Budget is $60,000 and cost is $50,000.",
+                        }
+                    ],
+                    "claims": [
+                        {
+                            "claim_ref": "l1",
+                            "statement": "L1 cost is $50,000.",
+                            "category": "given_fact",
+                            "evidence_indices": [0],
+                            "requirement_refs": ["req_1"],
+                            "confidence": 0.95,
+                        }
+                    ],
+                    "outgoing_messages": [],
+                    "assumptions": [],
+                    "uncertainties": [],
+                    "missing_information": [],
+                }
+            cids = re.findall(r"clm_[a-z0-9]+", prompt)
+            if "Stage2" in prompt:
+                return {
+                    "findings": "L2 headroom is $10,000.",
+                    "evidence_proposals": [],
+                    "claims": [
+                        {
+                            "claim_ref": "l2",
+                            "statement": "L2 headroom is $10,000 USD.",
+                            "category": "logical_inference",
+                            "evidence_indices": [],
+                            "premise_claim_ids": cids[:1],
+                            "requirement_refs": ["req_2"],
+                            "confidence": 0.95,
+                        }
+                    ],
+                    "outgoing_messages": [],
+                    "assumptions": [],
+                    "uncertainties": [],
+                    "missing_information": [],
+                }
+            return {
+                "findings": "L3 recommend Vendor A.",
+                "evidence_proposals": [],
+                "claims": [
+                    {
+                        "claim_ref": "l3",
+                        "statement": "L3 recommend Vendor A.",
+                        "category": "logical_inference",
+                        "evidence_indices": [],
+                        "premise_claim_ids": cids[-1:],
+                        "requirement_refs": ["req_3"],
+                        "confidence": 0.95,
+                    }
+                ],
+                "outgoing_messages": [],
+                "assumptions": [],
+                "uncertainties": [],
+                "missing_information": [],
+            }
+
+        if schema_name == "ReviewerBatchOutput":
+            items = re.findall(r"Claim (clm_[a-z0-9]+) \(version=(\d+), alias=(c\d+)", prompt)
+            review_sequence.append([f"{cid}@v{ver}" for cid, ver, _ in items])
+            verdicts = []
+            for cid, ver, alias in items:
+                if int(ver) == 1 and f"Claim {cid} (version=1, alias={alias}" in prompt and (
+                    "L1 cost is $50,000." in prompt.split(f"Claim {cid}")[1].split("Claim ")[0]
+                ):
+                    verdicts.append(
+                        {
+                            "claim_id": alias,
+                            "decision": "needs_revision",
+                            "rationale": "Clarify annual term.",
+                            "required_correction": "State first-year cost.",
+                            "blocking_severity": "minor",
+                            "evidence_refs": [],
+                        }
+                    )
+                else:
+                    verdicts.append(
+                        {
+                            "claim_id": alias,
+                            "decision": "approve",
+                            "rationale": "Verified.",
+                            "blocking_severity": "none",
+                            "evidence_refs": [],
+                        }
+                    )
+            return {"verdicts": verdicts}
+
+        if schema_name == "RevisionOutput":
+            m = re.search(r"claim_id=(clm_[A-Za-z0-9_]+), expected_version=(\d+)", prompt)
+            cid = m.group(1) if m else "clm_missing"
+            ver = int(m.group(2)) if m else 1
+            return {
+                "updated_findings": "L1 first-year cost is $50,000.",
+                "evidence_proposals": [],
+                "revisions": [
+                    {
+                        "target_claim_id": cid,
+                        "expected_version": ver,
+                        "new_statement": "L1 first-year cost is $50,000.",
+                        "revision_notes": "Clarified first-year cost.",
+                        "computation": None,
+                    }
+                ],
+            }
+
+        raise AssertionError(f"Unexpected schema {schema_name}")
+
+    settings = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="fake-v23-chain",
+        openai_api_key="sk-offline",
+        db_path=tmp_path / "v23_chain.db",
+        budget_authority_path=tmp_path / "v23_chain_budget.db",
+        allow_paid_runs=False,
+        max_cost_per_run_usd=0.0,
+        max_cumulative_cost_usd=0.0,
+        max_workers=3,
+        max_tasks=4,
+        max_model_calls_per_run=16,
+        max_revision_rounds=2,
+        enable_peer_messaging=False,
+        separate_review_dimensions=False,
+        enable_deterministic_synthesis_fast_path=True,
+    )
+    provider = FakeProvider(handler=_handler)
+    budget = BudgetManager(db, settings)
+    runner = NetworkRunner(database=db, provider=provider, budget_manager=budget, settings=settings)
+
+    result = await runner.run("Budget is $60,000 and cost is $50,000.")
+    assert result.status == RunStatus.COMPLETED
+    assert result.verification.honesty_gate_passed is True
+
+    trace = await db.get_run_trace(result.run_id)
+    assert trace is not None
+    latest = {c.claim_id: c for c in trace.claims}
+    for c in latest.values():
+        assert c.version == 2
+        assert c.status == ClaimStatus.SUPPORTED
+        # Every dependent's premise_refs must point to v2 (never superseded v1)
+        for pref in c.premise_refs:
+            assert pref.claim_version == 2
