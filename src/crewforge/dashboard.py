@@ -11,6 +11,7 @@ import threading
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import uvicorn
@@ -21,6 +22,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from crewforge.auth import verify_google_id_token
 from crewforge.config import CrewForgeSettings, sanitize_error_message
 from crewforge.dashboard_api import (
     BenchmarkStore,
@@ -46,6 +48,16 @@ _LEGACY_UI_DIR = Path(__file__).resolve().parent / "dashboard_ui"
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _ALLOWED_HOST_HEADERS = _LOCAL_HOSTS | {"testserver"}
 _MAX_REQUEST_BYTES = 524_288  # 512 KB
+_SESSION_COOKIE_NAME = "crewforge_session"
+_CSRF_COOKIE_NAME = "crewforge_csrf"
+_PUBLIC_AUTH_PATHS = {
+    "/api/health",
+    "/api/auth/me",
+    "/api/auth/google",
+    "/api/auth/email/request",
+    "/api/auth/email/verify",
+    "/api/auth/logout",
+}
 
 _FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
@@ -146,44 +158,76 @@ class _LocalSecurityMiddleware(BaseHTTPMiddleware):
                         {"error": "Remote origins must use HTTPS."}, status_code=403
                     )
 
-        # 3. Authentication & server-side session derivation on /api/* (except /api/health) and /mcp
+        # 3. Authentication & server-side session derivation on /api/* and /mcp
         path = request.url.path
+        is_public_auth = path in _PUBLIC_AUTH_PATHS
         requires_endpoint_auth = (
-            (path.startswith("/api/") and path != "/api/health") or path.startswith("/mcp")
+            (path.startswith("/api/") and not is_public_auth) or path.startswith("/mcp")
         )
         role = "admin"
         session_id = "default"
-        if requires_endpoint_auth:
-            header_tok = request.headers.get("x-crewforge-token")
-            auth_hdr = request.headers.get("authorization", "")
-            bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else None
-            provided = (header_tok or bearer_tok or "").strip()
+        auth_via = "local"
+        expected_csrf: str | None = None
 
-            if provided:
-                provided_hash = hashlib.sha256(provided.encode("utf-8")).hexdigest()
-                if secrets.compare_digest(provided_hash, self._admin_token_hash):
-                    if not is_local_request:
-                        return JSONResponse(
-                            {"error": "Local administrator access is restricted to localhost."},
-                            status_code=403,
-                        )
+        header_tok = request.headers.get("x-crewforge-token")
+        auth_hdr = request.headers.get("authorization", "")
+        bearer_tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else None
+        provided = (header_tok or bearer_tok or "").strip()
+        cookie_val = (request.cookies.get(_SESSION_COOKIE_NAME) or "").strip()
+
+        if provided:
+            provided_hash = hashlib.sha256(provided.encode("utf-8")).hexdigest()
+            if secrets.compare_digest(provided_hash, self._admin_token_hash):
+                if not is_local_request and requires_endpoint_auth:
+                    return JSONResponse(
+                        {"error": "Local administrator access is restricted to localhost."},
+                        status_code=403,
+                    )
+                if is_local_request:
                     role = "admin"
                     session_id = "default"
-                else:
-                    judge_session = self._registry.authenticate_judge_token(provided)
-                    if judge_session is None:
-                        return JSONResponse(
-                            {"error": "Unauthorized endpoint access."}, status_code=401
-                        )
-                    role = "judge"
+                    auth_via = "bearer"
+            else:
+                judge_session = self._registry.authenticate_judge_token(provided)
+                if judge_session is not None:
+                    role = "user"
                     session_id = judge_session
-            elif self._require_auth or not is_local_request:
+                    auth_via = "bearer"
+                elif requires_endpoint_auth:
+                    return JSONResponse(
+                        {"error": "Unauthorized endpoint access."}, status_code=401
+                    )
+        elif cookie_val:
+            cookie_sess = self._registry.auth_store.authenticate_browser_session(cookie_val)
+            if cookie_sess is not None:
+                role = "user"
+                session_id = cookie_sess["user_id"]
+                auth_via = "cookie"
+                expected_csrf = cookie_sess["csrf_token"]
+            elif requires_endpoint_auth:
                 return JSONResponse(
                     {"error": "Unauthorized endpoint access."}, status_code=401
                 )
+        elif requires_endpoint_auth and (self._require_auth or not is_local_request):
+            return JSONResponse(
+                {"error": "Unauthorized endpoint access."}, status_code=401
+            )
 
+        # Enforce CSRF token on mutating cookie-authenticated requests (including logout)
+        if (
+            auth_via == "cookie"
+            and expected_csrf is not None
+            and request.method in ("POST", "PUT", "PATCH", "DELETE")
+        ):
+            csrf_hdr = (request.headers.get("x-csrf-token") or "").strip()
+            if not csrf_hdr or not secrets.compare_digest(csrf_hdr, expected_csrf):
+                return JSONResponse(
+                    {"error": "Invalid or missing CSRF token."}, status_code=403
+                )
+
+        if requires_endpoint_auth:
             # 4. Admin-only route guard
-            if path.startswith("/api/admin/") and role != "admin":
+            if path.startswith("/api/admin/") and (role != "admin" or not is_local_request):
                 return JSONResponse(
                     {"error": "Administrator privileges required."}, status_code=403
                 )
@@ -208,11 +252,14 @@ class _LocalSecurityMiddleware(BaseHTTPMiddleware):
                         owner = self._mcp_session_owners.get(mcp_sid)
                     if owner is not None and owner != session_id:
                         return JSONResponse(
-                            {"error": "MCP session belongs to another judge."}, status_code=403
+                            {"error": "MCP session belongs to another user."}, status_code=403
                         )
 
         request.state.auth_role = role
         request.state.session_id = session_id
+        request.state.auth_via = auth_via
+        request.state.is_local_request = is_local_request
+        request.state.csrf_token = expected_csrf
         token = current_session_id_var.set(session_id)
         try:
             response = await call_next(request)
@@ -242,8 +289,16 @@ def create_dashboard_app(
     require_auth: bool = False,
     require_react: bool = False,
     allowed_hosts: Iterable[str] | None = None,
+    google_client_id: str | None = None,
+    google_token_verifier: Callable[[str], Any] | None = None,
+    email_delivery_fn: Callable[[str, str], Any] | None = None,
 ) -> Starlette:
     """Create the Starlette app for CrewForge Chat, Gamified Office, MCP, and Mission Control."""
+    resolved_google_client_id = (
+        google_client_id
+        or os.environ.get("CREWFORGE_GOOGLE_CLIENT_ID", "").strip()
+        or None
+    )
     react_index = _FRONTEND_DIST_DIR / "index.html"
     use_react = react_index.is_file()
     if require_react and not use_react:
@@ -412,6 +467,166 @@ def create_dashboard_app(
         cancelled = registry.get_current_session().cancel_run(run_id)
         return JSONResponse({"run_id": run_id, "cancelled": cancelled})
 
+    def _is_https_request(request: Request) -> bool:
+        forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        return forwarded_proto == "https" or request.url.scheme == "https"
+
+    def _set_auth_cookies(
+        response: JSONResponse, request: Request, sess: dict[str, str]
+    ) -> JSONResponse:
+        secure_cookie = _is_https_request(request)
+        response.set_cookie(
+            key=_SESSION_COOKIE_NAME,
+            value=sess["session_cookie"],
+            httponly=True,
+            secure=secure_cookie,
+            samesite="lax",
+            path="/",
+            max_age=7 * 24 * 3600,
+        )
+        response.set_cookie(
+            key=_CSRF_COOKIE_NAME,
+            value=sess["csrf_token"],
+            httponly=False,
+            secure=secure_cookie,
+            samesite="lax",
+            path="/",
+            max_age=7 * 24 * 3600,
+        )
+        return response
+
+    async def auth_me(request: Request) -> JSONResponse:
+        auth_via = getattr(request.state, "auth_via", "local")
+        session_id = getattr(request.state, "session_id", "default")
+        role = getattr(request.state, "auth_role", "admin")
+        if auth_via == "local":
+            return JSONResponse(
+                {
+                    "authenticated": False,
+                    "google_enabled": bool(resolved_google_client_id or google_token_verifier),
+                }
+            )
+        user = registry.auth_store.get_user(session_id) if session_id != "default" else None
+        return JSONResponse(
+            {
+                "authenticated": True,
+                "role": role,
+                "user_id": session_id,
+                "user": user,
+                "csrf_token": getattr(request.state, "csrf_token", None),
+                "google_enabled": bool(resolved_google_client_id or google_token_verifier),
+            }
+        )
+
+    async def auth_google(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            id_token = str(body.get("id_token") or "") if isinstance(body, dict) else ""
+            claims = await verify_google_id_token(
+                id_token,
+                client_id=resolved_google_client_id,
+                custom_verifier=google_token_verifier,
+            )
+            user = registry.auth_store.resolve_google_user(
+                sub=claims["sub"],
+                email=claims["email"],
+                email_verified=claims["email_verified"],
+                display_name=claims.get("name"),
+            )
+            sess = registry.auth_store.create_browser_session(
+                user_id=user["user_id"], auth_provider="google"
+            )
+            resp = JSONResponse(
+                {
+                    "authenticated": True,
+                    "user": user,
+                    "csrf_token": sess["csrf_token"],
+                }
+            )
+            return _set_auth_cookies(resp, request, sess)
+        except Exception as exc:
+            return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=401)
+
+    async def auth_email_request(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            email = str(body.get("email") or "") if isinstance(body, dict) else ""
+            res = registry.auth_store.request_email_verification(
+                email, delivery_fn=email_delivery_fn
+            )
+            return JSONResponse(res)
+        except Exception as exc:
+            return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
+
+    async def auth_email_verify(request: Request) -> JSONResponse:
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Invalid request body.")
+            email = str(body.get("email") or "")
+            code = str(body.get("code") or "")
+            user = registry.auth_store.verify_email_code(email, code)
+            sess = registry.auth_store.create_browser_session(
+                user_id=user["user_id"], auth_provider="email"
+            )
+            resp = JSONResponse(
+                {
+                    "authenticated": True,
+                    "user": user,
+                    "csrf_token": sess["csrf_token"],
+                }
+            )
+            return _set_auth_cookies(resp, request, sess)
+        except Exception as exc:
+            return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=401)
+
+    async def auth_logout(request: Request) -> JSONResponse:
+        cookie_val = (request.cookies.get(_SESSION_COOKIE_NAME) or "").strip()
+        if cookie_val:
+            registry.auth_store.revoke_browser_session(cookie_val)
+        resp = JSONResponse({"authenticated": False})
+        resp.delete_cookie(_SESSION_COOKIE_NAME, path="/")
+        resp.delete_cookie(_CSRF_COOKIE_NAME, path="/")
+        return resp
+
+    async def user_list_mcp_tokens(_request: Request) -> JSONResponse:
+        uid = current_session_id_var.get()
+        if uid == "default":
+            return JSONResponse({"tokens": []})
+        return JSONResponse({"tokens": registry.list_judge_tokens(user_id=uid)})
+
+    async def user_issue_mcp_token(request: Request) -> JSONResponse:
+        uid = current_session_id_var.get()
+        if uid == "default":
+            return JSONResponse(
+                {"error": "Sign in as a user or use /api/admin/tokens for judge provisioning."},
+                status_code=400,
+            )
+        label = "MCP Client"
+        revoke_previous = False
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                if isinstance(body.get("label"), str):
+                    label = body["label"]
+                revoke_previous = bool(body.get("revoke_previous", False))
+        except Exception:
+            pass
+        issued = registry.issue_judge_token(
+            label=label, user_id=uid, revoke_previous=revoke_previous
+        )
+        return JSONResponse(issued, status_code=201)
+
+    async def user_revoke_mcp_token(request: Request) -> JSONResponse:
+        uid = current_session_id_var.get()
+        token_id = request.path_params["token_id"]
+        if uid == "default":
+            return JSONResponse({"error": "Token not found."}, status_code=404)
+        revoked = registry.revoke_judge_token(token_id, owner_user_id=uid)
+        if not revoked:
+            return JSONResponse({"error": "Active MCP token not found."}, status_code=404)
+        return JSONResponse({"revoked": True, "token_id": token_id})
+
     async def admin_list_tokens(_request: Request) -> JSONResponse:
         return JSONResponse({"tokens": registry.list_judge_tokens()})
 
@@ -466,6 +681,14 @@ def create_dashboard_app(
         Route("/", index),
         Route("/favicon.ico", favicon),
         Route("/api/health", health),
+        Route("/api/auth/me", auth_me, methods=["GET"]),
+        Route("/api/auth/google", auth_google, methods=["POST"]),
+        Route("/api/auth/email/request", auth_email_request, methods=["POST"]),
+        Route("/api/auth/email/verify", auth_email_verify, methods=["POST"]),
+        Route("/api/auth/logout", auth_logout, methods=["POST"]),
+        Route("/api/mcp/tokens", user_list_mcp_tokens, methods=["GET"]),
+        Route("/api/mcp/tokens", user_issue_mcp_token, methods=["POST"]),
+        Route("/api/mcp/tokens/{token_id}", user_revoke_mcp_token, methods=["DELETE"]),
         Route("/api/admin/tokens", admin_list_tokens, methods=["GET"]),
         Route("/api/admin/tokens", admin_issue_token, methods=["POST"]),
         Route("/api/admin/tokens/{identifier}", admin_revoke_token, methods=["DELETE"]),

@@ -74,7 +74,7 @@ async def test_admin_judge_separation_host_validation_and_zero_token_leakage(
         alpha_token = alpha_info["token"]
         alpha_session = alpha_info["session_id"]
         assert alpha_token.startswith("cfj_")
-        assert alpha_session.startswith("judge_")
+        assert alpha_session.startswith("usr_")
 
         issue_b = await client.post(
             "/api/admin/tokens",

@@ -28,11 +28,25 @@ export function setSessionToken(token: string | null): void {
   }
 }
 
+function getCsrfToken(): string | null {
+  try {
+    const match = document.cookie.match(/(?:^|;\s*)crewforge_csrf=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
   const token = getSessionToken();
   const headers = new Headers(init?.headers || {});
   if (token) headers.set("X-CrewForge-Token", token);
-  const resp = await fetch(url, { ...init, headers });
+  const method = (init?.method || "GET").toUpperCase();
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+    const csrf = getCsrfToken();
+    if (csrf) headers.set("X-CSRF-Token", csrf);
+  }
+  const resp = await fetch(url, { ...init, headers, credentials: "same-origin" });
   const data = await resp.json();
   if (!resp.ok) {
     throw new Error(data?.error || `HTTP ${resp.status}`);

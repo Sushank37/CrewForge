@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import hashlib
 import json
 import os
 import re
-import secrets
 import sqlite3
 import threading
 import time
@@ -24,6 +22,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel, Field
 
+from crewforge.auth import AuthStore
 from crewforge.config import (
     DEFAULT_MODEL_PRICING,
     BudgetAllocationCategory,
@@ -705,48 +704,29 @@ class JudgeSessionRegistry:
             if base_budget_db_path is not None
             else self.base_db_path.parent / "judge_budget.db"
         )
-        self.token_db_path = self.base_db_path.parent / "judge_tokens.db"
+        self.auth_store = AuthStore(self.base_db_path.parent / "auth.db")
         self.provider_factory = provider_factory
         self._lock = threading.Lock()
         self._sessions: dict[str, JudgeSessionManager] = {}
         self._mcp_dbs: dict[str, Database] = {}
         self._initialized_mcp_dbs: set[str] = set()
-        self._init_token_db()
 
-    def _connect_tokens(self) -> sqlite3.Connection:
-        self.token_db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.token_db_path), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _init_token_db(self) -> None:
-        conn = self._connect_tokens()
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS judge_tokens (
-                    token_id TEXT PRIMARY KEY,
-                    session_id TEXT UNIQUE NOT NULL,
-                    label TEXT NOT NULL,
-                    token_hash TEXT UNIQUE NOT NULL,
-                    created_at TEXT NOT NULL,
-                    revoked_at TEXT
-                )
-                """
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-    @staticmethod
-    def _hash_token(raw_token: str) -> str:
-        return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-
-    def issue_judge_token(self, label: str = "Judge") -> dict[str, Any]:
-        """Generate a unique, revocable judge token and bind it server-side to a new session."""
-        raw_token = f"cfj_{secrets.token_urlsafe(24)}"
-        session_id = f"judge_{secrets.token_hex(6)}"
-        return self.register_judge_token(raw_token, label=label, session_id=session_id)
+    def issue_judge_token(
+        self,
+        label: str = "Judge",
+        *,
+        user_id: str | None = None,
+        revoke_previous: bool = False,
+    ) -> dict[str, Any]:
+        """Issue or rotate a revocable MCP token bound to a permanent user account."""
+        target_uid = user_id
+        if target_uid is None:
+            target_uid = self.auth_store.create_service_user(label=label)["user_id"]
+        return self.auth_store.issue_mcp_token(
+            user_id=target_uid,
+            label=label,
+            revoke_previous=revoke_previous,
+        )
 
     def register_judge_token(
         self,
@@ -755,101 +735,35 @@ class JudgeSessionRegistry:
         label: str = "Judge",
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        """Register a judge token (storing only its SHA-256 hash) bound to a non-default session."""
-        cleaned_token = (raw_token or "").strip()
-        if len(cleaned_token) < 16:
-            raise ValueError("Judge token must be at least 16 characters.")
-        sid = validate_session_id(session_id or f"judge_{secrets.token_hex(6)}")
-        if sid == "default":
-            raise ValueError("Judge tokens cannot be bound to the default development session.")
-        token_id = f"tok_{secrets.token_hex(6)}"
-        created_at = _utc_iso()
-        clean_label = (label or "Judge").strip()[:80] or "Judge"
-        token_hash = self._hash_token(cleaned_token)
-        with self._lock:
-            conn = self._connect_tokens()
-            try:
-                conn.execute(
-                    "INSERT INTO judge_tokens "
-                    "(token_id, session_id, label, token_hash, created_at, revoked_at) "
-                    "VALUES (?, ?, ?, ?, ?, NULL)",
-                    (token_id, sid, clean_label, token_hash, created_at),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        return {
-            "token_id": token_id,
-            "session_id": sid,
-            "label": clean_label,
-            "token": cleaned_token,
-            "created_at": created_at,
-        }
+        """Register a pre-issued MCP token bound to a permanent user account."""
+        target_uid = validate_session_id(session_id) if session_id else None
+        if target_uid is None or target_uid == "default":
+            if session_id == "default":
+                raise ValueError("MCP tokens cannot bind to the default development session.")
+            target_uid = self.auth_store.create_service_user(label=label)["user_id"]
+        return self.auth_store.issue_mcp_token(
+            user_id=target_uid,
+            label=label,
+            raw_token=raw_token,
+        )
 
-    def list_judge_tokens(self) -> list[dict[str, Any]]:
-        """List non-secret metadata for issued judge tokens (never exposes tokens or hashes)."""
-        conn = self._connect_tokens()
-        try:
-            rows = conn.execute(
-                "SELECT token_id, session_id, label, created_at, revoked_at "
-                "FROM judge_tokens ORDER BY created_at DESC"
-            ).fetchall()
-            return [
-                {
-                    "token_id": r["token_id"],
-                    "session_id": r["session_id"],
-                    "label": r["label"],
-                    "created_at": r["created_at"],
-                    "revoked_at": r["revoked_at"],
-                    "active": r["revoked_at"] is None,
-                }
-                for r in rows
-            ]
-        finally:
-            conn.close()
+    def list_judge_tokens(self, *, user_id: str | None = None) -> list[dict[str, Any]]:
+        """List non-secret metadata for issued MCP tokens."""
+        return self.auth_store.list_mcp_tokens(user_id=user_id)
 
-    def revoke_judge_token(self, identifier: str) -> bool:
-        """Revoke an active judge token by token_id or session_id."""
-        ident = (identifier or "").strip()
-        if not ident:
-            return False
-        now = _utc_iso()
-        with self._lock:
-            conn = self._connect_tokens()
-            try:
-                cur = conn.execute(
-                    "UPDATE judge_tokens SET revoked_at = ? "
-                    "WHERE (token_id = ? OR session_id = ?) AND revoked_at IS NULL",
-                    (now, ident, ident),
-                )
-                conn.commit()
-                return cur.rowcount > 0
-            finally:
-                conn.close()
+    def revoke_judge_token(self, identifier: str, *, owner_user_id: str | None = None) -> bool:
+        """Revoke an active MCP token by token_id (or user_id when admin)."""
+        return self.auth_store.revoke_mcp_token(identifier, owner_user_id=owner_user_id)
 
     def authenticate_judge_token(self, raw_token: str) -> str | None:
-        """Validate a judge Bearer token and derive its server-side session_id."""
-        cleaned = (raw_token or "").strip()
-        if not cleaned:
-            return None
-        candidate_hash = self._hash_token(cleaned)
-        conn = self._connect_tokens()
-        try:
-            rows = conn.execute(
-                "SELECT session_id, token_hash FROM judge_tokens WHERE revoked_at IS NULL"
-            ).fetchall()
-        finally:
-            conn.close()
-        for row in rows:
-            if secrets.compare_digest(candidate_hash, str(row["token_hash"])):
-                sid = str(row["session_id"])
-                return sid if sid and sid != "default" else None
-        return None
+        """Validate an MCP Bearer token and derive its permanent user_id."""
+        return self.auth_store.authenticate_mcp_token(raw_token)
 
     def _paths_for(self, session_id: str) -> tuple[Path, Path]:
         if session_id == "default":
             return self.base_db_path, self.base_budget_db_path
-        session_dir = self.base_db_path.parent / "sessions" / session_id
+        folder = "users" if session_id.startswith("usr_") else "sessions"
+        session_dir = self.base_db_path.parent / folder / session_id
         return session_dir / "session.db", session_dir / "budget.db"
 
     def get_session(self, session_id: str | None = None) -> JudgeSessionManager:
