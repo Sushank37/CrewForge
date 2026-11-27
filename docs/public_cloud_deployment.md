@@ -50,7 +50,8 @@ CREWFORGE_MAX_MODEL_CALLS_PER_RUN=16
 ## 3. Verified Free / Student-Credit Hosting Options
 
 1. **Railway (Hobby / Free Trial or GitHub Student Developer Pack credits)**
-   - **Pros:** Native `Dockerfile` deployment, automatic public HTTPS (`*.up.railway.app`), persistent Volumes (`/data`), long-running background asyncio tasks survive client disconnects, clean `PORT` injection.
+   - **Pros:** Native `Dockerfile` deployment, automatic public HTTPS (`*.up.railway.app`), persistent **Railway Volumes** (mount a volume at `/data` in the service settings — do **not** declare `VOLUME` in `Dockerfile`), long-running background asyncio tasks survive client disconnects, clean `PORT` injection.
+   - **Storage & Permissions:** Attach a Railway Volume at `/data` and keep **1 replica**. On container start, the entrypoint ensures `/data` is writable by the non-root `crewforge` user (UID `10001`) before dropping privileges and launching `crewforge-public-mcp`.
    - **Limitations:** Free trial has a monthly credit cap; persistent volumes require a non-ephemeral plan/credit balance.
 
 2. **Fly.io (Pay-as-you-go free allowance / Student credits)**
