@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { api } from "./api";
+import { api, setSessionToken } from "./api";
+import { AuthPage } from "./components/AuthPage";
 import { CharacterGallery } from "./components/CharacterGallery";
 import { ChatView } from "./components/ChatView";
 import { McpView } from "./components/McpView";
 import { MissionControlView } from "./components/MissionControlView";
 import { SettingsView } from "./components/SettingsView";
-import type { AppView, ChatSummary, ThemeMode } from "./types";
+import type { AppView, AuthMeResponse, ChatSummary, ThemeMode } from "./types";
 
 export const App: React.FC = () => {
   const [view, setView] = useState<AppView>("chat");
@@ -14,6 +15,18 @@ export const App: React.FC = () => {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [inspectRunId, setInspectRunId] = useState<string | null>(null);
+  const [authInfo, setAuthInfo] = useState<AuthMeResponse | null>(null);
+  const [showSignIn, setShowSignIn] = useState<boolean>(false);
+  const [profileOpen, setProfileOpen] = useState<boolean>(false);
+
+  const resetAccountState = useCallback(() => {
+    setChats([]);
+    setActiveChatId(null);
+    setInspectRunId(null);
+    setView("chat");
+    setProfileOpen(false);
+    setSessionToken(null);
+  }, []);
 
   const loadChats = useCallback(async () => {
     try {
@@ -29,13 +42,31 @@ export const App: React.FC = () => {
         );
       }
     } catch {
-      /* backend starting */
+      /* unauthenticated or backend starting */
     }
   }, []);
 
+  const refreshAuthAndChats = useCallback(async () => {
+    try {
+      const me = await api.authMe();
+      setAuthInfo((prev) => {
+        if (prev?.user_id && prev.user_id !== me.user_id) {
+          resetAccountState();
+        }
+        return me;
+      });
+      if (me.authenticated || !me.auth_required) {
+        setShowSignIn(false);
+        await loadChats();
+      }
+    } catch {
+      /* backend starting */
+    }
+  }, [loadChats, resetAccountState]);
+
   useEffect(() => {
-    loadChats();
-  }, [loadChats]);
+    void refreshAuthAndChats();
+  }, [refreshAuthAndChats]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -62,6 +93,36 @@ export const App: React.FC = () => {
     setInspectRunId(runId);
     setView("mission-control");
   };
+
+  const handleAuthenticated = async () => {
+    resetAccountState();
+    await refreshAuthAndChats();
+  };
+
+  const handleLogout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* ignore */
+    }
+    resetAccountState();
+    await refreshAuthAndChats();
+  };
+
+  if (authInfo && ((authInfo.auth_required && !authInfo.authenticated) || showSignIn)) {
+    return (
+      <AuthPage
+        authInfo={authInfo}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+        onAuthenticated={handleAuthenticated}
+        onCancelLocal={!authInfo.auth_required ? () => setShowSignIn(false) : undefined}
+      />
+    );
+  }
+
+  const accountKey = authInfo?.user_id || "local";
+  const activeUser = authInfo?.user;
 
   return (
     <div className="app-shell">
@@ -151,6 +212,59 @@ export const App: React.FC = () => {
         </div>
 
         <div className="sidebar-footer">
+          {authInfo?.authenticated && activeUser ? (
+            <div className="profile-box">
+              <button
+                type="button"
+                className="profile-trigger"
+                onClick={() => setProfileOpen((o) => !o)}
+              >
+                <span className="profile-avatar">
+                  {(activeUser.display_name || activeUser.email || "U")[0].toUpperCase()}
+                </span>
+                <span className="profile-meta">
+                  <span className="profile-name">
+                    {activeUser.display_name || activeUser.email || activeUser.user_id}
+                  </span>
+                  <span className="profile-sub">{activeUser.email || activeUser.user_id}</span>
+                </span>
+              </button>
+              {profileOpen && (
+                <div className="profile-menu">
+                  <div className="profile-detail">
+                    <strong>Account ID</strong>
+                    <code>{activeUser.user_id}</code>
+                  </div>
+                  <div className="profile-detail">
+                    <strong>Status</strong>
+                    <span>
+                      {activeUser.email_verified ? "Verified" : "Provisioned"}
+                      {activeUser.google_linked ? " · Google" : ""}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-ghost btn-sm"
+                    style={{ width: "100%", marginTop: 6 }}
+                    onClick={() => void handleLogout()}
+                  >
+                    Log out
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            authInfo && (
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                style={{ width: "100%", marginBottom: 6 }}
+                onClick={() => setShowSignIn(true)}
+              >
+                Sign in with Google / Email
+              </button>
+            )
+          )}
           <button
             type="button"
             className="btn-ghost btn-sm"
@@ -162,7 +276,7 @@ export const App: React.FC = () => {
         </div>
       </aside>
 
-      <main className="main-content">
+      <main className="main-content" key={accountKey}>
         {view === "chat" && (
           <ChatView
             chatId={activeChatId}

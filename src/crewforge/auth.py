@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import os
 import re
 import secrets
+import smtplib
 import sqlite3
 import threading
+import time
+from collections import defaultdict, deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
+import httpx
 import jwt
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -39,6 +45,119 @@ def normalize_email(raw: str) -> str:
 def hash_secret(raw: str) -> str:
     """Return SHA-256 hex digest for storing tokens/codes without plaintext persistence."""
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+class EmailDeliveryNotConfiguredError(RuntimeError):
+    """Raised when no email delivery provider (Resend or SMTP) is configured."""
+
+
+class EmailDeliveryError(RuntimeError):
+    """Raised when an external email delivery provider rejects or fails delivery."""
+
+
+def is_email_delivery_configured() -> bool:
+    """Return True when Resend or SMTP email delivery credentials are configured."""
+    email_from = os.environ.get("CREWFORGE_EMAIL_FROM", "").strip()
+    if not email_from:
+        return False
+    has_resend = bool(os.environ.get("RESEND_API_KEY", "").strip())
+    has_smtp = bool(os.environ.get("CREWFORGE_SMTP_HOST", "").strip())
+    return has_resend or has_smtp
+
+
+def send_verification_email(email: str, code: str) -> None:
+    """Send a single-use verification code using Resend free tier or configured SMTP."""
+    email_from = os.environ.get("CREWFORGE_EMAIL_FROM", "").strip()
+    resend_key = os.environ.get("RESEND_API_KEY", "").strip()
+    smtp_host = os.environ.get("CREWFORGE_SMTP_HOST", "").strip()
+
+    if not email_from or (not resend_key and not smtp_host):
+        raise EmailDeliveryNotConfiguredError(
+            "Email delivery service is not configured. "
+            "Set RESEND_API_KEY or CREWFORGE_SMTP_HOST with CREWFORGE_EMAIL_FROM."
+        )
+
+    subject = "Your CrewForge verification code"
+    body = (
+        f"Your CrewForge verification code is: {code}\n\n"
+        "This code expires in 10 minutes. If you did not request this, ignore this email."
+    )
+
+    if resend_key:
+        try:
+            resp = httpx.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {resend_key}"},
+                json={
+                    "from": email_from,
+                    "to": [email],
+                    "subject": subject,
+                    "text": body,
+                },
+                timeout=10.0,
+            )
+            if resp.status_code >= 400:
+                raise EmailDeliveryError(
+                    f"Email provider rejected delivery (HTTP {resp.status_code})."
+                )
+            return
+        except EmailDeliveryError:
+            raise
+        except Exception as exc:
+            raise EmailDeliveryError("Failed to deliver verification email via Resend.") from exc
+
+    smtp_port = int(os.environ.get("CREWFORGE_SMTP_PORT", "587"))
+    smtp_user = os.environ.get("CREWFORGE_SMTP_USER", "").strip()
+    smtp_password = os.environ.get("CREWFORGE_SMTP_PASSWORD", "").strip()
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = email_from
+    msg["To"] = email
+    msg.set_content(body)
+    try:
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10.0) as server:
+                if smtp_user and smtp_password:
+                    server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=10.0) as server:
+                server.ehlo()
+                server.starttls()
+                if smtp_user and smtp_password:
+                    server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+    except Exception as exc:
+        raise EmailDeliveryError("Failed to deliver verification email via SMTP.") from exc
+
+
+class AuthRateLimiter:
+    """In-memory sliding-window rate limiter for auth endpoints (separate from inference)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._events: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+
+    def check_and_record(
+        self,
+        bucket: str,
+        key: str,
+        *,
+        limit: int,
+        window_seconds: int = 600,
+    ) -> tuple[bool, int]:
+        """Record an attempt if under limit; return (allowed, retry_after_seconds)."""
+        now = time.monotonic()
+        cutoff = now - window_seconds
+        with self._lock:
+            q = self._events[(bucket, key)]
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if len(q) >= limit:
+                retry_after = max(1, int(window_seconds - (now - q[0])) + 1)
+                return False, retry_after
+            q.append(now)
+            return True, 0
 
 
 async def verify_google_id_token(
@@ -214,6 +333,12 @@ class AuthStore:
                     "SELECT * FROM users WHERE google_sub = ?", (sub,)
                 ).fetchone()
                 if row is not None:
+                    owner_conflict = conn.execute(
+                        "SELECT user_id FROM users WHERE email = ? AND user_id != ?",
+                        (norm_email, row["user_id"]),
+                    ).fetchone()
+                    if owner_conflict is not None:
+                        raise ValueError("Email is already associated with another account.")
                     conn.execute(
                         "UPDATE users SET email = ?, email_verified = 1, last_login_at = ? "
                         "WHERE user_id = ?",
@@ -227,10 +352,19 @@ class AuthStore:
                     return self._user_dict(updated)
 
                 existing_email = conn.execute(
-                    "SELECT * FROM users WHERE email = ? AND email_verified = 1",
+                    "SELECT * FROM users WHERE email = ?",
                     (norm_email,),
                 ).fetchone()
                 if existing_email is not None:
+                    existing_sub = existing_email["google_sub"]
+                    if existing_sub is not None and str(existing_sub) != sub:
+                        raise ValueError(
+                            "This email is already linked to a different Google account."
+                        )
+                    if not bool(existing_email["email_verified"]):
+                        raise ValueError(
+                            "Cannot link Google sign-in to an unverified email account."
+                        )
                     conn.execute(
                         "UPDATE users SET google_sub = ?, last_login_at = ? WHERE user_id = ?",
                         (sub, now, existing_email["user_id"]),
@@ -295,8 +429,23 @@ class AuthStore:
                 conn.commit()
             finally:
                 conn.close()
-        if delivery_fn is not None:
-            delivery_fn(norm_email, code)
+        try:
+            if delivery_fn is not None:
+                delivery_fn(norm_email, code)
+            else:
+                send_verification_email(norm_email, code)
+        except Exception:
+            with self._lock:
+                conn = self._connect()
+                try:
+                    conn.execute(
+                        "DELETE FROM email_challenges WHERE challenge_id = ?",
+                        (challenge_id,),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            raise
         return {
             "challenge_sent": True,
             "email": norm_email,

@@ -125,3 +125,49 @@ Standard remote MCP clients (Claude Desktop, Cursor, MCP Inspector, or `mcp.clie
 ```
 
 Available MCP tools: `solve`, `baseline`, and `trace`.
+
+---
+
+## 6. User Sign-In Configuration (Google OAuth & Free-Tier Email)
+
+To enable browser sign-in (`Continue with Google` and `Continue with Email`) for remote judges/users:
+
+### A. Google Identity Services (`CREWFORGE_GOOGLE_CLIENT_ID`)
+
+1. Open [Google Cloud Console → APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials).
+2. Click **Create Credentials → OAuth client ID** and choose **Web application**.
+3. Under **Authorized JavaScript origins**, add:
+   - `http://127.0.0.1:8765` (for local testing)
+   - `https://your-tunnel-hostname.trycloudflare.com` (your Cloudflare Tunnel URL)
+4. Copy the **Client ID** (`...apps.googleusercontent.com`) and set:
+
+```bash
+export CREWFORGE_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
+```
+
+> CrewForge verifies Google ID tokens server-side against Google's JWKS (`https://www.googleapis.com/oauth2/v3/certs`), validating `aud`, `iss`, `exp`, and `email_verified=true`.
+
+### B. Free-Tier Email Verification Delivery
+
+CrewForge never reports email delivery success unless a real email provider is configured. Choose **one** option:
+
+#### Option 1: Resend (Recommended Free Tier — 100 emails/day, 3,000/month)
+1. Create a free account at [resend.com](https://resend.com) and generate an API key.
+2. Verify your sender domain (or use Resend's sandbox sender for your own test address).
+3. Export:
+
+```bash
+export RESEND_API_KEY="re_..."
+export CREWFORGE_EMAIL_FROM="CrewForge <noreply@yourdomain.com>"
+```
+
+#### Option 2: Standard SMTP (e.g., Brevo free tier or Gmail App Password)
+
+```bash
+export CREWFORGE_EMAIL_FROM="noreply@yourdomain.com"
+export CREWFORGE_SMTP_HOST="smtp-relay.brevo.com"
+export CREWFORGE_SMTP_PORT="587"
+export CREWFORGE_SMTP_USER="your-smtp-username"
+export CREWFORGE_SMTP_PASSWORD="your-smtp-password"
+```
+

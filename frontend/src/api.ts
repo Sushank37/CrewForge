@@ -1,4 +1,6 @@
 import type {
+  AuthMeResponse,
+  AuthUser,
   BenchmarkReport,
   ChatDetail,
   ChatSummary,
@@ -101,4 +103,33 @@ export const api = {
   getReplayFile: (filename: string) =>
     reqJson<TracePayload>(`/api/replay/files/${encodeURIComponent(filename)}`),
   getBenchmark: () => reqJson<BenchmarkReport>("/api/benchmark"),
+  authMe: () => reqJson<AuthMeResponse>("/api/auth/me"),
+  loginWithGoogle: (idToken: string) =>
+    reqJson<{ authenticated: boolean; user: AuthUser; csrf_token: string }>("/api/auth/google", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id_token: idToken }),
+    }),
+  requestEmailCode: (email: string) =>
+    reqJson<{ challenge_sent: boolean; email: string; expires_in_seconds: number }>(
+      "/api/auth/email/request",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      }
+    ),
+  verifyEmailCode: (email: string, code: string) =>
+    reqJson<{ authenticated: boolean; user: AuthUser; csrf_token: string }>(
+      "/api/auth/email/verify",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, code }),
+      }
+    ),
+  logout: () =>
+    reqJson<{ authenticated: boolean }>("/api/auth/logout", {
+      method: "POST",
+    }),
 };

@@ -22,7 +22,13 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from crewforge.auth import verify_google_id_token
+from crewforge.auth import (
+    AuthRateLimiter,
+    EmailDeliveryError,
+    EmailDeliveryNotConfiguredError,
+    is_email_delivery_configured,
+    verify_google_id_token,
+)
 from crewforge.config import CrewForgeSettings, sanitize_error_message
 from crewforge.dashboard_api import (
     BenchmarkStore,
@@ -292,6 +298,7 @@ def create_dashboard_app(
     google_client_id: str | None = None,
     google_token_verifier: Callable[[str], Any] | None = None,
     email_delivery_fn: Callable[[str, str], Any] | None = None,
+    rate_limiter: AuthRateLimiter | None = None,
 ) -> Starlette:
     """Create the Starlette app for CrewForge Chat, Gamified Office, MCP, and Mission Control."""
     resolved_google_client_id = (
@@ -299,6 +306,7 @@ def create_dashboard_app(
         or os.environ.get("CREWFORGE_GOOGLE_CLIENT_ID", "").strip()
         or None
     )
+    resolved_rate_limiter = rate_limiter or AuthRateLimiter()
     react_index = _FRONTEND_DIST_DIR / "index.html"
     use_react = react_index.is_file()
     if require_react and not use_react:
@@ -495,30 +503,59 @@ def create_dashboard_app(
         )
         return response
 
+    def _client_ip(request: Request) -> str:
+        cf_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+        if cf_ip:
+            return cf_ip
+        xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        if xff:
+            return xff
+        if request.client and request.client.host:
+            return request.client.host
+        return "unknown"
+
     async def auth_me(request: Request) -> JSONResponse:
         auth_via = getattr(request.state, "auth_via", "local")
         session_id = getattr(request.state, "session_id", "default")
         role = getattr(request.state, "auth_role", "admin")
+        is_local = getattr(request.state, "is_local_request", True)
+        auth_required = bool(require_auth or not is_local)
+        email_ready = bool(email_delivery_fn is not None or is_email_delivery_configured())
         if auth_via == "local":
             return JSONResponse(
                 {
                     "authenticated": False,
+                    "auth_required": auth_required,
                     "google_enabled": bool(resolved_google_client_id or google_token_verifier),
+                    "google_client_id": resolved_google_client_id,
+                    "email_delivery_configured": email_ready,
                 }
             )
         user = registry.auth_store.get_user(session_id) if session_id != "default" else None
         return JSONResponse(
             {
                 "authenticated": True,
+                "auth_required": auth_required,
                 "role": role,
                 "user_id": session_id,
                 "user": user,
                 "csrf_token": getattr(request.state, "csrf_token", None),
                 "google_enabled": bool(resolved_google_client_id or google_token_verifier),
+                "google_client_id": resolved_google_client_id,
+                "email_delivery_configured": email_ready,
             }
         )
 
     async def auth_google(request: Request) -> JSONResponse:
+        allowed, retry_after = resolved_rate_limiter.check_and_record(
+            "google_auth_ip", _client_ip(request), limit=20, window_seconds=600
+        )
+        if not allowed:
+            return JSONResponse(
+                {"error": "Too many authentication attempts. Please try again later."},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
         try:
             body = await request.json()
             id_token = str(body.get("id_token") or "") if isinstance(body, dict) else ""
@@ -548,17 +585,51 @@ def create_dashboard_app(
             return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=401)
 
     async def auth_email_request(request: Request) -> JSONResponse:
+        client_ip = _client_ip(request)
+        allowed_ip, retry_ip = resolved_rate_limiter.check_and_record(
+            "email_request_ip", client_ip, limit=5, window_seconds=600
+        )
+        if not allowed_ip:
+            return JSONResponse(
+                {"error": "Too many verification code requests. Please try again later."},
+                status_code=429,
+                headers={"Retry-After": str(retry_ip)},
+            )
         try:
             body = await request.json()
             email = str(body.get("email") or "") if isinstance(body, dict) else ""
+            norm_key = email.strip().lower()
+            if norm_key:
+                allowed_email, retry_email = resolved_rate_limiter.check_and_record(
+                    "email_request_addr", norm_key, limit=3, window_seconds=600
+                )
+                if not allowed_email:
+                    return JSONResponse(
+                        {"error": "Too many verification requests for this email address."},
+                        status_code=429,
+                        headers={"Retry-After": str(retry_email)},
+                    )
             res = registry.auth_store.request_email_verification(
                 email, delivery_fn=email_delivery_fn
             )
             return JSONResponse(res)
+        except EmailDeliveryNotConfiguredError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        except EmailDeliveryError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=502)
         except Exception as exc:
             return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
 
     async def auth_email_verify(request: Request) -> JSONResponse:
+        allowed, retry_after = resolved_rate_limiter.check_and_record(
+            "email_verify_ip", _client_ip(request), limit=10, window_seconds=600
+        )
+        if not allowed:
+            return JSONResponse(
+                {"error": "Too many verification attempts. Please try again later."},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
         try:
             body = await request.json()
             if not isinstance(body, dict):

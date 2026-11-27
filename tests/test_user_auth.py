@@ -196,6 +196,145 @@ async def test_google_and_verified_email_auth_cookies_csrf_and_privacy(tmp_path:
         assert titles == ["Alice Persistent Chat"]
 
 
+async def test_email_delivery_requires_config_subject_replacement_blocked_and_rate_limits(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("CREWFORGE_SMTP_HOST", raising=False)
+    monkeypatch.delenv("CREWFORGE_EMAIL_FROM", raising=False)
+
+    # 1. Without configured email delivery, /api/auth/email/request MUST fail (503)
+    unconfigured_app = create_dashboard_app(
+        db_path=tmp_path / "unconf.db",
+        auth_token="local-admin",
+        require_auth=True,
+        require_react=False,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=unconfigured_app), base_url="http://127.0.0.1"
+    ) as client:
+        me = await client.get("/api/auth/me")
+        assert me.status_code == 200
+        assert me.json()["email_delivery_configured"] is False
+        no_email = await client.post(
+            "/api/auth/email/request", json={"email": "judge@example.com"}
+        )
+        assert no_email.status_code == 503
+
+    # 2. Subject replacement blocked + rate limiting (429) + two separate browser accounts
+    sent_codes: dict[str, str] = {}
+
+    def _verifier(tok: str) -> dict[str, Any]:
+        if tok == "alice-google-1":
+            return {
+                "sub": "sub-alice-original",
+                "email": "alice@example.com",
+                "email_verified": True,
+                "name": "Alice",
+            }
+        if tok == "attacker-google-sub":
+            return {
+                "sub": "sub-attacker-replacement",
+                "email": "alice@example.com",
+                "email_verified": True,
+                "name": "Attacker",
+            }
+        raise ValueError("Invalid token")
+
+    app = create_dashboard_app(
+        db_path=tmp_path / "hardened.db",
+        auth_token="local-admin",
+        require_auth=True,
+        require_react=False,
+        allowed_hosts=["judge.example.trycloudflare.com"],
+        google_client_id="client-id",
+        google_token_verifier=_verifier,
+        email_delivery_fn=lambda e, c: sent_codes.__setitem__(e, c),
+    )
+    transport = httpx.ASGITransport(app=app)
+    remote_hdrs = {
+        "Host": "judge.example.trycloudflare.com",
+        "X-Forwarded-Proto": "https",
+        "Origin": "https://judge.example.trycloudflare.com",
+    }
+
+    # Account A (Google) and Account B (Verified Email) in separate browser clients
+    async with (
+        httpx.AsyncClient(
+            transport=transport, base_url="https://judge.example.trycloudflare.com"
+        ) as browser_a,
+        httpx.AsyncClient(
+            transport=transport, base_url="https://judge.example.trycloudflare.com"
+        ) as browser_b,
+    ):
+        a_login = await browser_a.post(
+            "/api/auth/google", headers=remote_hdrs, json={"id_token": "alice-google-1"}
+        )
+        assert a_login.status_code == 200
+        a_csrf = a_login.json()["csrf_token"]
+        a_chat = await browser_a.post(
+            "/api/chats",
+            headers={**remote_hdrs, "X-CSRF-Token": a_csrf},
+            json={"title": "Alice Secret Chat"},
+        )
+        assert a_chat.status_code == 201
+        a_chat_id = a_chat.json()["chat_id"]
+
+        # Google subject replacement for alice@example.com MUST be rejected (401)
+        hijack_sub = await browser_b.post(
+            "/api/auth/google", headers=remote_hdrs, json={"id_token": "attacker-google-sub"}
+        )
+        assert hijack_sub.status_code == 401
+
+        # Account B signs in with verified email
+        req_b = await browser_b.post(
+            "/api/auth/email/request",
+            headers=remote_hdrs,
+            json={"email": "bob@example.com"},
+        )
+        assert req_b.status_code == 200
+        ver_b = await browser_b.post(
+            "/api/auth/email/verify",
+            headers=remote_hdrs,
+            json={"email": "bob@example.com", "code": sent_codes["bob@example.com"]},
+        )
+        assert ver_b.status_code == 200
+        b_csrf = ver_b.json()["csrf_token"]
+
+        # Account B has private chat history (cannot see or read Account A's chat)
+        b_chats = await browser_b.get("/api/chats", headers=remote_hdrs)
+        assert b_chats.status_code == 200
+        assert b_chats.json()["chats"] == []
+        cross_read = await browser_b.get(f"/api/chats/{a_chat_id}", headers=remote_hdrs)
+        assert cross_read.status_code == 404
+
+        b_chat = await browser_b.post(
+            "/api/chats",
+            headers={**remote_hdrs, "X-CSRF-Token": b_csrf},
+            json={"title": "Bob Private Chat"},
+        )
+        assert b_chat.status_code == 201
+        b_chat_id = b_chat.json()["chat_id"]
+        a_reads_b = await browser_a.get(f"/api/chats/{b_chat_id}", headers=remote_hdrs)
+        assert a_reads_b.status_code == 404
+
+        # Auth abuse protection: repeated email requests trigger 429
+        for _ in range(3):
+            await browser_b.post(
+                "/api/auth/email/request",
+                headers={**remote_hdrs, "X-CSRF-Token": b_csrf},
+                json={"email": "rate@example.com"},
+            )
+        rate_limited = await browser_b.post(
+            "/api/auth/email/request",
+            headers={**remote_hdrs, "X-CSRF-Token": b_csrf},
+            json={"email": "rate@example.com"},
+        )
+        assert rate_limited.status_code == 429
+        assert "Retry-After" in rate_limited.headers
+
+
 async def test_user_mcp_token_rotation_preserves_workspace_and_trace(tmp_path: Path) -> None:
     sent_codes: dict[str, str] = {}
 

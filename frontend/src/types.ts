@@ -2,6 +2,28 @@ export type AppView = "chat" | "mission-control" | "settings" | "mcp" | "charact
 export type ThemeMode = "dark" | "light";
 export type RunModeType = "network" | "baseline";
 
+export interface AuthUser {
+  user_id: string;
+  email: string | null;
+  email_verified: boolean;
+  google_linked: boolean;
+  display_name: string | null;
+  created_at: string;
+  last_login_at: string;
+}
+
+export interface AuthMeResponse {
+  authenticated: boolean;
+  auth_required: boolean;
+  role?: string;
+  user_id?: string;
+  user?: AuthUser | null;
+  csrf_token?: string | null;
+  google_enabled: boolean;
+  google_client_id?: string | null;
+  email_delivery_configured?: boolean;
+}
+
 export interface ChatSummary {
   chat_id: string;
   title: string;
