@@ -1420,6 +1420,44 @@ class Database:
             revision_notes=revision_notes,
         )
 
+    def _refresh_claim_premise_refs_sync(
+        self,
+        *,
+        run_id: str,
+        claim_id: str,
+        version: int,
+        premise_refs: list[Any],
+    ) -> None:
+        now = _utc_iso()
+        refs_json = json.dumps([r.model_dump() for r in premise_refs], ensure_ascii=False)
+        with self._transaction(immediate=True) as conn:
+            conn.execute(
+                """
+                UPDATE claims
+                SET premise_refs_json = ?,
+                    updated_at = ?
+                WHERE run_id = ? AND claim_id = ? AND version = ?
+                """,
+                (refs_json, now, run_id, claim_id, version),
+            )
+
+    async def refresh_claim_premise_refs(
+        self,
+        *,
+        run_id: str,
+        claim_id: str,
+        version: int,
+        premise_refs: list[Any],
+    ) -> None:
+        """Refresh premise_refs_json on an existing claim version prior to revalidation."""
+        await asyncio.to_thread(
+            self._refresh_claim_premise_refs_sync,
+            run_id=run_id,
+            claim_id=claim_id,
+            version=version,
+            premise_refs=premise_refs,
+        )
+
     def _register_reviewer_sync(self, reviewer: ReviewerIdentity) -> None:
         with self._transaction(immediate=True) as conn:
             run_row = conn.execute(

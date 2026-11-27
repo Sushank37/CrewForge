@@ -196,7 +196,18 @@ def build_provenance_catalog(
                 catalog.targets_by_key[evd.source_ref] = target
             doc_source_texts.setdefault(evd.source_ref, []).append(evd.excerpt)
 
-    # If any document has multiple chunks, build an aggregate target under source_ref and doc_1
+    # If any document has multiple chunks, build an aggregate target under source_ref and doc_k
+    doc_alias_by_source: dict[str, str] = {}
+    doc_alias_idx = 0
+    for evd in verified_evidence or []:
+        if (
+            evd.source_type == "external_retrieved"
+            and evd.source_ref
+            and evd.source_ref not in doc_alias_by_source
+        ):
+            doc_alias_idx += 1
+            doc_alias_by_source[evd.source_ref] = f"doc_{doc_alias_idx}"
+
     for source_ref, excerpts in doc_source_texts.items():
         if len(excerpts) > 1:
             full_text = "\n\n".join(excerpts)
@@ -208,8 +219,9 @@ def build_provenance_catalog(
                 is_trusted=True,
             )
             catalog.targets_by_key[source_ref] = agg_target
-            if "doc_1" in catalog.targets_by_key and len(doc_source_texts) == 1:
-                catalog.targets_by_key["doc_1"] = agg_target
+            doc_alias = doc_alias_by_source.get(source_ref)
+            if doc_alias and doc_alias in catalog.targets_by_key:
+                catalog.targets_by_key[doc_alias] = agg_target
 
     # Compute latest version per claim_id to detect stale claim versions immediately.
     latest_ver_by_id: dict[str, int] = {}

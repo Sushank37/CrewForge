@@ -117,6 +117,14 @@ describe("2D Office Animation Engine (complete recorded run_0edd437ada29 trace)"
         },
       })
     ).toBe("blocked");
+
+    expect(
+      classifyReleaseOutcome({
+        ...base,
+        mode: "baseline",
+        status: "completed",
+      })
+    ).toBe("none");
   });
 
   it("switches characters to honest waiting pose during provider quota waits", () => {

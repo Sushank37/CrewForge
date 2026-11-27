@@ -16,11 +16,13 @@ from crewforge.schemas import (
     AgentSpec,
     Claim,
     ClaimStatus,
+    ClaimVersionRef,
     Evidence,
     ExecutionEvent,
     ExecutionPlan,
     ReviewVerdict,
     RevisionOutput,
+    VerificationStatus,
 )
 from crewforge.storage.database import CrossRunReferenceError, Database
 
@@ -332,7 +334,8 @@ class TargetedRepairEngine:
             if not revised_this_round:
                 break
 
-            # Independently re-review revised claims (+ any stale dependents if present).
+            # Independently re-review revised claims, then revalidate any stale dependents
+            # whose upstream premises are now all supported.
             to_rereview = list(revised_this_round)
             review_outcome = await self._reviewer.review_claims(
                 run_id=run_id,
@@ -345,9 +348,18 @@ class TargetedRepairEngine:
             for v in review_outcome.verdicts:
                 verdicts_by_key.setdefault((v.claim_id, v.claim_version), []).append(v)
 
+            dep_calls, dep_verdicts, blocking_from_deps = await self._revalidate_stale_dependents(
+                run_id=run_id,
+                original_prompt=original_prompt,
+                plan=plan,
+                verdicts_by_key=verdicts_by_key,
+                run_deadline_monotonic=run_deadline_monotonic,
+            )
+            result.re_review_calls += dep_calls
+
             # Prepare any remaining blocking claims for potential next round.
             by_author = {}
-            for claim in review_outcome.blocking_claims:
+            for claim in [*review_outcome.blocking_claims, *blocking_from_deps]:
                 if claim.author_agent_id in agents_by_id:
                     by_author.setdefault(claim.author_agent_id, []).append(claim)
 
@@ -364,3 +376,96 @@ class TargetedRepairEngine:
                 )
 
         return result
+
+    async def _revalidate_stale_dependents(
+        self,
+        *,
+        run_id: str,
+        original_prompt: str,
+        plan: ExecutionPlan,
+        verdicts_by_key: dict[tuple[str, int], list[ReviewVerdict]],
+        run_deadline_monotonic: float | None,
+    ) -> tuple[int, list[ReviewVerdict], list[Claim]]:
+        """Re-submit stale dependent claims once all upstream premises are supported."""
+        total_calls = 0
+        all_verdicts: list[ReviewVerdict] = []
+        all_blocking: list[Claim] = []
+        for _pass in range(2):
+            latest_all = await self._db.get_claims_for_run(run_id, latest_only=True)
+            latest_by_id = {c.claim_id: c for c in latest_all}
+            ready: list[Claim] = []
+
+            for claim in latest_all:
+                if not (
+                    claim.status == ClaimStatus.STALE
+                    or claim.verification_status == VerificationStatus.STALE_PENDING_REVIEW
+                ):
+                    continue
+                up_ids = sorted(
+                    {p.claim_id for p in claim.premise_refs} | set(claim.depends_on_claim_ids)
+                )
+                if not up_ids:
+                    continue
+                all_supported = all(
+                    (up := latest_by_id.get(uid)) is not None
+                    and up.status == ClaimStatus.SUPPORTED
+                    and up.verification_status != VerificationStatus.STALE_PENDING_REVIEW
+                    for uid in up_ids
+                )
+                if not all_supported:
+                    continue
+
+                refreshed_refs = [
+                    ClaimVersionRef(claim_id=uid, claim_version=latest_by_id[uid].version)
+                    for uid in up_ids
+                ]
+                await self._db.refresh_claim_premise_refs(
+                    run_id=run_id,
+                    claim_id=claim.claim_id,
+                    version=claim.version,
+                    premise_refs=refreshed_refs,
+                )
+                await self._db.update_claim_verification_state(
+                    run_id=run_id,
+                    claim_id=claim.claim_id,
+                    version=claim.version,
+                    status=ClaimStatus.ASSERTED,
+                    verification_status=VerificationStatus.UNVERIFIED,
+                    revision_notes="Upstream premises verified; queued for dependent revalidation.",
+                )
+                ready.append(
+                    claim.model_copy(
+                        update={
+                            "premise_refs": refreshed_refs,
+                            "status": ClaimStatus.ASSERTED,
+                            "verification_status": VerificationStatus.UNVERIFIED,
+                        }
+                    )
+                )
+
+            if not ready:
+                break
+
+            await self._db.append_event(
+                ExecutionEvent(
+                    run_id=run_id,
+                    event_type="claims_revalidation_started",
+                    actor="claim_graph",
+                    message=f"Queued {len(ready)} stale dependent claim(s) for revalidation.",
+                    payload={"claim_ids": [c.claim_id for c in ready]},
+                )
+            )
+            sub_outcome = await self._reviewer.review_claims(
+                run_id=run_id,
+                original_prompt=original_prompt,
+                plan=plan,
+                target_claims=ready,
+                run_deadline_monotonic=run_deadline_monotonic,
+            )
+            total_calls += sub_outcome.reviewer_calls
+            all_verdicts.extend(sub_outcome.verdicts)
+            all_blocking.extend(sub_outcome.blocking_claims)
+            for v in sub_outcome.verdicts:
+                verdicts_by_key.setdefault((v.claim_id, v.claim_version), []).append(v)
+
+        return total_calls, all_verdicts, all_blocking

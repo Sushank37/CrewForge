@@ -17,7 +17,13 @@ from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
 from crewforge.providers.base import ModelProvider, ProviderError, ProviderResponseError
 from crewforge.providers.ollama_provider import OllamaProvider
 from crewforge.providers.openai_provider import OpenAIProvider
-from crewforge.schemas import ArithmeticRequest, ExecutionEvent, RunResult, RunStatus
+from crewforge.schemas import (
+    ArithmeticRequest,
+    ExecutionEvent,
+    RunResult,
+    RunStatus,
+    VerificationSummary,
+)
 from crewforge.storage.database import Database
 from crewforge.tools.arithmetic import (
     DeterministicArithmeticTool,
@@ -493,6 +499,16 @@ class BaselineRunner:
                 assumptions=parsed.assumptions,
                 confidence_notes=parsed.confidence_notes,
                 baseline_mode=b_mode,
+                verification=VerificationSummary(
+                    execution_completed=True,
+                    release_checks_executed=False,
+                    content_released_safely=False,
+                    honesty_gate_passed=False,
+                    honesty_gate_reasons=[
+                        "Baseline single-agent mode does not perform independent claim "
+                        "verification or Honesty Gate checks."
+                    ],
+                ),
                 usage=aggregated_usage,
                 latency_ms=total_latency_ms,
                 created_at=created_at,

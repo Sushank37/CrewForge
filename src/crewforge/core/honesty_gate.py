@@ -622,7 +622,12 @@ class HonestyGate:
                     for c in [*req_to_partial.get(req_id, []), *req_to_partial.get(req_text, [])]
                 }.values()
             )
-            if acc_claims:
+            blocked_claims = [
+                c
+                for c in [*rejected_claims, *stale_claims, *unresolved_claims]
+                if req_id in c.requirement_refs or req_text in c.requirement_refs
+            ]
+            if acc_claims and not blocked_claims:
                 answered_count += 1
                 req_score += 1.0
                 req_items.append(
@@ -634,6 +639,24 @@ class HonestyGate:
                             {"claim_id": c.claim_id, "claim_version": c.version} for c in acc_claims
                         ],
                         rationale="Linked to verified accepted claim version(s).",
+                    )
+                )
+            elif acc_claims and blocked_claims:
+                partial_count += 1
+                req_score += 0.5
+                req_items.append(
+                    RequirementCoverageItem(
+                        requirement_id=req_id,
+                        text=req_text,
+                        status="partially_answered",
+                        linked_claim_refs=[
+                            {"claim_id": c.claim_id, "claim_version": c.version}
+                            for c in [*acc_claims, *blocked_claims]
+                        ],
+                        rationale=(
+                            "Partially answered: verified claims cover part of this requirement, "
+                            "while other linked claims remain unresolved, stale, or rejected."
+                        ),
                     )
                 )
             elif part_claims:
@@ -652,11 +675,6 @@ class HonestyGate:
                     )
                 )
             else:
-                blocked_claims = [
-                    c
-                    for c in [*rejected_claims, *stale_claims, *unresolved_claims]
-                    if req_id in c.requirement_refs or req_text in c.requirement_refs
-                ]
                 if blocked_claims:
                     unresolved_req_count += 1
                     req_items.append(
@@ -694,11 +712,24 @@ class HonestyGate:
             )
 
         if approved_accepted:
-            lines = ["**Verified Findings:**"]
-            for seg, claims in approved_accepted:
-                refs = ", ".join(f"{c.claim_id}@v{c.version}" for c in claims)
-                lines.append(f"- {seg.text} [{refs}]")
-            sections.append("\n".join(lines))
+            seen_norms: set[str] = set()
+            clean_points: list[str] = []
+            for seg, _claims in approved_accepted:
+                norm = _canonical_norm(seg.text)
+                if norm and norm not in seen_norms:
+                    seen_norms.add(norm)
+                    text_out = seg.text.strip()
+                    if not text_out.endswith((".", "!", "?")):
+                        text_out += "."
+                    clean_points.append(text_out)
+            if len(clean_points) == 1:
+                sections.append(clean_points[0])
+            else:
+                summary_line = " ".join(clean_points)
+                bullet_lines = [f"- {pt}" for pt in clean_points]
+                sections.append(
+                    f"{summary_line}\n\n**Verified Details:**\n" + "\n".join(bullet_lines)
+                )
 
         if approved_conditional:
             lines = ["**Conditional / Qualified Statements:**"]

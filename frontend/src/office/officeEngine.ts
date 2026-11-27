@@ -104,6 +104,7 @@ export type ReleaseOutcome = "none" | "full" | "partial" | "blocked";
 
 export function classifyReleaseOutcome(trace: TracePayload | null): ReleaseOutcome {
   if (!trace) return "none";
+  if (String(trace.mode || "").toLowerCase() === "baseline") return "none";
   const status = String(trace.status || "").toLowerCase();
   if (status === "failed" || status === "cancelled") return "blocked";
   const gate = trace.honesty_gate;
