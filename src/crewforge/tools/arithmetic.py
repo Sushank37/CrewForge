@@ -148,6 +148,7 @@ def build_provenance_catalog(
     all_claims: list[Claim] | None = None,
     tool_records: list[ToolExecutionRecord] | None = None,
     assumptions: list[str] | None = None,
+    run_id: str | None = None,
 ) -> ProvenanceCatalog:
     """Construct strict provenance catalog for exact variable-to-source resolution."""
     catalog = ProvenanceCatalog(
@@ -168,19 +169,51 @@ def build_provenance_catalog(
         catalog.targets_by_key[alias] = target
 
     doc_source_texts: dict[str, list[str]] = {}
-    doc_idx = 0
+    doc_source_trusted: dict[str, bool] = {}
+    doc_alias_by_source: dict[str, str] = {}
+    used_doc_aliases: set[str] = set()
+    next_doc_idx = 1
+
+    def _alloc_doc_alias(source_ref: str) -> str:
+        nonlocal next_doc_idx
+        if source_ref in doc_alias_by_source:
+            return doc_alias_by_source[source_ref]
+        if (
+            re.fullmatch(r"doc_[1-9]\d*", source_ref)
+            and source_ref not in used_doc_aliases
+        ):
+            doc_alias_by_source[source_ref] = source_ref
+            used_doc_aliases.add(source_ref)
+            return source_ref
+        while f"doc_{next_doc_idx}" in used_doc_aliases:
+            next_doc_idx += 1
+        candidate = f"doc_{next_doc_idx}"
+        next_doc_idx += 1
+        doc_alias_by_source[source_ref] = candidate
+        used_doc_aliases.add(candidate)
+        return candidate
+
     for evd in verified_evidence or []:
+        if run_id is not None and evd.run_id != run_id:
+            continue
         is_ok = bool(evd.verified_in_input)
         reason = None if is_ok else f"Evidence '{evd.evidence_id}' is unverified."
         # Preserve stable doc_1..doc_N aliases for primary ingested/retrieved documents
-        # without letting specialist sub-excerpts with source_ref='doc_1' overwrite them.
+        # without letting specialist sub-excerpts overwrite them.
+        is_specialist = str(evd.created_by or "").startswith("agt_")
         is_primary_doc = (
-            evd.source_type == "external_retrieved"
-            or evd.created_by in {"lead", "baseline", "operator"}
-        ) and not evd.source_ref.startswith("doc_")
-        alias = f"doc_{doc_idx + 1}" if is_primary_doc else evd.evidence_id
+            evd.source_type == "external_retrieved" and not is_specialist
+        ) or (
+            evd.created_by in {"lead", "baseline", "operator", "retriever"}
+            and evd.source_type != "user_prompt"
+        )
         if is_primary_doc:
-            doc_idx += 1
+            source_key = evd.source_ref or evd.evidence_id
+            alias = _alloc_doc_alias(source_key)
+        else:
+            source_key = ""
+            alias = evd.evidence_id
+
         target = ProvenanceTarget(
             alias=alias,
             kind="verified_evidence",
@@ -191,49 +224,51 @@ def build_provenance_catalog(
         )
         catalog.targets_by_key[evd.evidence_id] = target
         if is_primary_doc:
-            catalog.targets_by_key[alias] = target
-        if evd.source_ref and not evd.source_ref.startswith("doc_"):
-            if evd.source_ref not in catalog.targets_by_key:
-                catalog.targets_by_key[evd.source_ref] = target
-            doc_source_texts.setdefault(evd.source_ref, []).append(evd.excerpt)
-
-    # If any document has multiple chunks, build an aggregate target under source_ref and doc_k
-    doc_alias_by_source: dict[str, str] = {}
-    doc_alias_idx = 0
-    for evd in verified_evidence or []:
-        if (
-            evd.source_type == "external_retrieved"
-            and evd.source_ref
-            and evd.source_ref not in doc_alias_by_source
-        ):
-            doc_alias_idx += 1
-            doc_alias_by_source[evd.source_ref] = f"doc_{doc_alias_idx}"
+            if alias not in catalog.targets_by_key:
+                catalog.targets_by_key[alias] = target
+            if source_key and source_key not in catalog.targets_by_key:
+                catalog.targets_by_key[source_key] = target
+            if source_key:
+                doc_source_texts.setdefault(source_key, []).append(evd.excerpt)
+                doc_source_trusted[source_key] = (
+                    doc_source_trusted.get(source_key, True) and is_ok
+                )
 
     for source_ref, excerpts in doc_source_texts.items():
         if len(excerpts) > 1:
             full_text = "\n\n".join(excerpts)
+            is_agg_ok = doc_source_trusted.get(source_ref, False)
             agg_target = ProvenanceTarget(
                 alias=source_ref,
                 kind="verified_evidence",
                 target_id=source_ref,
                 text=full_text,
-                is_trusted=True,
+                is_trusted=is_agg_ok,
+                rejection_reason=None
+                if is_agg_ok
+                else f"Evidence '{source_ref}' contains unverified chunks.",
             )
             catalog.targets_by_key[source_ref] = agg_target
             doc_alias = doc_alias_by_source.get(source_ref)
-            if doc_alias and doc_alias in catalog.targets_by_key:
+            if doc_alias:
                 catalog.targets_by_key[doc_alias] = agg_target
 
     # Compute latest version per claim_id to detect stale claim versions immediately.
+    scoped_claims = [
+        c for c in (all_claims or []) if run_id is None or c.run_id == run_id
+    ]
+    scoped_tools = [
+        r for r in (tool_records or []) if run_id is None or r.run_id == run_id
+    ]
     latest_ver_by_id: dict[str, int] = {}
-    for claim in all_claims or []:
+    for claim in scoped_claims:
         prev_ver = latest_ver_by_id.get(claim.claim_id, 0)
         if claim.version > prev_ver:
             latest_ver_by_id[claim.claim_id] = claim.version
 
     valid_tool_ids: set[str] = {
         rec.tool_execution_id
-        for rec in (tool_records or [])
+        for rec in scoped_tools
         if (
             rec.success
             and rec.inputs_grounded
@@ -243,7 +278,7 @@ def build_provenance_catalog(
         )
     }
 
-    for claim in all_claims or []:
+    for claim in scoped_claims:
         is_latest = claim.version == latest_ver_by_id.get(claim.claim_id, -1)
         is_supported = (
             claim.status == ClaimStatus.SUPPORTED

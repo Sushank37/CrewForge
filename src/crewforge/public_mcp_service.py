@@ -646,23 +646,35 @@ class PublicJobManager:
         docs: list[ReferenceDocument],
     ) -> dict[str, Any]:
         trace = await db.get_run_trace(task_id)
+        docs_by_ref = {doc.source_ref: doc for doc in docs}
         evidence_items = []
         seen_sources: dict[str, dict[str, Any]] = {}
         for ev in trace.evidence:
-            entry = {
+            matched_doc = docs_by_ref.get(ev.source_ref)
+            src_type = (
+                "user_supplied_document"
+                if matched_doc is not None
+                else _enum_val(ev.source_type)
+            )
+            entry: dict[str, Any] = {
                 "evidence_id": ev.evidence_id,
-                "source_type": _enum_val(ev.source_type),
+                "source_type": src_type,
                 "source_ref": ev.source_ref,
                 "excerpt": ev.excerpt,
                 "reliability": _enum_val(ev.reliability),
             }
+            if matched_doc is not None and matched_doc.title:
+                entry["title"] = matched_doc.title
             evidence_items.append(entry)
             if ev.source_ref not in seen_sources:
-                seen_sources[ev.source_ref] = {
+                src_entry: dict[str, Any] = {
                     "source_ref": ev.source_ref,
-                    "source_type": _enum_val(ev.source_type),
+                    "source_type": src_type,
                     "reliability": _enum_val(ev.reliability),
                 }
+                if matched_doc is not None and matched_doc.title:
+                    src_entry["title"] = matched_doc.title
+                seen_sources[ev.source_ref] = src_entry
         for doc in docs:
             if doc.source_ref not in seen_sources:
                 seen_sources[doc.source_ref] = {
@@ -705,6 +717,19 @@ class PublicJobManager:
                 "honesty_gate_reasons": v_sum.honesty_gate_reasons if v_sum else [],
             }
 
+        unresolved_reqs: list[dict[str, Any]] = []
+        if run_res.verification and run_res.verification.requirement_statuses:
+            for req in run_res.verification.requirement_statuses:
+                if req.status != "answered":
+                    unresolved_reqs.append(
+                        {
+                            "requirement_id": req.requirement_id,
+                            "text": req.text,
+                            "status": req.status,
+                            "rationale": req.rationale,
+                        }
+                    )
+
         return {
             "task_id": task_id,
             "mode": run_res.mode,
@@ -716,7 +741,8 @@ class PublicJobManager:
             "sources": list(seen_sources.values()),
             "evidence": evidence_items,
             "verification": verification_info,
-            "unresolved_requirements": list(run_res.incomplete_tasks or ()),
+            "unresolved_requirements": unresolved_reqs,
+            "incomplete_tasks": list(run_res.incomplete_tasks or ()),
             "missing_information": list(run_res.missing_information or ()),
             "assumptions": list(run_res.assumptions or ()),
             "confidence_notes": run_res.confidence_notes,
@@ -875,11 +901,11 @@ class PublicJobManager:
         messages = [
             {
                 "message_id": m.message_id,
-                "sender_agent_id": m.sender_agent_id,
-                "recipient_agent_id": m.recipient_agent_id,
+                "sender_id": m.sender_id,
+                "recipient_id": m.recipient_id,
                 "message_type": _enum_val(m.message_type),
                 "content": sanitize_error_message(m.content),
-                "round_index": m.round_index,
+                "delivery_status": m.delivery_status,
                 "created_at": m.created_at.isoformat(),
             }
             for m in trace.messages
@@ -889,8 +915,10 @@ class PublicJobManager:
                 "tool_execution_id": te.tool_execution_id,
                 "tool_name": te.tool_name,
                 "expression": te.expression,
-                "result": te.result,
-                "succeeded": te.succeeded,
+                "computed_result": te.computed_result,
+                "units": te.units,
+                "success": te.success,
+                "inputs_grounded": te.inputs_grounded,
                 "error": sanitize_error_message(te.error) if te.error else None,
             }
             for te in trace.tool_executions

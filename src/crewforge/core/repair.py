@@ -25,6 +25,7 @@ from crewforge.schemas import (
     VerificationStatus,
 )
 from crewforge.storage.database import CrossRunReferenceError, Database
+from crewforge.tools.arithmetic import ProvenanceCatalog, build_provenance_catalog
 
 
 @dataclass
@@ -45,6 +46,7 @@ def _build_revision_prompt(
     verdicts_by_claim_key: dict[tuple[str, int], list[ReviewVerdict]],
     evidence_by_id: dict[str, Evidence],
     dependency_findings_text: str,
+    provenance_catalog: ProvenanceCatalog | None = None,
 ) -> str:
     blocks: list[str] = []
     for claim in disputed_claims:
@@ -67,9 +69,28 @@ def _build_revision_prompt(
             "Current evidence:\n" + ("\n".join(evd_lines) if evd_lines else "  - None")
         )
 
+    prov_lines: list[str] = []
+    if provenance_catalog is not None:
+        seen_targets: set[tuple[str, str]] = set()
+        for key, target in provenance_catalog.targets_by_key.items():
+            if not target.is_trusted:
+                continue
+            dedup_key = (key, target.target_id)
+            if dedup_key in seen_targets:
+                continue
+            seen_targets.add(dedup_key)
+            snippet = target.text.replace("\n", " ")[:180]
+            prov_lines.append(f"  - {key} ({target.kind}): {snippet}")
+    prov_section = (
+        "Valid provenance references for computations:\n" + "\n".join(prov_lines[:25]) + "\n\n"
+        if prov_lines
+        else ""
+    )
+
     return (
         f"Original user request:\n{original_prompt}\n\n"
         f"Relevant dependency context:\n{dependency_findings_text or 'None.'}\n\n"
+        f"{prov_section}"
         "You must address the following blocking reviewer objections. Return one "
         "`TargetedClaimRevision` inside `revisions` for EACH target claim below (do not return "
         "an empty `revisions` list), specifying its exact `target_claim_id` and "
@@ -224,12 +245,20 @@ class TargetedRepairEngine:
                                 dep_texts.append(dep_task.findings)
                 dep_blob = "\n".join(dict.fromkeys(dep_texts))
 
+                repair_catalog = build_provenance_catalog(
+                    original_prompt=original_prompt,
+                    verified_evidence=[e for e in trace.evidence if e.verified_in_input],
+                    all_claims=trace.claims,
+                    tool_records=trace.tool_executions,
+                    run_id=run_id,
+                )
                 revision_prompt = _build_revision_prompt(
                     original_prompt=original_prompt,
                     disputed_claims=claims_for_author,
                     verdicts_by_claim_key=verdicts_by_key,
                     evidence_by_id=evidence_by_id,
                     dependency_findings_text=dep_blob,
+                    provenance_catalog=repair_catalog,
                 )
                 try:
                     res = await self._executor.execute_structured(

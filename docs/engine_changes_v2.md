@@ -63,6 +63,14 @@ New test file: `tests/test_reasoning_scalability.py` (4 tests):
 | Suite | Result |
 |-------|--------|
 | `ruff check src tests` | All checks passed |
-| `pytest -q` | 91 passed |
+| `pytest -q` | 102 passed |
 | `npm test -- --run` | 8 passed (2 test files) |
 | `npm run build` | ✓ 43 modules, production build succeeded |
+
+## V2.1 Authorized Targeted Correctness Fixes (Post-`a816d76`)
+
+1. **`src/crewforge/tools/arithmetic.py` (`build_provenance_catalog`):**
+   - Fixed exclusion of `doc_*` `source_ref` entries for primary ingested/retrieved documents (`created_by in {"lead", "baseline", "operator"}`), so MCP-supplied documents (`doc_1`, `doc_2`, ...) resolve deterministically for arithmetic provenance.
+   - Preserved alias collision protection (specialist sub-excerpts cannot overwrite `doc_*` aliases), unverified-evidence rejection, fabricated/cross-run `run_id` rejection, and stale claim version rejection.
+2. **`src/crewforge/core/repair.py` (`TargetedRepairEngine` & `_build_revision_prompt`):**
+   - Constructed the run-scoped `ProvenanceCatalog` in `resolve_disputes()` and included trusted provenance references in targeted repair prompts.
