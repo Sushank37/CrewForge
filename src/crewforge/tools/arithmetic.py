@@ -613,9 +613,31 @@ def _to_bounded_int(val: Decimal, *, name: str, min_val: int = 0, max_val: int =
     return iv
 
 
-def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
+_MAX_CUMULATIVE_OPS = 2500
+
+
+@dataclass
+class _EvalBudget:
+    """Tracks cumulative AST evaluations and loop steps across an expression."""
+
+    remaining: int = _MAX_CUMULATIVE_OPS
+
+    def consume(self, cost: int = 1) -> None:
+        self.remaining -= cost
+        if self.remaining < 0:
+            raise UnsafeExpressionError(
+                f"Expression exceeds cumulative computation limit ({_MAX_CUMULATIVE_OPS} ops)."
+            )
+
+
+def _eval_ast_node(
+    node: ast.AST, env: dict[str, Decimal], budget: _EvalBudget | None = None
+) -> Decimal:
+    if budget is None:
+        budget = _EvalBudget()
+    budget.consume(1)
     if isinstance(node, ast.Expression):
-        return _eval_ast_node(node.body, env)
+        return _eval_ast_node(node.body, env, budget)
 
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
@@ -633,7 +655,7 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
         return env[node.id]
 
     if isinstance(node, ast.UnaryOp):
-        operand = _eval_ast_node(node.operand, env)
+        operand = _eval_ast_node(node.operand, env, budget)
         if isinstance(node.op, ast.UAdd):
             return +operand
         if isinstance(node.op, ast.USub):
@@ -641,8 +663,8 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
         raise UnsafeExpressionError(f"Disallowed unary operator: {type(node.op).__name__}.")
 
     if isinstance(node, ast.BinOp):
-        left = _eval_ast_node(node.left, env)
-        right = _eval_ast_node(node.right, env)
+        left = _eval_ast_node(node.left, env, budget)
+        right = _eval_ast_node(node.right, env, budget)
         with localcontext() as ctx:
             ctx.prec = 28
             if isinstance(node.op, ast.Add):
@@ -682,8 +704,8 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1 or len(node.comparators) != 1:
             raise UnsafeExpressionError("Chained comparisons are not supported.")
-        left = _eval_ast_node(node.left, env)
-        right = _eval_ast_node(node.comparators[0], env)
+        left = _eval_ast_node(node.left, env, budget)
+        right = _eval_ast_node(node.comparators[0], env, budget)
         op = node.ops[0]
         if isinstance(op, ast.Lt):
             ok = left < right
@@ -750,7 +772,7 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
                 )
             r_args = [
                 _to_bounded_int(
-                    _eval_ast_node(a, env), name="range bound", min_val=-1000, max_val=1000
+                    _eval_ast_node(a, env, budget), name="range bound", min_val=-1000, max_val=1000
                 )
                 for a in comp.iter.args
             ]
@@ -762,8 +784,9 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
             with localcontext() as ctx:
                 ctx.prec = 28
                 for idx in range(start_i, stop_i):
+                    budget.consume(1)
                     child_env = {**env, loop_var: Decimal(idx)}
-                    total += _eval_ast_node(gen.elt, child_env)
+                    total += _eval_ast_node(gen.elt, child_env, budget)
             if not total.is_finite() or abs(total) > _MAX_MAGNITUDE:
                 raise UnsafeExpressionError("Computed value exceeds safe numerical bounds.")
             return total
@@ -771,9 +794,9 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
         args: list[Decimal] = []
         for arg in node.args:
             if isinstance(arg, (ast.List, ast.Tuple)):
-                args.extend(_eval_ast_node(elem, env) for elem in arg.elts)
+                args.extend(_eval_ast_node(elem, env, budget) for elem in arg.elts)
             else:
-                args.append(_eval_ast_node(arg, env))
+                args.append(_eval_ast_node(arg, env, budget))
 
         if not args:
             raise MalformedExpressionError(f"Function '{fn_name}' requires at least one argument.")
@@ -837,9 +860,13 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
                 if p_val < 0 or p_val > 1:
                     raise MalformedExpressionError("Probability p must be in [0, 1].")
                 q_val = Decimal(1) - p_val
+                # binomial_cdf(n, k, p) = P(X <= k)
+                # binomial_sf(n, k, p) = P(X >= k) (inclusive of threshold k)
                 if fn_name == "binomial_pmf":
+                    budget.consume(1)
                     return Decimal(math.comb(n_i, k_i)) * (p_val**k_i) * (q_val ** (n_i - k_i))
                 if fn_name == "binomial_cdf":
+                    budget.consume(k_i + 1)
                     return sum(
                         (
                             Decimal(math.comb(n_i, i)) * (p_val**i) * (q_val ** (n_i - i))
@@ -847,6 +874,7 @@ def _eval_ast_node(node: ast.AST, env: dict[str, Decimal]) -> Decimal:
                         ),
                         Decimal(0),
                     )
+                budget.consume((n_i - k_i) + 1)
                 return sum(
                     (
                         Decimal(math.comb(n_i, i)) * (p_val**i) * (q_val ** (n_i - i))
@@ -862,7 +890,13 @@ def evaluate_decimal_expression(
     expression: str,
     variables: dict[str, str | int | float],
 ) -> Decimal:
-    """Safely parse and evaluate a bounded Decimal arithmetic expression."""
+    """Safely parse and evaluate a bounded Decimal arithmetic expression.
+
+    Combinatorial helpers:
+    - `binomial_pmf(n, k, p)`: exact P(X = k)
+    - `binomial_cdf(n, k, p)`: cumulative P(X <= k)
+    - `binomial_sf(n, k, p)`: inclusive upper tail P(X >= k)
+    """
     cleaned = expression.strip()
     if not cleaned:
         raise MalformedExpressionError("Expression cannot be empty.")

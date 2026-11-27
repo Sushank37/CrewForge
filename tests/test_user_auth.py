@@ -96,10 +96,18 @@ async def test_google_and_verified_email_auth_cookies_csrf_and_privacy(tmp_path:
         )
         assert bad_google.status_code == 401
 
+        # Login attempt for unregistered Google user MUST be rejected (401)
+        unreg_login = await dev1.post(
+            "/api/auth/google",
+            headers=remote_headers,
+            json={"id_token": "valid-google-token-alice", "mode": "login"},
+        )
+        assert unreg_login.status_code == 401
+
         login_resp = await dev1.post(
             "/api/auth/google",
             headers=remote_headers,
-            json={"id_token": "valid-google-token-alice"},
+            json={"id_token": "valid-google-token-alice", "mode": "signup"},
         )
         assert login_resp.status_code == 200
         # New Google registration requires Email OTP verification before activation!
@@ -110,7 +118,11 @@ async def test_google_and_verified_email_auth_cookies_csrf_and_privacy(tmp_path:
         verify_google = await dev1.post(
             "/api/auth/email/verify",
             headers=remote_headers,
-            json={"email": "alice@example.com", "code": sent_codes["alice@example.com"]},
+            json={
+                "email": "alice@example.com",
+                "code": sent_codes["alice@example.com"],
+                "mode": "signup",
+            },
         )
         assert verify_google.status_code == 200
         login_data = verify_google.json()
@@ -146,6 +158,14 @@ async def test_google_and_verified_email_auth_cookies_csrf_and_privacy(tmp_path:
         # Remote user cannot access /api/admin/* even with valid cookie + CSRF
         admin_attempt = await dev1.get("/api/admin/tokens", headers=remote_headers)
         assert admin_attempt.status_code == 403
+
+        # Signup attempt for already-activated Google/email account MUST be rejected
+        dup_signup = await dev1.post(
+            "/api/auth/google",
+            headers={**remote_headers, "X-CSRF-Token": csrf_1},
+            json={"id_token": "valid-google-token-alice", "mode": "signup"},
+        )
+        assert dup_signup.status_code == 401
 
         # Logout revokes browser session
         logout_no_csrf = await dev1.post("/api/auth/logout", headers=remote_headers)
@@ -229,7 +249,8 @@ async def test_email_delivery_requires_config_subject_replacement_blocked_and_ra
         assert me.status_code == 200
         assert me.json()["email_delivery_configured"] is False
         no_email = await client.post(
-            "/api/auth/email/request", json={"email": "judge@example.com"}
+            "/api/auth/email/request",
+            json={"email": "judge@example.com", "mode": "signup"},
         )
         assert no_email.status_code == 503
 
@@ -280,14 +301,20 @@ async def test_email_delivery_requires_config_subject_replacement_blocked_and_ra
         ) as browser_b,
     ):
         a_login = await browser_a.post(
-            "/api/auth/google", headers=remote_hdrs, json={"id_token": "alice-google-1"}
+            "/api/auth/google",
+            headers=remote_hdrs,
+            json={"id_token": "alice-google-1", "mode": "signup"},
         )
         assert a_login.status_code == 200
         assert a_login.json()["requires_email_verification"] is True
         a_act = await browser_a.post(
             "/api/auth/email/verify",
             headers=remote_hdrs,
-            json={"email": "alice@example.com", "code": sent_codes["alice@example.com"]},
+            json={
+                "email": "alice@example.com",
+                "code": sent_codes["alice@example.com"],
+                "mode": "signup",
+            },
         )
         assert a_act.status_code == 200
         a_csrf = a_act.json()["csrf_token"]
@@ -305,17 +332,27 @@ async def test_email_delivery_requires_config_subject_replacement_blocked_and_ra
         )
         assert hijack_sub.status_code == 401
 
-        # Account B signs in with verified email
+        # Account B signs up with verified email (login for unknown email rejected first)
+        unreg_email = await browser_b.post(
+            "/api/auth/email/request",
+            headers=remote_hdrs,
+            json={"email": "bob@example.com", "mode": "login"},
+        )
+        assert unreg_email.status_code == 400
         req_b = await browser_b.post(
             "/api/auth/email/request",
             headers=remote_hdrs,
-            json={"email": "bob@example.com"},
+            json={"email": "bob@example.com", "mode": "signup"},
         )
         assert req_b.status_code == 200
         ver_b = await browser_b.post(
             "/api/auth/email/verify",
             headers=remote_hdrs,
-            json={"email": "bob@example.com", "code": sent_codes["bob@example.com"]},
+            json={
+                "email": "bob@example.com",
+                "code": sent_codes["bob@example.com"],
+                "mode": "signup",
+            },
         )
         assert ver_b.status_code == 200
         b_csrf = ver_b.json()["csrf_token"]
@@ -342,12 +379,12 @@ async def test_email_delivery_requires_config_subject_replacement_blocked_and_ra
             await browser_b.post(
                 "/api/auth/email/request",
                 headers={**remote_hdrs, "X-CSRF-Token": b_csrf},
-                json={"email": "rate@example.com"},
+                json={"email": "rate@example.com", "mode": "signup"},
             )
         rate_limited = await browser_b.post(
             "/api/auth/email/request",
             headers={**remote_hdrs, "X-CSRF-Token": b_csrf},
-            json={"email": "rate@example.com"},
+            json={"email": "rate@example.com", "mode": "signup"},
         )
         assert rate_limited.status_code == 429
         assert "Retry-After" in rate_limited.headers
@@ -393,11 +430,15 @@ async def test_user_mcp_token_rotation_preserves_workspace_and_trace(tmp_path: P
         async with httpx.AsyncClient(headers=local_browser_hdrs) as browser:
             await browser.post(
                 f"{base_url}/api/auth/email/request",
-                json={"email": "bob@example.com"},
+                json={"email": "bob@example.com", "mode": "signup"},
             )
             verify = await browser.post(
                 f"{base_url}/api/auth/email/verify",
-                json={"email": "bob@example.com", "code": sent_codes["bob@example.com"]},
+                json={
+                    "email": "bob@example.com",
+                    "code": sent_codes["bob@example.com"],
+                    "mode": "signup",
+                },
             )
             assert verify.status_code == 200
             bob_uid = verify.json()["user"]["user_id"]

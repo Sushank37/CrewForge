@@ -69,13 +69,20 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
     };
   }
   if ((status === "completed" || status === "partial" || types.has("run_completed")) && blocked) {
+    const isIncomplete = status === "partial" && trace.honesty_gate?.release_mode !== "blocked";
     return {
       step: 4,
       blocked: true,
       releaseOutcome: "blocked",
-      headline: "Verification Blocked Release",
-      subline: "Honesty Gate blocked release; no verified claims could be delivered.",
-      leadBubble: "Release blocked by Honesty Gate.",
+      headline: isIncomplete
+        ? "Incomplete Execution (No Verified Release)"
+        : "Verification Blocked Release",
+      subline: isIncomplete
+        ? "Execution ended early and no verified claims were released."
+        : "Honesty Gate blocked release; no verified claims could be delivered.",
+      leadBubble: isIncomplete
+        ? "Incomplete execution — no verified release."
+        : "Release blocked by Honesty Gate.",
     };
   }
   if (status === "completed" || status === "partial" || types.has("run_completed")) {

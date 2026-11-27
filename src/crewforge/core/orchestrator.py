@@ -585,10 +585,14 @@ class NetworkRunner:
                 final_status = RunStatus.BUDGET_EXCEEDED if budget_hit else RunStatus.FAILED
             elif release_mode == "full" and not is_partial_before_synth and not used_fallback:
                 final_status = RunStatus.COMPLETED
-            elif release_mode in {"full", "partial"}:
+            elif (
+                release_mode in {"full", "partial"}
+                or completed_tasks
+                or (is_partial_before_synth and not used_fallback)
+            ):
                 final_status = RunStatus.PARTIAL
             else:
-                final_status = RunStatus.PARTIAL if completed_tasks else RunStatus.FAILED
+                final_status = RunStatus.FAILED
 
             total_latency_ms = (time.perf_counter() - start_perf) * 1000.0
             aggregated_usage = await self._db.aggregate_run_usage(resolved_run_id)

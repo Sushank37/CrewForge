@@ -109,7 +109,7 @@ export const api = {
     reqJson<TracePayload>(`/api/replay/files/${encodeURIComponent(filename)}`),
   getBenchmark: () => reqJson<BenchmarkReport>("/api/benchmark"),
   authMe: () => reqJson<AuthMeResponse>("/api/auth/me"),
-  loginWithGoogle: (idToken: string) =>
+  loginWithGoogle: (idToken: string, mode: "login" | "signup" = "login") =>
     reqJson<{
       authenticated: boolean;
       requires_email_verification?: boolean;
@@ -120,24 +120,24 @@ export const api = {
     }>("/api/auth/google", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id_token: idToken }),
+      body: JSON.stringify({ id_token: idToken, mode }),
     }),
-  requestEmailCode: (email: string) =>
+  requestEmailCode: (email: string, mode: "login" | "signup" = "login") =>
     reqJson<{ challenge_sent: boolean; email: string; expires_in_seconds: number }>(
       "/api/auth/email/request",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, mode }),
       }
     ),
-  verifyEmailCode: (email: string, code: string) =>
+  verifyEmailCode: (email: string, code: string, mode: "login" | "signup" = "login") =>
     reqJson<{ authenticated: boolean; user: AuthUser; csrf_token: string }>(
       "/api/auth/email/verify",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, code }),
+        body: JSON.stringify({ email, code, mode }),
       }
     ),
   logout: () =>

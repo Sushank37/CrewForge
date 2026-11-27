@@ -139,8 +139,8 @@ class CrewForgeSettings(BaseSettings):
     revision_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
     synthesis_max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
 
-    max_workers: int = Field(default=6, ge=1, le=32)
-    max_tasks: int = Field(default=8, ge=1, le=64)
+    max_workers: int | None = Field(default=None, ge=1, le=32)
+    max_tasks: int | None = Field(default=None, ge=1, le=64)
     max_communication_rounds: int = Field(default=1, ge=0, le=3)
     max_revision_rounds: int = Field(default=1, ge=0, le=3)
     max_message_chars: int = Field(default=1000, ge=100, le=8000)
@@ -246,21 +246,23 @@ class CrewForgeSettings(BaseSettings):
 
     @property
     def effective_max_workers(self) -> int:
-        """Worker bound (2 for small model profile, 3 for Ollama) unless configured."""
+        """Adaptive worker ceiling within configurable resource limits unless explicitly set."""
+        if self.max_workers is not None:
+            return self.max_workers
+        available_calls = max(1, self.max_model_calls_per_run - 3)
         if self.small_model_profile:
-            return 2
-        if self.provider == ProviderType.OLLAMA and "max_workers" not in self.model_fields_set:
-            return 3
-        return self.max_workers
+            return max(1, min(3, available_calls))
+        return min(32, max(2, available_calls))
 
     @property
     def effective_max_tasks(self) -> int:
-        """Compact local task bound (3) for Ollama/small profile unless explicitly configured."""
-        if self.small_model_profile or (
-            self.provider == ProviderType.OLLAMA and "max_tasks" not in self.model_fields_set
-        ):
-            return 3
-        return self.max_tasks
+        """Adaptive task ceiling within configurable resource limits unless explicitly set."""
+        if self.max_tasks is not None:
+            return self.max_tasks
+        available_calls = max(1, self.max_model_calls_per_run - 3)
+        if self.small_model_profile:
+            return max(1, min(4, available_calls))
+        return min(64, max(self.effective_max_workers, available_calls))
 
     @property
     def effective_max_revision_rounds(self) -> int:

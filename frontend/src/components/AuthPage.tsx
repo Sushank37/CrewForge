@@ -63,7 +63,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           setErr(null);
           setInfoMsg(null);
           try {
-            const res = await api.loginWithGoogle(resp.credential);
+            const res = await api.loginWithGoogle(resp.credential, authMode);
             if (res.requires_email_verification && res.email) {
               setEmail(res.email);
               setStep("code");
@@ -137,7 +137,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     setErr(null);
     setInfoMsg(null);
     try {
-      const res = await api.requestEmailCode(email.trim());
+      const res = await api.requestEmailCode(email.trim(), authMode);
       setEmail(res.email);
       setStep("code");
       setInfoMsg(
@@ -156,7 +156,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     setBusy(true);
     setErr(null);
     try {
-      await api.verifyEmailCode(email.trim(), code.trim());
+      await api.verifyEmailCode(email.trim(), code.trim(), authMode);
       await onAuthenticated();
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex));

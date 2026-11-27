@@ -16,7 +16,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import jwt
@@ -328,10 +328,13 @@ class AuthStore:
         email: str,
         email_verified: bool,
         display_name: str | None = None,
+        mode: Literal["login", "signup"] = "login",
     ) -> dict[str, Any]:
-        """Resolve or create a permanent user account from verified Google OIDC claims."""
+        """Resolve or register a permanent user account from verified Google OIDC claims."""
         if not sub or not email_verified:
             raise ValueError("Verified Google account subject and email are required.")
+        if mode not in {"login", "signup"}:
+            raise ValueError("Invalid authentication mode.")
         norm_email = normalize_email(email)
         now = _utc_iso()
         clean_name = (display_name or norm_email.split("@")[0]).strip()[:80]
@@ -349,6 +352,11 @@ class AuthStore:
                     if owner_conflict is not None:
                         raise ValueError("Email is already associated with another account.")
                     activated = bool(row["account_activated"])
+                    if mode == "signup" and activated:
+                        raise ValueError(
+                            "An account with this Google email already exists. "
+                            "Please log in instead."
+                        )
                     conn.execute(
                         "UPDATE users SET email = ?, last_login_at = ? WHERE user_id = ?",
                         (norm_email, now, row["user_id"]),
@@ -378,6 +386,10 @@ class AuthStore:
                         raise ValueError(
                             "Please verify your email address before linking Google sign-in."
                         )
+                    if mode == "signup":
+                        raise ValueError(
+                            "An account with this email already exists. Please log in instead."
+                        )
                     conn.execute(
                         "UPDATE users SET google_sub = ?, last_login_at = ? WHERE user_id = ?",
                         (sub, now, existing_email["user_id"]),
@@ -391,6 +403,11 @@ class AuthStore:
                     out = self._user_dict(updated)
                     out["requires_email_verification"] = False
                     return out
+
+                if mode == "login":
+                    raise ValueError(
+                        "No account found for this Google email. Please sign up first."
+                    )
 
                 # Brand-new Google registration: require email OTP verification before activation
                 user_id = f"usr_{secrets.token_hex(8)}"
@@ -416,11 +433,37 @@ class AuthStore:
         self,
         email: str,
         *,
+        mode: Literal["login", "signup"] = "login",
         delivery_fn: Callable[[str, str], Any] | None = None,
         ttl_seconds: int = 600,
     ) -> dict[str, Any]:
         """Create a single-use hashed email verification challenge and dispatch via delivery_fn."""
+        if mode not in {"login", "signup"}:
+            raise ValueError("Invalid authentication mode.")
         norm_email = normalize_email(email)
+        with self._lock:
+            conn = self._connect()
+            try:
+                existing = conn.execute(
+                    "SELECT account_activated FROM users WHERE email = ?",
+                    (norm_email,),
+                ).fetchone()
+                if mode == "login":
+                    if existing is None:
+                        raise ValueError(
+                            "No account found for this email. Please sign up first."
+                        )
+                    if not bool(existing["account_activated"]):
+                        raise ValueError(
+                            "Account is not yet activated. Please sign up to verify your email."
+                        )
+                else:
+                    if existing is not None and bool(existing["account_activated"]):
+                        raise ValueError(
+                            "An account with this email already exists. Please log in instead."
+                        )
+            finally:
+                conn.close()
         code = f"{secrets.randbelow(1_000_000):06d}"
         now_dt = _utc_now()
         expires_dt = now_dt + timedelta(seconds=ttl_seconds)
@@ -471,8 +514,16 @@ class AuthStore:
             "expires_in_seconds": ttl_seconds,
         }
 
-    def verify_email_code(self, email: str, code: str) -> dict[str, Any]:
-        """Verify a single-use email code and resolve or create the permanent user account."""
+    def verify_email_code(
+        self,
+        email: str,
+        code: str,
+        *,
+        mode: Literal["login", "signup"] = "login",
+    ) -> dict[str, Any]:
+        """Verify a single-use email code and resolve or register the permanent user account."""
+        if mode not in {"login", "signup"}:
+            raise ValueError("Invalid authentication mode.")
         norm_email = normalize_email(email)
         cleaned_code = (code or "").strip()
         if not cleaned_code:
@@ -513,6 +564,19 @@ class AuthStore:
                 existing = conn.execute(
                     "SELECT * FROM users WHERE email = ?", (norm_email,)
                 ).fetchone()
+                if mode == "login":
+                    if existing is None:
+                        raise ValueError(
+                            "No account found for this email. Please sign up first."
+                        )
+                    if not bool(existing["account_activated"]):
+                        raise ValueError(
+                            "Account is not yet activated. Please sign up to verify your email."
+                        )
+                elif existing is not None and bool(existing["account_activated"]):
+                    raise ValueError(
+                        "An account with this email already exists. Please log in instead."
+                    )
                 if existing is not None:
                     conn.execute(
                         "UPDATE users SET email_verified = 1, account_activated = 1, "

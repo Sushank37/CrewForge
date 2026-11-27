@@ -185,14 +185,14 @@ export function classifyReleaseOutcome(trace: TracePayload | null): ReleaseOutco
     if (mode === "blocked" || (gate.passed === false && mode !== "partial" && supported === 0)) {
       return "blocked";
     }
-    if (mode === "partial" || status === "partial" || (gate.passed === false && supported > 0)) {
+    if (mode === "partial" || (gate.passed === false && supported > 0)) {
       return "partial";
     }
     if (gate.passed === true || mode === "full") {
       return "full";
     }
   }
-  if (status === "partial") return "partial";
+  if (status === "partial") return "blocked";
   if (status === "completed") return "full";
   return "none";
 }

@@ -136,8 +136,8 @@ class JudgeSessionManager:
             "openai_reasoning_effort": "low",
             "allow_paid_runs": False,
             "max_output_tokens": 8192,
-            "max_workers": 3,
-            "max_tasks": 3,
+            "max_workers": None,
+            "max_tasks": None,
             "max_concurrency": 3,
             "max_model_calls_per_run": 16,
             "max_cost_per_run_usd": 0.0,
@@ -186,14 +186,36 @@ class JudgeSessionManager:
         finally:
             conn.close()
 
+    def _effective_capacity(self) -> tuple[int, int]:
+        """Compute adaptive worker/task capacity within configurable resource limits."""
+        is_cloud = self._config["provider"] != "ollama"
+        available = max(1, int(self._config["max_model_calls_per_run"]) - 3)
+        mw = self._config.get("max_workers")
+        mt = self._config.get("max_tasks")
+        eff_w = (
+            int(mw)
+            if mw is not None
+            else (min(32, max(2, available)) if is_cloud else max(1, min(3, available)))
+        )
+        eff_t = (
+            int(mt)
+            if mt is not None
+            else (min(64, max(eff_w, available)) if is_cloud else max(1, min(4, available)))
+        )
+        return eff_w, eff_t
+
     def get_public_settings(self) -> dict[str, Any]:
         """Return safe non-secret settings (never returns raw API key)."""
         hint = None
         if self._api_key:
             tail = self._api_key[-4:] if len(self._api_key) >= 4 else "****"
             hint = f"••••{tail}"
+        eff_w, eff_t = self._effective_capacity()
         return {
             **self._config,
+            "max_workers": eff_w,
+            "max_tasks": eff_t,
+            "adaptive_team_capacity": self._config.get("max_workers") is None,
             "api_key_configured": bool(self._api_key),
             "api_key_hint": hint,
             "session_db_path": str(self.db_path),
@@ -277,8 +299,8 @@ class JudgeSessionManager:
             "review_max_output_tokens": min(6144, max_out),
             "revision_max_output_tokens": max_out,
             "synthesis_max_output_tokens": min(6144, max_out),
-            "max_workers": int(self._config["max_workers"]),
-            "max_tasks": int(self._config["max_tasks"]),
+            "max_workers": self._config.get("max_workers"),
+            "max_tasks": self._config.get("max_tasks"),
             "max_concurrency": 1 if not is_cloud else int(self._config["max_concurrency"]),
             "max_communication_rounds": 1,
             "max_revision_rounds": 1,

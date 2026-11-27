@@ -568,6 +568,13 @@ def create_dashboard_app(
         try:
             body = await request.json()
             id_token = str(body.get("id_token") or "") if isinstance(body, dict) else ""
+            raw_mode = (
+                str(body.get("mode") or "login").strip().lower()
+                if isinstance(body, dict)
+                else "login"
+            )
+            if raw_mode not in {"login", "signup"}:
+                return JSONResponse({"error": "Invalid authentication mode."}, status_code=400)
             claims = await verify_google_id_token(
                 id_token,
                 client_id=resolved_google_client_id,
@@ -578,10 +585,11 @@ def create_dashboard_app(
                 email=claims["email"],
                 email_verified=claims["email_verified"],
                 display_name=claims.get("name"),
+                mode=raw_mode,
             )
             if user.get("requires_email_verification"):
                 registry.auth_store.request_email_verification(
-                    user["email"], delivery_fn=email_delivery_fn
+                    user["email"], mode="signup", delivery_fn=email_delivery_fn
                 )
                 return JSONResponse(
                     {
@@ -637,6 +645,13 @@ def create_dashboard_app(
         try:
             body = await request.json()
             email = str(body.get("email") or "") if isinstance(body, dict) else ""
+            raw_mode = (
+                str(body.get("mode") or "login").strip().lower()
+                if isinstance(body, dict)
+                else "login"
+            )
+            if raw_mode not in {"login", "signup"}:
+                return JSONResponse({"error": "Invalid authentication mode."}, status_code=400)
             norm_key = email.strip().lower()
             if norm_key:
                 allowed_email, retry_email = resolved_rate_limiter.check_and_record(
@@ -649,7 +664,7 @@ def create_dashboard_app(
                         headers={"Retry-After": str(retry_email)},
                     )
             res = registry.auth_store.request_email_verification(
-                email, delivery_fn=email_delivery_fn
+                email, mode=raw_mode, delivery_fn=email_delivery_fn
             )
             return JSONResponse(res)
         except EmailDeliveryNotConfiguredError:
@@ -686,7 +701,10 @@ def create_dashboard_app(
                 raise ValueError("Invalid request body.")
             email = str(body.get("email") or "")
             code = str(body.get("code") or "")
-            user = registry.auth_store.verify_email_code(email, code)
+            raw_mode = str(body.get("mode") or "login").strip().lower()
+            if raw_mode not in {"login", "signup"}:
+                return JSONResponse({"error": "Invalid authentication mode."}, status_code=400)
+            user = registry.auth_store.verify_email_code(email, code, mode=raw_mode)
             sess = registry.auth_store.create_browser_session(
                 user_id=user["user_id"], auth_provider="email"
             )

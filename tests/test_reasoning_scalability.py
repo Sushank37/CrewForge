@@ -415,3 +415,99 @@ async def test_scalable_eight_specialist_team_and_incremental_events(tmp_path: P
         assert inc_data["incremental"] is True
         assert all(int(e["seq"]) > mid_seq for e in inc_data["execution_events"])
         assert len(inc_data["execution_events"]) < total_events
+
+
+def test_adaptive_team_capacity_and_arithmetic_cumulative_limit(tmp_path: Path) -> None:
+    import pytest
+
+    from crewforge.tools.arithmetic import UnsafeExpressionError
+    from crewforge.web_api import JudgeSessionManager, JudgeSettingsUpdate
+
+    # Adaptive capacity scales within configurable model-call resource limits
+    low_budget = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="gpt-5.4",
+        max_model_calls_per_run=6,
+    )
+    high_budget = CrewForgeSettings(
+        _env_file=None,
+        provider=ProviderType.OPENAI,
+        model="gpt-5.4",
+        max_model_calls_per_run=20,
+    )
+    assert low_budget.effective_max_workers == 3
+    assert high_budget.effective_max_workers == 17
+    assert high_budget.effective_max_tasks == 17
+
+    session = JudgeSessionManager(db_path=tmp_path / "adapt.db")
+    pub = session.get_public_settings()
+    assert pub["adaptive_team_capacity"] is True
+    assert pub["max_workers"] == 3
+    session.update_settings(
+        JudgeSettingsUpdate(
+            billing_mode="byok",
+            provider="openai",
+            model="gpt-5.4",
+            max_model_calls_per_run=24,
+        )
+    )
+    assert session.get_public_settings()["max_workers"] == 21
+
+    # Cumulative computation safety limit rejects nested/excessive ops
+    with pytest.raises(UnsafeExpressionError, match="cumulative computation limit"):
+        evaluate_decimal_expression(
+            "sum(sum(1 for j in range(100)) for i in range(100))",
+            {},
+        )
+
+
+async def test_incomplete_execution_with_zero_verified_claims_is_blocked(tmp_path: Path) -> None:
+    db = Database(tmp_path / "incomplete_zero.db")
+    await db.initialize()
+    gate = HonestyGate(db)
+    plan = ExecutionPlan(
+        run_id="run_inc_zero",
+        goal="Test incomplete execution without verified claims",
+        user_requirements=["Req 1"],
+        acceptance_criteria=["AC 1"],
+        agents=[AgentSpec(agent_id="agt_1", role="Analyst", instructions="Analyze")],
+        tasks=[
+            TaskSpec(
+                task_id="tsk_1",
+                title="Task 1",
+                description="Incomplete",
+                assigned_agent_id="agt_1",
+                status=TaskStatus.PENDING,
+            )
+        ],
+    )
+    synth = SynthesisOutput(
+        direct_summary="Execution stopped before any verified claims were produced.",
+        accepted_segments=[],
+        conditional_segments=[],
+        recommendations=[],
+        new_factual_assertions=[],
+        referenced_claim_ids=[],
+        assumptions=[],
+        missing_information=["Task 1 did not complete"],
+    )
+    gate_res = gate.evaluate(
+        run_id="run_inc_zero",
+        original_prompt="Test incomplete execution",
+        plan=plan,
+        all_claims=[],
+        evidence_list=[],
+        tool_executions=[],
+        verdicts=[],
+        synthesis=synth,
+        incomplete_tasks=plan.tasks,
+        is_partial_run=True,
+        extra_assumptions=[],
+        extra_missing=["Task 1 did not complete"],
+        uncertainties=[],
+    )
+    await db.close()
+    assert gate_res.gate_record.passed is False
+    assert gate_res.gate_record.release_mode == "blocked"
+
