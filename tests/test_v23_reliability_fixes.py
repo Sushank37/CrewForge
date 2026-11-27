@@ -689,14 +689,16 @@ async def test_v23_dependency_aware_repair_and_negative_downstream_rejection(
     assert any("99,999" in c.statement for c in rejected)
 
 
-def test_v23_exact_cloud_complex_002_provenance_and_swapped_controls() -> None:
-    """Reproduce exact cost=50000 and transactions=140000 cases plus swapped-quantity controls."""
+def _load_exact_cloud_complex_002() -> dict[str, Any]:
     import json
 
-    fixture_path = (
-        Path(__file__).resolve().parent.parent / ".crewforge" / "cloud_complex_test_002.json"
-    )
-    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / "cloud_complex_002.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def test_v23_exact_cloud_complex_002_provenance_and_swapped_controls() -> None:
+    """Reproduce exact cost=50000 and transactions=140000 cases plus swapped-quantity controls."""
+    data = _load_exact_cloud_complex_002()
 
     doc1 = Evidence(
         run_id="run_exact_002",
@@ -769,15 +771,6 @@ def test_v23_exact_cloud_complex_002_provenance_and_swapped_controls() -> None:
         catalog=cat,
     )
     assert swap_forecast is False
-
-
-def _load_exact_cloud_complex_002() -> dict[str, Any]:
-    import json
-
-    fixture_path = (
-        Path(__file__).resolve().parent.parent / ".crewforge" / "cloud_complex_test_002.json"
-    )
-    return json.loads(fixture_path.read_text(encoding="utf-8"))
 
 
 async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
@@ -1307,10 +1300,22 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
         "$2,000",
         "150,000",
         "Recommend Vendor A",
+        "6-week go-live",
+        "EU residency and MFA at go-live",
         "Vendor B is disqualified",
+        "exceeds the $60,000 cap",
         "Vendor C is disqualified",
+        "EU data residency is delayed until week 10",
     ):
         assert expected in result.answer
+
+    trace = await db.get_run_trace(result.run_id)
+    assert trace is not None
+    verified_refs = {e.source_ref for e in trace.evidence if e.verified_in_input}
+    assert {"doc_1", "doc_2", "doc_3"}.issubset(verified_refs)
+    for claim in trace.claims:
+        if claim.status == ClaimStatus.SUPPORTED and claim.is_material:
+            assert claim.evidence_ids or claim.tool_execution_ids
 
 
 async def test_v23_multilevel_dependency_repair_chain(tmp_path: Path) -> None:

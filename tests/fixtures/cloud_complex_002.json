@@ -1,0 +1,17 @@
+{
+  "prompt": "Recommend which vendor should receive the contract.\n\n    Calculate first-year costs for all three vendors at\n    both forecast transaction volumes. Apply the signed\n    addenda over the original proposals.\n\n    Evaluate every mandatory compliance requirement,\n    identify disqualified vendors with reasons, recommend\n    the best eligible vendor, calculate its remaining\n    budget under both forecasts, and identify the maximum\n    transaction volume it can support within budget.\n\n    Cite the relevant documents for each conclusion.",
+  "reference_documents": [
+    {
+      "title": "Procurement Policy",
+      "content": "\n            First-year spending must not exceed $60,000,\n            including all mandatory one-time fees.\n            Forecast: 100,000 transactions in the base\n            case and 140,000 in the stress case.\n            The vendor must satisfy the budget in both cases.\n            Go-live must occur within 8 weeks.\n            EU data residency and MFA must be available\n            at go-live.\n            Signed addenda override original proposals.\n            Select the lowest-cost eligible vendor.\n            "
+    },
+    {
+      "title": "Original Vendor Proposals",
+      "content": "\n            Vendor A: $30,000 fixed annual fee plus\n            $0.20 per transaction. Go-live in 6 weeks.\n            EU residency and MFA available at go-live.\n\n            Vendor B: $36,000 fixed annual fee plus\n            $0.12 per transaction. Go-live in 7 weeks.\n            EU residency and MFA available at go-live.\n\n            Vendor C: $27,000 fixed annual fee plus\n            $0.18 per transaction. Go-live in 9 weeks.\n            EU residency and MFA available at go-live.\n            "
+    },
+    {
+      "title": "Signed Vendor Addenda",
+      "content": "\n            Vendor A: No changes.\n\n            Vendor B: Mandatory first-year onboarding\n            fee of $8,000 in addition to all quoted fees.\n\n            Vendor C: Revised go-live in 7 weeks.\n            However, EU data residency will only become\n            available in week 10.\n            All other original terms remain unchanged.\n            "
+    }
+  ]
+}
