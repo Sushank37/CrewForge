@@ -54,7 +54,7 @@ from crewforge.schemas import (
 )
 from crewforge.storage.database import Database
 from crewforge.tools.arithmetic import DeterministicArithmeticTool, build_provenance_catalog
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 
 def _base_plan_output(reqs: list[str] | None = None) -> PlannerOutput:
@@ -95,6 +95,7 @@ async def test_claim_locked_release_blocks_negation_reversal_and_laundering() ->
             run_id="run_lock",
             raw_plan=_base_plan_output(["Explain investment attractiveness"]),
             settings=settings,
+            require_deliverables=False,
         )
         await db.save_execution_plan(plan)
 
@@ -211,6 +212,7 @@ async def test_honest_coverage_and_partial_safety_distinction() -> None:
             run_id="run_cov",
             raw_plan=_base_plan_output(["Question one", "Question two"]),
             settings=settings,
+            require_deliverables=False,
         )
         await db.save_execution_plan(plan)
 
@@ -291,6 +293,7 @@ async def test_arithmetic_lineage_rejects_swaps_fabricated_unrelated_stale_and_l
             run_id="run_lin",
             raw_plan=_base_plan_output(["Compute"]),
             settings=settings,
+            require_deliverables=False,
         )
         await db.save_execution_plan(plan)
         agent_id = plan.agents[0].agent_id
@@ -444,6 +447,7 @@ async def test_reviewer_dedup_missing_dimension_and_stale_reapproval_block(tmp_p
             run_id="run_rv",
             raw_plan=_base_plan_output(["Check"]),
             settings=settings,
+            require_deliverables=False,
         )
         await db.save_execution_plan(plan)
 

@@ -201,3 +201,84 @@ class FakeProvider(ModelProvider):
                 usage_reported=self._usage_reported,
             ),
         )
+
+
+def checklist_fixture(handler):
+    """Translate pre-checklist scripted responses into the current test wire format.
+
+    In these legacy fixtures each scripted requirement is a single test obligation.
+    Their scripted approvals and blocking decisions still control the review outcome.
+    New coverage and planner-validation tests should script the actual contract directly.
+    """
+    import ast
+    import re
+
+    def respond(prompt, schema):
+        result = handler(prompt, schema)
+        name = schema.__name__ if schema else ""
+        if name in {"PlannerOutput", "ExecutionPlan"}:
+            if isinstance(result, BaseModel):
+                result = result.model_dump()
+            if not isinstance(result, dict) or result.get("deliverables") is not None:
+                return result
+            tasks = result.get("tasks") or []
+            if not tasks:
+                return result
+            return result | {"deliverables": [
+                {
+                    "deliverable_id": f"deliv_{idx}", "requirement_ref": f"req_{idx}",
+                    "text": req, "kind": (
+                        "recommendation" if "recommend" in req.lower() else "explanation"
+                    ),
+                    "task_ref": tasks[min(idx - 1, len(tasks) - 1)]["task_ref"],
+                }
+                for idx, req in enumerate(result.get("user_requirements", []), start=1)
+            ]}
+        if not isinstance(result, dict):
+            return result
+        if name in {"SpecialistOutput", "WorkerOutput", "FollowUpOutput"}:
+            requirements = {
+                req.strip().lower(): f"req_{idx}"
+                for idx, req in re.findall(r"^- \[req_(\d+)\] (.+)$", prompt, re.M)
+            }
+            if not requirements:
+                return result
+            for key in ("claims", "new_claims"):
+                for claim in result.get(key, []):
+                    refs = list(claim.get("requirement_refs") or [])
+                    if any(ref.startswith("deliv_") for ref in refs):
+                        continue
+                    mapped = [requirements.get(ref.strip().lower(), ref) for ref in refs]
+                    if not mapped and len(requirements) == 1:
+                        mapped = list(requirements.values())
+                    claim["requirement_refs"] = list(dict.fromkeys([
+                        *refs, *(ref.replace("req_", "deliv_", 1) for ref in mapped
+                                 if re.fullmatch(r"req_\d+", ref)),
+                    ]))
+        if name in {"ReviewerBatchOutput", "ReviewBatchOutput"}:
+            claims = {}
+            for cid, version, alias, refs in re.findall(
+                r"Claim (\w+) \(version=(\d+), alias=(\w+),[^\n]*\n"
+                r"  Statement: [^\n]*\n  Requested coverage: (\[[^\n]*\])", prompt,
+            ):
+                covered = [ref for ref in ast.literal_eval(refs) if ref.startswith("deliv_")]
+                claims[cid, int(version)] = covered
+                claims[cid, None] = covered
+                claims[alias, None] = covered
+            for verdict in result.get("verdicts", []):
+                key = (verdict.get("claim_id"), verdict.get("claim_version"))
+                if (
+                    verdict.get("decision") == "approve"
+                    and "covered_deliverable_refs" not in verdict
+                ):
+                    verdict["covered_deliverable_refs"] = claims.get(key, [])
+        return result
+
+    return respond
+
+
+class ChecklistFixtureProvider(FakeProvider):
+    """Adapt legacy orchestration fixtures while exercising the new production planner."""
+
+    def __init__(self, *, handler=None, **kwargs):
+        super().__init__(handler=checklist_fixture(handler) if handler else None, **kwargs)

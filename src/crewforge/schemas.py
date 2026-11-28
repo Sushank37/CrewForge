@@ -316,6 +316,7 @@ class RequirementCoverageItem(BaseModel):
     text: str = Field(min_length=1)
     status: Literal["answered", "partially_answered", "unresolved", "missing"]
     linked_claim_refs: list[ClaimVersionRef] = Field(default_factory=list)
+    verified_deliverable_refs: list[str] = Field(default_factory=list)
     rationale: str = ""
 
 

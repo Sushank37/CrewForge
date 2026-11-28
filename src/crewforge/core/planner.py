@@ -37,8 +37,12 @@ def validate_and_materialize_plan(
     run_id: str,
     raw_plan: PlannerOutput,
     settings: CrewForgeSettings,
+    require_deliverables: bool = True,
 ) -> ExecutionPlan:
-    """Validate a compact PlannerOutput and assign trusted CrewForge identifiers."""
+    """Validate a new PlannerOutput and assign trusted identifiers.
+
+    The opt-out exists for constructing historical plan fixtures without checklists.
+    """
     errors: list[str] = []
     allowed_caps = set(settings.allowed_capabilities)
     max_workers = settings.effective_max_workers
@@ -164,7 +168,11 @@ def validate_and_materialize_plan(
         errors.append("Task dependency graph contains a cycle.")
 
     requirements = [r.strip() for r in raw_plan.user_requirements if r.strip()]
-    if raw_plan.deliverables is not None:
+    if require_deliverables and len(requirements) != len(raw_plan.user_requirements):
+        errors.append("Every numbered user requirement must contain text.")
+    if require_deliverables and not raw_plan.deliverables:
+        errors.append("A non-empty deliverable checklist is required for every new plan.")
+    elif raw_plan.deliverables is not None:
         req_ids = {f"req_{i}" for i in range(1, len(requirements) + 1)}
         assigned_req_ids = {d.requirement_ref for d in raw_plan.deliverables}
         deliverable_ids = {d.deliverable_id for d in raw_plan.deliverables}
@@ -264,6 +272,7 @@ class LeadPlanner:
                 run_id=run_id,
                 actor="lead",
                 operation="plan_repair",
+                reserve_calls_after=2 + int(self._settings.enable_independent_review),
                 prompt=repair_prompt,
                 response_model=PlannerOutput,
                 system_prompt=system_prompt,

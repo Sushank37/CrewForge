@@ -13,7 +13,7 @@ import uvicorn
 
 from crewforge.dashboard import create_dashboard_app
 from crewforge.web_api import validate_remote_provider_url
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 NGROK_HOST = "stairlike-causatively-cordell.ngrok-free.dev"
 

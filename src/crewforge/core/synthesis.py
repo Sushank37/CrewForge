@@ -5,6 +5,7 @@ from __future__ import annotations
 from crewforge.core.executor import ModelExecutor
 from crewforge.core.honesty_gate import HonestyGate, HonestyGateResult
 from crewforge.core.messaging import MessageBus
+from crewforge.core.requirements import reviewed_deliverables
 from crewforge.prompts.synthesis import (
     build_synthesis_system_prompt,
     build_synthesis_user_prompt,
@@ -88,12 +89,16 @@ def build_deterministic_fast_path_output(
     *,
     plan: ExecutionPlan,
     claims: list[Claim],
+    verdicts: list[ReviewVerdict] | None = None,
 ) -> SynthesisOutput | None:
     """Build deterministic claim-locked SynthesisOutput when fast-path criteria are satisfied.
 
     Returns None when model synthesis is needed (e.g., no supported claims or uncovered reqs).
     """
     if plan.deliverables:
+        covered = reviewed_deliverables(plan, claims, verdicts or [])
+        if all(d.deliverable_id in covered for d in plan.deliverables):
+            return SynthesisOutput()
         return None
     supported = [c for c in claims if c.is_material and c.status == ClaimStatus.SUPPORTED]
     if not supported:
@@ -210,7 +215,9 @@ class LeadSynthesizer:
             and not incomplete_tasks
             and not important_inbox
         ):
-            fast_output = build_deterministic_fast_path_output(plan=plan, claims=latest_claims)
+            fast_output = build_deterministic_fast_path_output(
+                plan=plan, claims=latest_claims, verdicts=verdicts,
+            )
             if fast_output is not None:
                 if lead_inbox:
                     await self._bus.mark_consumed(

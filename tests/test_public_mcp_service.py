@@ -18,7 +18,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from crewforge.config import CrewForgeSettings, ModelPricing, ProviderType
 from crewforge.public_mcp_service import PublicJobManager, create_public_mcp_app
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 
 def _free_port() -> int:
@@ -586,6 +586,9 @@ async def test_public_mcp_production_openai_provider_network_and_baseline_with_d
     from types import SimpleNamespace
 
     from crewforge.providers.openai_provider import OpenAIProvider
+    from tests.fake_provider import checklist_fixture
+
+    fixture_handler = checklist_fixture(_scripted_handler)
 
     class _FakeResponses:
         async def create(self, **kwargs: Any) -> Any:
@@ -596,17 +599,17 @@ async def test_public_mcp_production_openai_provider_network_and_baseline_with_d
             )
             prompt = str(kwargs.get("input", ""))
             if schema_name in {"ExecutionPlan", "PlannerOutput"}:
-                payload = _scripted_handler(prompt, type("PlannerOutput", (), {}))
+                payload = fixture_handler(prompt, type("PlannerOutput", (), {}))
             elif schema_name in {"WorkerOutput", "SpecialistOutput"}:
-                payload = _scripted_handler(prompt, type("SpecialistOutput", (), {}))
+                payload = fixture_handler(prompt, type("SpecialistOutput", (), {}))
             elif schema_name in {"ReviewBatchOutput", "ReviewerBatchOutput"}:
-                payload = _scripted_handler(prompt, type("ReviewerBatchOutput", (), {}))
+                payload = fixture_handler(prompt, type("ReviewerBatchOutput", (), {}))
             elif schema_name == "SynthesisOutput":
-                payload = _scripted_handler(prompt, type("SynthesisOutput", (), {}))
+                payload = fixture_handler(prompt, type("SynthesisOutput", (), {}))
             elif schema_name == "BaselineModelOutput":
-                payload = _scripted_handler(prompt, type("BaselineModelOutput", (), {}))
+                payload = fixture_handler(prompt, type("BaselineModelOutput", (), {}))
             elif schema_name == "BaselineCritiqueOutput":
-                payload = _scripted_handler(prompt, type("BaselineCritiqueOutput", (), {}))
+                payload = fixture_handler(prompt, type("BaselineCritiqueOutput", (), {}))
             else:
                 raise AssertionError(f"Unexpected OpenAI schema: {schema_name}")
             return SimpleNamespace(

@@ -16,7 +16,7 @@ from mcp.client.streamable_http import streamable_http_client
 from crewforge.config import CrewForgeSettings
 from crewforge.dashboard import create_dashboard_app
 from crewforge.web_api import JudgeSessionRegistry, JudgeSettingsUpdate
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 from tests.mcp_test_server import _scripted_mcp_handler
 
 

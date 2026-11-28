@@ -19,7 +19,7 @@ from crewforge.schemas import (
     SynthesisOutput,
 )
 from crewforge.storage.database import Database
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 _CLAIM_HEADER_RE = re.compile(r"Claim (clm_[a-f0-9]+) \(version=(\d+),")
 _SUPPORTED_CLAIM_RE = re.compile(r"- (clm_[a-f0-9]+) \(version=(\d+),.*?status=supported")

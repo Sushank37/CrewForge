@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 import crewforge.dashboard as dashboard_mod
 from crewforge.dashboard import create_dashboard_app
 from crewforge.web_api import JudgeSessionManager, JudgeSettingsUpdate
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 
 def test_judge_isolation_from_team_budget_and_env(

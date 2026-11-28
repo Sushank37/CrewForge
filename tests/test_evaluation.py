@@ -664,7 +664,7 @@ def test_manifest_document_validation_and_fingerprint_isolation(tmp_path: Path) 
         load_and_validate_manifest,
         resolve_item_documents,
     )
-    from tests.fake_provider import FakeProvider
+    from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
     doc_file = tmp_path / "docs" / "sla.md"
     doc_file.parent.mkdir(parents=True, exist_ok=True)
@@ -860,7 +860,7 @@ def test_real_ablation_stage_switches(tmp_path: Path) -> None:
     from crewforge.core.budget import BudgetManager
     from crewforge.core.orchestrator import NetworkRunner
     from crewforge.evaluation.ablation import AblationConfig
-    from tests.fake_provider import FakeProvider
+    from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
     async def run_variant(variant_name: str) -> tuple[list[str], int, int]:
         db = Database(tmp_path / f"{variant_name}.db")
@@ -1005,7 +1005,7 @@ def test_fail_fast_on_systemic_error(tmp_path: Path) -> None:
 
     from crewforge.evaluation.contracts import BenchmarkItem, BenchmarkManifest
     from crewforge.evaluation.runner import BenchmarkRunner, SystemicBenchmarkError
-    from tests.fake_provider import FakeProvider
+    from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
     manifest = BenchmarkManifest(
         manifest_id="ff_01",
@@ -1061,7 +1061,7 @@ def test_recovery_workflow_preserves_baseline_and_runs_network_only(tmp_path: Pa
     from crewforge.evaluation.contracts import BenchmarkItem, BenchmarkManifest
     from crewforge.evaluation.runner import BenchmarkRunner
     from crewforge.schemas import UsageMetrics
-    from tests.fake_provider import FakeProvider
+    from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
     manifest = BenchmarkManifest(
         manifest_id="rec_01",
@@ -1376,7 +1376,7 @@ def test_accurate_stage_telemetry_and_large_worker_output(tmp_path: Path) -> Non
     from crewforge.evaluation.ablation import AblationConfig
     from crewforge.evaluation.contracts import BenchmarkItem
     from crewforge.evaluation.runner import _build_side_fingerprint
-    from tests.fake_provider import FakeProvider
+    from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
     # Verify fingerprint separation between v1 (2560) and revised (8192) settings
     item = BenchmarkItem(prompt_id="p_fp", domain=PromptDomain.FINANCIAL, prompt="Test")
@@ -1510,7 +1510,7 @@ def test_phase5e_compact_protocol_evidence_lineage_recovery_and_telemetry(tmp_pa
         SpecialistOutput,
         UsageMetrics,
     )
-    from tests.fake_provider import FakeProvider
+    from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
     # 1. Strict JSON schema compatibility for compact SpecialistOutput
     strict_schema = to_strict_json_schema(SpecialistOutput)
@@ -1609,6 +1609,8 @@ def test_phase5e_compact_protocol_evidence_lineage_recovery_and_telemetry(tmp_pa
                         }
                     ],
                 }
+            if "Specialist" in name and "TARGETED REQUIREMENT RECOVERY" in prompt:
+                return {"findings": "The optional item remains unverified.", "claims": []}
             if "Specialist" in name:
                 worker_calls += 1
                 if worker_calls == 1:

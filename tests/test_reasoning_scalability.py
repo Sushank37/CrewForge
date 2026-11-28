@@ -28,7 +28,7 @@ from crewforge.schemas import (
 )
 from crewforge.storage.database import Database
 from crewforge.tools.arithmetic import evaluate_decimal_expression
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 
 def test_deterministic_combinatorics_and_coin_toss_probability() -> None:

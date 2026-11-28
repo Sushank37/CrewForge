@@ -14,7 +14,7 @@ from crewforge.core.retrieval import ReferenceDocument
 from crewforge.schemas import Claim, ClaimStatus, Evidence, RunStatus, VerificationStatus
 from crewforge.storage.database import Database
 from crewforge.tools.arithmetic import DeterministicArithmeticTool, build_provenance_catalog
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 
 def test_v23_numeric_provenance_context_and_negative_controls() -> None:
@@ -152,6 +152,23 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                     "Assess compliance and transaction capacity",
                     "Recommend the compliant vendor within budget",
                 ],
+                "deliverables": [
+                    {
+                        "deliverable_id": f"deliv_{idx}", "requirement_ref": f"req_{requirement}",
+                        "task_ref": f"t{task}", "text": text, "kind": kind,
+                    }
+                    for idx, (requirement, task, text, kind) in enumerate([
+                        (1, 1, "Report Vendor A quoted base cost", "explanation"),
+                        (1, 1, "Calculate Vendor A base headroom", "calculation"),
+                        (1, 1, "Report Vendor A quoted cost with support", "explanation"),
+                        (1, 1, "Calculate Vendor A headroom with support", "calculation"),
+                        (1, 1, "Report Vendor B quoted cost", "explanation"),
+                        (1, 1, "Report Vendor C quoted cost", "explanation"),
+                        (2, 2, "Report Vendor A compliance and capacity", "explanation"),
+                        (2, 2, "Report Vendor C compliance", "explanation"),
+                        (3, 2, "Recommend a compliant vendor", "recommendation"),
+                    ], start=1)
+                ],
                 "acceptance_criteria": [
                     "All vendor costs and headroom calculations grounded and verified",
                     "Compliance and 150,000 maximum transactions verified",
@@ -233,7 +250,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                             "statement": "Vendor A base annual license cost is $50,000.",
                             "category": "given_fact",
                             "evidence_indices": [1],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_1"],
                             "confidence": 0.99,
                         },
                         {
@@ -242,7 +259,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                             "category": "computation",
                             "evidence_indices": [0, 1],
                             "premise_claim_ids": ["c_a_base"],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_2"],
                             "computation": {
                                 "expression": "cap - cost",
                                 "variables": {"cap": "60000", "cost": "50000"},
@@ -259,7 +276,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                             ),
                             "category": "given_fact",
                             "evidence_indices": [1],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_3"],
                             "confidence": 0.99,
                         },
                         {
@@ -268,7 +285,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                             "category": "computation",
                             "evidence_indices": [0, 1],
                             "premise_claim_ids": ["c_a_support"],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_4"],
                             "computation": {
                                 "expression": "cap - cost",
                                 "variables": {"cap": "60000", "cost": "58000"},
@@ -283,7 +300,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                             "statement": "Vendor B annual license cost is $65,000.",
                             "category": "given_fact",
                             "evidence_indices": [2],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_5"],
                             "confidence": 0.99,
                         },
                         {
@@ -291,7 +308,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                             "statement": "Vendor C annual license cost is $48,000.",
                             "category": "given_fact",
                             "evidence_indices": [2],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_6"],
                             "confidence": 0.99,
                         },
                     ],
@@ -336,7 +353,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                         ),
                         "category": "computation",
                         "evidence_indices": [0, 1],
-                        "requirement_refs": ["req_2"],
+                        "requirement_refs": ["deliv_7"],
                         "computation": {
                             "expression": "stress_volume - transactions",
                             "variables": {"stress_volume": "150000", "transactions": "140000"},
@@ -354,7 +371,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                         "statement": "Vendor C is NOT SOC2 compliant.",
                         "category": "given_fact",
                         "evidence_indices": [1],
-                        "requirement_refs": ["req_2"],
+                        "requirement_refs": ["deliv_8"],
                         "confidence": 0.99,
                     },
                     {
@@ -363,7 +380,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
                         "category": "recommendation",
                         "evidence_indices": [1],
                         "premise_claim_ids": cids[:2] if cids else [],
-                        "requirement_refs": ["req_3"],
+                        "requirement_refs": ["deliv_9"],
                         "confidence": 0.98,
                     },
                 ],
@@ -800,6 +817,26 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                     "Recommend the best eligible vendor",
                     "Calculate remaining budget under both forecasts and max transactions",
                 ],
+                "deliverables": [
+                    {
+                        "deliverable_id": f"deliv_{idx}", "requirement_ref": f"req_{requirement}",
+                        "task_ref": f"t{task}", "text": text, "kind": kind,
+                    }
+                    for idx, (requirement, task, text, kind) in enumerate([
+                        (1, 1, "Calculate Vendor A base forecast cost", "calculation"),
+                        (1, 1, "Calculate Vendor A stress forecast cost", "calculation"),
+                        (1, 1, "Calculate Vendor B base forecast cost", "calculation"),
+                        (1, 1, "Calculate Vendor B stress forecast cost", "calculation"),
+                        (1, 1, "Calculate Vendor C base forecast cost", "calculation"),
+                        (1, 1, "Calculate Vendor C stress forecast cost", "calculation"),
+                        (2, 2, "Explain Vendor A compliance", "explanation"),
+                        (2, 2, "Explain why Vendors B and C are disqualified", "explanation"),
+                        (3, 2, "Recommend a vendor", "recommendation"),
+                        (4, 3, "Calculate base forecast headroom", "calculation"),
+                        (4, 3, "Calculate stress forecast headroom", "calculation"),
+                        (4, 3, "Calculate maximum affordable transactions", "calculation"),
+                    ], start=1)
+                ],
                 "acceptance_criteria": [
                     "All 6 forecast costs, compliance, balances, and max transactions verified",
                 ],
@@ -912,7 +949,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             ),
                             "category": "computation",
                             "evidence_indices": [0, 1],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_1"],
                             "computation": {
                                 "expression": "fixed + rate * transactions",
                                 "variables": {
@@ -937,7 +974,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             ),
                             "category": "computation",
                             "evidence_indices": [0, 1],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_2"],
                             "computation": {
                                 "expression": "fixed + rate * transactions",
                                 "variables": {
@@ -962,7 +999,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             ),
                             "category": "computation",
                             "evidence_indices": [0, 2, 4],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_3"],
                             "computation": {
                                 "expression": "fixed + onboarding + rate * transactions",
                                 "variables": {
@@ -989,7 +1026,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             ),
                             "category": "computation",
                             "evidence_indices": [0, 2, 4],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_4"],
                             "computation": {
                                 "expression": "fixed + onboarding + rate * transactions",
                                 "variables": {
@@ -1016,7 +1053,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             ),
                             "category": "computation",
                             "evidence_indices": [0, 3],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_5"],
                             "computation": {
                                 "expression": "fixed + rate * transactions",
                                 "variables": {
@@ -1041,7 +1078,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             ),
                             "category": "computation",
                             "evidence_indices": [0, 3],
-                            "requirement_refs": ["req_1"],
+                            "requirement_refs": ["deliv_6"],
                             "computation": {
                                 "expression": "fixed + rate * transactions",
                                 "variables": {
@@ -1112,7 +1149,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             ),
                             "category": "given_fact",
                             "evidence_indices": [0, 1],
-                            "requirement_refs": ["req_2"],
+                            "requirement_refs": ["deliv_7"],
                             "confidence": 0.99,
                         },
                         {
@@ -1124,7 +1161,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             ),
                             "category": "given_fact",
                             "evidence_indices": [0, 2],
-                            "requirement_refs": ["req_2"],
+                            "requirement_refs": ["deliv_8"],
                             "confidence": 0.99,
                         },
                         {
@@ -1133,7 +1170,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                             "category": "recommendation",
                             "evidence_indices": [0, 1],
                             "premise_claim_ids": cids[:2] if cids else [],
-                            "requirement_refs": ["req_3"],
+                            "requirement_refs": ["deliv_9"],
                             "confidence": 0.99,
                         },
                     ],
@@ -1184,7 +1221,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                         "category": "computation",
                         "evidence_indices": [0],
                         "premise_claim_ids": [a100_cid] if a100_cid.startswith("clm_") else [],
-                        "requirement_refs": ["req_4"],
+                        "requirement_refs": ["deliv_10"],
                         "computation": {
                             "expression": "cap - cost",
                             "variables": {"cap": "60000", "cost": "50000"},
@@ -1203,7 +1240,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                         "category": "computation",
                         "evidence_indices": [0],
                         "premise_claim_ids": [a140_cid] if a140_cid.startswith("clm_") else [],
-                        "requirement_refs": ["req_4"],
+                        "requirement_refs": ["deliv_11"],
                         "computation": {
                             "expression": "cap - cost",
                             "variables": {"cap": "60000", "cost": "58000"},
@@ -1221,7 +1258,7 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
                         ),
                         "category": "computation",
                         "evidence_indices": [0, 1],
-                        "requirement_refs": ["req_4"],
+                        "requirement_refs": ["deliv_12"],
                         "computation": {
                             "expression": "(cap - fixed) / rate",
                             "variables": {"cap": "60000", "fixed": "30000", "rate": "0.20"},
@@ -1439,7 +1476,7 @@ async def test_v23_multilevel_dependency_repair_chain(tmp_path: Path) -> None:
                     {
                         "claim_ref": "l3",
                         "statement": "L3 recommend Vendor A.",
-                        "category": "logical_inference",
+                        "category": "recommendation",
                         "evidence_indices": [],
                         "premise_claim_ids": cids[-1:],
                         "requirement_refs": ["req_3"],

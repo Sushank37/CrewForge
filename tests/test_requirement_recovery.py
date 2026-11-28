@@ -90,7 +90,7 @@ async def test_targeted_recovery_qualification_and_synthesis_omissions(tmp_path,
     await db.initialize()
     settings = CrewForgeSettings(
         _env_file=None, allow_paid_runs=False, max_model_calls_per_run=max_calls,
-        max_retries=0, enable_peer_messaging=False,
+        max_retries=0, enable_peer_messaging=False, enable_deterministic_synthesis_fast_path=False,
     )
     recovered = []
     reviewed = {}

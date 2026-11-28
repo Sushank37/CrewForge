@@ -13,7 +13,7 @@ from crewforge.core.orchestrator import NetworkRunner
 from crewforge.core.retrieval import ReferenceDocument
 from crewforge.schemas import ProposedEvidence, RunStatus
 from crewforge.storage.database import Database
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 
 def test_evidence_verification_document_scoping_and_sentence_negation() -> None:

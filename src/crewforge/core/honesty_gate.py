@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from crewforge.core.requirements import reviewed_deliverables
+from crewforge.core.requirements import claim_addresses_kind, reviewed_deliverables
 from crewforge.schemas import (
     Claim,
     ClaimCategory,
@@ -208,6 +208,32 @@ class HonestyGate:
             )
         }
 
+        def _arithmetic_premises_current(claim: Claim) -> bool:
+            """Check versioned premises, including arithmetic behind intermediate claims."""
+            pending = [claim]
+            seen: set[tuple[str, int]] = set()
+            while pending:
+                current = pending.pop()
+                key = (current.claim_id, current.version)
+                if key in seen:
+                    continue
+                seen.add(key)
+                pinned = {ref.claim_id: ref.claim_version for ref in current.premise_refs}
+                for premise_id in set(current.depends_on_claim_ids) | pinned.keys():
+                    premise = latest_by_id.get(premise_id)
+                    if (
+                        premise is None or premise.version != pinned.get(premise_id, 1)
+                        or premise.status in {ClaimStatus.STALE, ClaimStatus.REJECTED}
+                        or premise.verification_status == VerificationStatus.STALE_PENDING_REVIEW
+                    ):
+                        return False
+                    if premise.category == ClaimCategory.COMPUTATION and not any(
+                        tid in current_calculations for tid in premise.tool_execution_ids
+                    ):
+                        return False
+                    pending.append(premise)
+            return True
+
         allowed_numbers = extract_numbers_from_text(original_prompt)
         for evd in evidence_list:
             if evd.verified_in_input and evd.source_type in {"user_prompt", "external_retrieved"}:
@@ -216,8 +242,10 @@ class HonestyGate:
             assert rec.computed_result is not None
             allowed_numbers.update(extract_numbers_from_text(rec.computed_result))
         for claim in supported_claims:
-            if claim.category != ClaimCategory.COMPUTATION or any(
-                tid in current_calculations for tid in claim.tool_execution_ids
+            if _arithmetic_premises_current(claim) and (
+                claim.category != ClaimCategory.COMPUTATION or any(
+                    tid in current_calculations for tid in claim.tool_execution_ids
+                )
             ):
                 allowed_numbers.update(extract_numbers_from_text(claim.statement))
 
@@ -279,6 +307,9 @@ class HonestyGate:
                         f"material premise '{pref.claim_id}'."
                     )
 
+            if not _arithmetic_premises_current(latest):
+                return None, f"Claim '{cid}' depends on stale or invalidated arithmetic lineage."
+
             if expected_segment_type == "recommendation":
                 if latest.category != ClaimCategory.RECOMMENDATION:
                     return None, f"Unsupported factual claim '{cid}' cannot be a recommendation."
@@ -304,7 +335,6 @@ class HonestyGate:
                     return None, f"Conditional claim '{cid}' lacks reviewed qualification."
                 if (
                     latest.category == ClaimCategory.COMPUTATION
-                    and latest.status == ClaimStatus.SUPPORTED
                     and not any(tid in current_calculations for tid in latest.tool_execution_ids)
                 ):
                     return None, f"Conditional calculation '{cid}' lacks current provenance."
@@ -560,6 +590,49 @@ class HonestyGate:
                 used_claim_ids.append(claim.claim_id)
                 break
 
+        # When endorsement is missing, retain a bounded, task-linked factual finding.
+        # Coverage still comes exclusively from reviewed deliverable endorsements.
+        shown_requirements: set[str] = set()
+        task_refs = {task.task_id: task.task_ref for task in plan.tasks}
+        qualified_items = {
+            d.deliverable_id for d in plan.deliverables
+            if d.kind in {"conditional", "recommendation"}
+        }
+        for item in plan.deliverables:
+            if (
+                item.requirement_ref in shown_requirements
+                or item.kind in {"conditional", "recommendation"}
+                or any(
+                    c.claim_id in used_claim_ids
+                    for c in covered_by_review.get(item.deliverable_id, [])
+                )
+            ):
+                continue
+            candidates = [
+                c for c in latest_claims
+                if item.deliverable_id in c.requirement_refs
+                and task_refs.get(c.task_id) == item.task_ref
+                and c.is_material and claim_addresses_kind(c, item)
+                and (c.claim_id, c.version) not in qualified_claims
+                and not qualified_items.intersection(c.requirement_refs)
+            ]
+            if any(c.claim_id in used_claim_ids for c in candidates):
+                shown_requirements.add(item.requirement_ref)
+                continue
+            for claim in candidates:
+                _, err = _validate_claim_ref(claim.claim_id, claim.version, require_supported=True)
+                if err is not None:
+                    continue
+                approved_accepted.append((ReleaseSegment(
+                    segment_type="accepted_claim", text=claim.statement,
+                    claim_refs=[ClaimVersionRef(
+                        claim_id=claim.claim_id, claim_version=claim.version,
+                    )],
+                ), [claim]))
+                used_claim_ids.append(claim.claim_id)
+                shown_requirements.add(item.requirement_ref)
+                break
+
         # 4. Block new Lead factual assertions & strip laundering from auxiliary synthesis fields.
         unresolved_items: list[str] = []
         laundering_detected = False
@@ -729,6 +802,7 @@ class HonestyGate:
                 req_score += (len(items) - len(outstanding)) / len(items)
                 req_items.append(RequirementCoverageItem(
                     requirement_id=req_id, text=req_text, status=status, rationale=rationale,
+                    verified_deliverable_refs=[ref for ref, claims in fulfilled.items() if claims],
                     linked_claim_refs=[
                         ClaimVersionRef(claim_id=c.claim_id, claim_version=c.version)
                         for c in (list(released.values()) or linked)

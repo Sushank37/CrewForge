@@ -18,7 +18,7 @@ from crewforge.core.planner import (
 )
 from crewforge.schemas import PlannerOutput
 from crewforge.storage.database import Database
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 
 def _settings(db_path: Path, **overrides: object) -> CrewForgeSettings:

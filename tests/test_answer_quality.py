@@ -35,7 +35,7 @@ from crewforge.schemas import (
 )
 from crewforge.storage.database import Database
 from crewforge.tools.arithmetic import build_provenance_catalog
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 _CLAIM_HEADER_RE = re.compile(r"Claim (clm_[a-f0-9]+) \(version=(\d+),")
 _SUPPORTED_LINE_RE = re.compile(r"- (clm_[a-f0-9]+) \(version=(\d+),.*?status=supported")
@@ -265,7 +265,7 @@ def test_dependent_claim_revalidated_after_upstream_revision(tmp_path: Path) -> 
             assert res.verification.supported_claim_count == 2
             assert "540000 USD" in res.answer
             assert "stays under budget" in res.answer
-            assert res.answer.count("540000 USD") == 1
+            assert res.answer.split("**Calculations and Sources**")[0].count("540000 USD") == 1
             assert "[clm_" not in res.answer
         finally:
             await db.close()

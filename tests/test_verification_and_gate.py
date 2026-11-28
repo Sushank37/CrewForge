@@ -51,7 +51,7 @@ from crewforge.tools.arithmetic import (
     evaluate_decimal_expression,
     format_decimal,
 )
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 _CLAIM_HEADER_RE = re.compile(r"Claim (clm_[a-f0-9]+) \(version=(\d+),")
 _SUPPORTED_LINE_RE = re.compile(r"- (clm_[a-f0-9]+) \(version=(\d+),.*?status=supported")
@@ -237,7 +237,9 @@ async def test_reviewer_independence_missing_verdicts_and_three_level_invalidati
                 ],
             }
         )
-        plan = validate_and_materialize_plan(run_id="run_G", raw_plan=raw, settings=settings)
+        plan = validate_and_materialize_plan(
+            run_id="run_G", raw_plan=raw, settings=settings, require_deliverables=False,
+        )
         await db.save_execution_plan(plan)
         agent_id = plan.agents[0].agent_id
         task_id = plan.tasks[0].task_id
@@ -459,7 +461,9 @@ async def test_missing_reviewer_verdict_leaves_claim_unresolved(tmp_path: Path) 
                 ],
             }
         )
-        plan = validate_and_materialize_plan(run_id="run_mv", raw_plan=raw, settings=settings)
+        plan = validate_and_materialize_plan(
+            run_id="run_mv", raw_plan=raw, settings=settings, require_deliverables=False,
+        )
         await db.save_execution_plan(plan)
         ledger = ClaimLedger(db)
         await ledger.record_specialist_outputs(
@@ -527,7 +531,9 @@ async def test_honesty_gate_blocks_bypass_vectors() -> None:
                 ],
             }
         )
-        plan = validate_and_materialize_plan(run_id="run_bypass", raw_plan=raw, settings=settings)
+        plan = validate_and_materialize_plan(
+            run_id="run_bypass", raw_plan=raw, settings=settings, require_deliverables=False,
+        )
         await db.save_execution_plan(plan)
 
         c1 = Claim(

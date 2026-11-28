@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,14 @@ from crewforge.core.budget import (
 )
 from crewforge.core.executor import ModelExecutor
 from crewforge.providers.base import ProviderRateLimitError, ProviderTimeoutError
-from crewforge.schemas import RunConfig, UsageMetrics
+from crewforge.schemas import (
+    Claim,
+    ClaimCategory,
+    ClaimStatus,
+    RunConfig,
+    UsageMetrics,
+)
+from crewforge.storage import database as database_module
 from crewforge.storage.database import Database
 from tests.fake_provider import FakeProvider
 
@@ -514,5 +522,83 @@ async def test_phase1_database_migrates_cleanly_to_phase2(tmp_path: Path) -> Non
         assert trace.prompt == "legacy prompt"
         assert trace.plan is None
         assert trace.claims == []
+    finally:
+        await db.close()
+
+
+async def test_production_v4_schema_upgrades_populated_history_to_v5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "disposable-production-schema.db"
+    db = Database(db_path)
+    # Apply the same migrations that made the production v4 schema, including
+    # the conditional column upgrades from initialize_sync.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            database_module, "_MIGRATIONS",
+            tuple(migration for migration in database_module._MIGRATIONS if migration[0] <= 4),
+        )
+        await db.initialize()
+    assert await db.get_schema_version() == 4
+    settings = CrewForgeSettings(_env_file=None)
+    await db.create_run("historical", "network", "Report the rate.", settings.to_run_config())
+    await db.insert_claim(Claim(
+        claim_id="clm_historical", run_id="historical", author_agent_id="lead",
+        statement="The supplied rate is 20.", category=ClaimCategory.GIVEN_FACT,
+        status=ClaimStatus.SUPPORTED, requirement_refs=["req_1"],
+    ))
+    await db.close()
+
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO execution_plans (
+                plan_id, run_id, goal, user_requirements_json, acceptance_criteria_json,
+                assumptions_json, missing_information_json, created_by, created_at
+            ) VALUES (
+                'pln_historical', 'historical', 'Report rate', '["Report the rate"]', '[]',
+                '[]', '[]', 'lead', '2026-11-25T10:00:00+00:00'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO review_verdicts (
+                verdict_id, run_id, claim_id, claim_version, reviewer_id, decision,
+                rationale, blocking_issues_json, created_at
+            ) VALUES (
+                'vrd_historical', 'historical', 'clm_historical', 1, 'reviewer', 'approve',
+                'Confirmed rate.', '[]', '2026-11-25T10:00:00+00:00'
+            )
+            """
+        )
+
+    try:
+        before = await db.get_run_trace("historical")
+        assert before is not None and before.plan is not None
+        assert before.plan.deliverables == []
+        assert before.review_verdicts[0].covered_deliverable_refs == []
+        await db.initialize()
+        await db.initialize()
+        assert await db.get_schema_version() == 5
+        after = await db.get_run_trace("historical")
+        assert after is not None
+        assert after.plan == before.plan
+        assert after.claims == before.claims
+        assert after.review_verdicts == before.review_verdicts
+        with closing(sqlite3.connect(db_path)) as connection:
+            assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 5"
+            ).fetchone() == (1,)
+            assert connection.execute(
+                "SELECT deliverables_json FROM execution_plans WHERE plan_id = 'pln_historical'"
+            ).fetchone() == ("[]",)
+            assert connection.execute(
+                "SELECT covered_deliverables_json FROM review_verdicts "
+                "WHERE verdict_id = 'vrd_historical'"
+            ).fetchone() == ("[]",)
     finally:
         await db.close()

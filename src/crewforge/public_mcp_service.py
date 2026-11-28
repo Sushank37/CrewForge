@@ -710,6 +710,14 @@ class PublicJobManager:
                 "execution_completed": v_sum.execution_completed if v_sum else False,
                 "content_released_safely": v_sum.content_released_safely if v_sum else False,
                 "answer_complete": v_sum.answer_complete if v_sum else None,
+                "coverage_methodology": v_sum.coverage_methodology if v_sum else None,
+                "requirement_statuses": [
+                    req.model_dump(mode="json") | {
+                        "text": sanitize_error_message(req.text),
+                        "rationale": sanitize_error_message(req.rationale),
+                    }
+                    for req in v_sum.requirement_statuses
+                ] if v_sum else [],
                 "material_claim_count": v_sum.material_claim_count if v_sum else 0,
                 "supported_claim_count": v_sum.supported_claim_count if v_sum else 0,
                 "unresolved_claim_count": v_sum.unresolved_claim_count if v_sum else 0,
@@ -861,6 +869,7 @@ class PublicJobManager:
                 "current_stage": row["current_stage"],
                 "agents": [],
                 "assignments": [],
+                "deliverables": [],
                 "messages": [],
                 "tool_executions": [],
                 "review_decisions": [],
@@ -934,6 +943,7 @@ class PublicJobManager:
                 "decision": _enum_val(v.decision),
                 "rationale": sanitize_error_message(v.rationale),
                 "blocking_severity": _enum_val(v.blocking_severity),
+                "covered_deliverable_refs": list(v.covered_deliverable_refs),
             }
             for v in trace.review_verdicts
         ]
@@ -954,6 +964,9 @@ class PublicJobManager:
                 "statement": c.statement,
                 "category": _enum_val(c.category),
                 "status": _enum_val(c.status),
+                "verification_status": _enum_val(c.verification_status),
+                "premise_refs": [ref.model_dump(mode="json") for ref in c.premise_refs],
+                "tool_execution_ids": list(c.tool_execution_ids),
                 "author_agent_id": c.author_agent_id,
                 "requirement_refs": list(c.requirement_refs),
                 "evidence": [
@@ -966,6 +979,11 @@ class PublicJobManager:
             {
                 "passed": trace.honesty_gate.passed,
                 "release_mode": trace.honesty_gate.release_mode,
+                "execution_completed": trace.honesty_gate.verification_summary.execution_completed,
+                "content_released_safely": (
+                    trace.honesty_gate.verification_summary.content_released_safely
+                ),
+                "answer_complete": trace.honesty_gate.verification_summary.answer_complete,
                 "rejected_segments": list(trace.honesty_gate.rejected_segments),
                 "rejected_claim_refs": list(trace.honesty_gate.rejected_claim_refs),
             }
@@ -989,6 +1007,10 @@ class PublicJobManager:
             "status": row["status"],
             "agents": agents,
             "assignments": assignments,
+            "deliverables": [
+                d.model_dump(mode="json") | {"text": sanitize_error_message(d.text)}
+                for d in (plan.deliverables if plan else [])
+            ],
             "messages": messages,
             "tool_executions": tool_executions,
             "review_decisions": review_decisions,

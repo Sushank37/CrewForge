@@ -35,7 +35,7 @@ from crewforge.schemas import (
     TaskStatus,
 )
 from crewforge.storage.database import CrossRunReferenceError, Database
-from tests.fake_provider import FakeProvider
+from tests.fake_provider import ChecklistFixtureProvider as FakeProvider
 
 _CLAIM_ID_VER_RE = re.compile(r"Claim (clm_[a-f0-9]+) \(version=(\d+),")
 _TARGET_CLAIM_RE = re.compile(r"claim_id=(clm_[a-f0-9]+),\s*expected_version=(\d+)")
@@ -64,7 +64,7 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
 ) -> None:
     """Verify overlapping parallel tasks, topological ordering, and real peer message delivery."""
     db_path = tmp_path / "network_concurrent.db"
-    settings = _settings(db_path, max_concurrency=3)
+    settings = _settings(db_path, max_concurrency=3, enable_deterministic_synthesis_fast_path=False)
     db = Database(db_path)
     await db.initialize()
 
@@ -622,8 +622,12 @@ async def test_cross_run_isolation_and_ledger_immutability(tmp_path: Path) -> No
                 ],
             }
         )
-        plan_a = validate_and_materialize_plan(run_id="run_A", raw_plan=raw, settings=settings)
-        plan_b = validate_and_materialize_plan(run_id="run_B", raw_plan=raw, settings=settings)
+        plan_a = validate_and_materialize_plan(
+            run_id="run_A", raw_plan=raw, settings=settings, require_deliverables=False,
+        )
+        plan_b = validate_and_materialize_plan(
+            run_id="run_B", raw_plan=raw, settings=settings, require_deliverables=False,
+        )
         await db.save_execution_plan(plan_a)
         await db.save_execution_plan(plan_b)
 
