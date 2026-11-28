@@ -48,7 +48,9 @@ from crewforge.web_api import (
 )
 
 _ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-_FRONTEND_DIST_DIR = _ROOT_DIR / "frontend" / "dist"
+_FRONTEND_DIST_DIR = Path(
+    os.environ.get("CREWFORGE_FRONTEND_DIST", _ROOT_DIR / "frontend" / "dist")
+)
 _LEGACY_UI_DIR = Path(__file__).resolve().parent / "dashboard_ui"
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -298,6 +300,8 @@ def create_dashboard_app(
     require_auth: bool = False,
     require_react: bool = False,
     allowed_hosts: Iterable[str] | None = None,
+    mcp_path: str = "/mcp",
+    mcp_port: int = 8765,
     google_client_id: str | None = None,
     google_token_verifier: Callable[[str], Any] | None = None,
     email_delivery_fn: Callable[[str, str], Any] | None = None,
@@ -343,6 +347,7 @@ def create_dashboard_app(
         port=8765,
         allowed_hosts=extra_hosts,
     )
+    mcp_server.settings.streamable_http_path = mcp_path
     mcp_http_app = mcp_server.streamable_http_app()
 
     @asynccontextmanager
@@ -802,12 +807,12 @@ def create_dashboard_app(
         req_host = request.headers.get("host", "").strip()
         scheme = "https" if forwarded_proto == "https" else request.url.scheme
         if req_host:
-            public_url = f"{scheme}://{req_host}/mcp"
+            public_url = f"{scheme}://{req_host}{mcp_path}"
         else:
-            public_url = f"{str(request.base_url).rstrip('/')}/mcp"
-        internal_port = request.url.port or 8765
+            public_url = f"{str(request.base_url).rstrip('/')}{mcp_path}"
+        internal_port = request.url.port or mcp_port
         internal_url = (
-            f"http://127.0.0.1:{internal_port}/mcp"
+            f"http://127.0.0.1:{internal_port}{mcp_path}"
             if scheme == "https" or (urlparse(public_url).hostname or "") not in _LOCAL_HOSTS
             else public_url
         )

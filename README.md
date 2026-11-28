@@ -195,3 +195,9 @@ CREWFORGE_DB_PATH=.crewforge/demo_live.db .venv/bin/crewforge-mcp --transport st
 4. **Live Monitor:** Switch to **Live Monitor** to poll the configured demo SQLite database for newly created runs.
 5. **Benchmark V2:** Switch to **Benchmark V2** to inspect the complete ChatGPT-assisted blind semantic grading results (`96.50` baseline vs `55.50` network, `1/10` network wins, 5 domain breakdowns, cost/latency, and David vs Goliath status: `Not executed — local readiness blocker.`).
 
+
+## Final release
+
+The Railway image serves the dashboard at `/`, anonymous Streamable HTTP at `/mcp`, and authenticated workspace MCP at `/mcp/workspace`. Public MCP provides `run_task`, `get_task_status`, `get_task_result`, `get_task_trace`, `run_single_agent` and `cancel_task`. Jobs run asynchronously. Inference requires the server's configured provider and approved budget.
+
+See the [release materials](docs/final_release/README.md) for the architecture, deployment checks, benchmark results and judge workflow.

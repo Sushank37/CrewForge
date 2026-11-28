@@ -8,7 +8,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation, localcontext
 from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
@@ -92,6 +92,14 @@ _EXACT_UNIT_NORMALIZATIONS = {
     "usd": "usd",
     "dollar": "usd",
     "dollars": "usd",
+    "block": "blocks",
+    "blocks": "blocks",
+    "order": "orders",
+    "orders": "orders",
+    "credit": "credits",
+    "credits": "credits",
+    "shipment": "shipments",
+    "shipments": "shipments",
     "eur": "eur",
     "euro": "eur",
     "euros": "eur",
@@ -760,6 +768,9 @@ def _normalize_operand_units(units: str) -> str:
     text = re.sub(r"\s+", " ", units.strip().lower())
     text = {"percentage point": "points", "percentage points": "points",
             "percent points": "points", "usd thousands": "thousand usd"}.get(text, text)
+    parts = re.split(r"\s*/\s*| per ", text)
+    if len(parts) == 2 and all(parts):
+        return "/".join(_EXACT_UNIT_NORMALIZATIONS.get(part, part) for part in parts)
     return _EXACT_UNIT_NORMALIZATIONS.get(text, text)
 
 
@@ -1201,11 +1212,16 @@ def _eval_ast_node(
             elif isinstance(node.op, ast.FloorDiv):
                 if right == 0:
                     raise MalformedExpressionError("Division by zero.")
-                res = left // right
+                quotient, remainder = divmod(left, right)
+                res = quotient
+                if remainder and left.is_signed() != right.is_signed():
+                    res -= 1
             elif isinstance(node.op, ast.Mod):
                 if right == 0:
                     raise MalformedExpressionError("Modulo by zero.")
                 res = left % right
+                if res and res.is_signed() != right.is_signed():
+                    res += right
             elif isinstance(node.op, ast.Pow):
                 if abs(right) > _MAX_POWER_ABS:
                     raise UnsafeExpressionError(
@@ -1255,6 +1271,8 @@ def _eval_ast_node(
             "avg",
             "abs",
             "round",
+            "ceil",
+            "floor",
             "comb",
             "C",
             "perm",
@@ -1347,12 +1365,18 @@ def _eval_ast_node(
                     month, day = divmod(month_day, 100)
                     dates.append(date(year, month, day))
                 return Decimal((dates[1] - dates[0]).days)
+            if fn_name in {"ceil", "floor"}:
+                if len(args) != 1:
+                    raise MalformedExpressionError(f"{fn_name}() takes exactly 1 argument.")
+                mode = ROUND_CEILING if fn_name == "ceil" else ROUND_FLOOR
+                return args[0].to_integral_value(rounding=mode)
             if fn_name == "round":
                 if len(args) not in {1, 2}:
                     raise MalformedExpressionError("round() takes 1 or 2 arguments.")
-                digits = int(args[1]) if len(args) == 2 else 0
-                if abs(digits) > 12:
-                    raise UnsafeExpressionError("round() precision exceeds safe bounds.")
+                digits = (
+                    _to_bounded_int(args[1], name="round precision", min_val=-12, max_val=12)
+                    if len(args) == 2 else 0
+                )
                 quant = Decimal("1").scaleb(-digits)
                 return args[0].quantize(quant)
             if fn_name in {"comb", "C"}:
@@ -1607,6 +1631,15 @@ class DeterministicArithmeticTool:
             ref = input_provenance_refs.get(name, "").strip()
             units = _normalize_operand_units((operand_units or {}).get(name, declared_units))
             quote = (source_quotes or {}).get(name)
+            if not ref and quote and quote.strip():
+                # Resolve an omitted alias only from one literal primary prompt passage.
+                # A supplied invalid alias must fail instead of being silently replaced.
+                candidates = [
+                    span.alias for span in active_catalog.prompt_clauses
+                    if quote.strip() in span.text
+                ]
+                if len(candidates) == 1:
+                    ref = candidates[0]
             kind = "unknown"
             resolved_id = ref
             extra: dict[str, Any] = {}
