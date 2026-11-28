@@ -5,6 +5,7 @@ import { CharacterGallery } from "./components/CharacterGallery";
 import { ChatView } from "./components/ChatView";
 import { McpView } from "./components/McpView";
 import { MissionControlView } from "./components/MissionControlView";
+import { GuestExperience, PublicLanding } from "./components/PublicExperience";
 import { SettingsView } from "./components/SettingsView";
 import type { AppView, AuthMeResponse, ChatSummary, ThemeMode } from "./types";
 
@@ -17,6 +18,7 @@ export const App: React.FC = () => {
   const [inspectRunId, setInspectRunId] = useState<string | null>(null);
   const [authInfo, setAuthInfo] = useState<AuthMeResponse | null>(null);
   const [showSignIn, setShowSignIn] = useState<boolean>(false);
+  const [guestOpen, setGuestOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState<boolean>(false);
 
   const resetAccountState = useCallback(() => {
@@ -109,16 +111,31 @@ export const App: React.FC = () => {
     await refreshAuthAndChats();
   };
 
-  if (authInfo && ((authInfo.auth_required && !authInfo.authenticated) || showSignIn)) {
+  const publicProps = {
+    theme,
+    onToggleTheme: () => setTheme((t) => (t === "dark" ? "light" : "dark")),
+    onGuest: () => setGuestOpen(true),
+    onHome: () => { setGuestOpen(false); setShowSignIn(false); },
+    onPrivate: () => { setGuestOpen(false); setShowSignIn(true); },
+  };
+
+  if (guestOpen) return <GuestExperience {...publicProps} />;
+
+  if (showSignIn) {
     return (
       <AuthPage
-        authInfo={authInfo}
+        authInfo={authInfo ?? { authenticated: false, auth_required: true, google_enabled: false }}
         theme={theme}
-        onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+        onToggleTheme={publicProps.onToggleTheme}
         onAuthenticated={handleAuthenticated}
-        onCancelLocal={!authInfo.auth_required ? () => setShowSignIn(false) : undefined}
+        onCancel={publicProps.onHome}
+        cancelLabel={authInfo?.auth_required === false ? "Back to local workspace" : "Back to CrewForge"}
       />
     );
+  }
+
+  if (!authInfo || (authInfo.auth_required && !authInfo.authenticated)) {
+    return <PublicLanding {...publicProps} />;
   }
 
   const accountKey = authInfo?.user_id || "local";

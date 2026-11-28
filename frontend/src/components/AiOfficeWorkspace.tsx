@@ -58,6 +58,16 @@ export function deriveStage(trace: TracePayload | null, isRunning: boolean): {
   const releaseOutcome = classifyReleaseOutcome(trace);
   const blocked = releaseOutcome === "blocked";
 
+  if (status === "cancelled") {
+    return {
+      step: 4,
+      blocked: false,
+      releaseOutcome: "none",
+      headline: "Run cancelled",
+      subline: "Execution was stopped.",
+      leadBubble: "Cancelled.",
+    };
+  }
   if (status === "failed" || types.has("run_failed")) {
     return {
       step: 4,
@@ -419,7 +429,8 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
           <div className="office-controls">
             <div className="office-controls-left">
               <span className="muted" style={{ fontSize: 11.5 }}>
-                {specialists.length} specialist(s) · {layout.rows} row(s) · {trace?.usage?.model_calls || 0} model call(s)
+                {specialists.length} specialist(s) · {layout.rows} row(s)
+                {trace?.usage?.model_calls != null && ` · ${trace.usage.model_calls} model call(s)`}
               </span>
               {selectedActor && (
                 <button
@@ -692,7 +703,7 @@ export const AiOfficeWorkspace: React.FC<AiOfficeProps> = ({ trace, isRunning, m
             <span className="ticker-badge">Office Feed</span>
             <span className="ticker-text">{sim.lastInteractionNote}</span>
             <span className="ticker-meta">
-              {Object.keys(sim.actors).length} active in room · {events.length} events · click any agent to inspect
+              {Object.keys(sim.actors).length} in room · {events.length} events · click any agent to inspect
             </span>
           </div>
 

@@ -1,9 +1,16 @@
 """Verify the release entry point keeps the anonymous and private surfaces separate."""
 
+import json
+import sqlite3
+import time
+
 from starlette.testclient import TestClient
 
 from crewforge.config import CrewForgeSettings
 from crewforge.production import create_release_app
+from crewforge.public_mcp_service import create_public_mcp_app
+from tests.fake_provider import ChecklistFixtureProvider
+from tests.test_public_mcp_service import _scripted_handler
 
 
 def test_release_serves_dashboard_and_anonymous_mcp(monkeypatch, tmp_path):
@@ -29,6 +36,17 @@ def test_release_serves_dashboard_and_anonymous_mcp(monkeypatch, tmp_path):
         assert client.get("/health").json()["public_paid_inference_enabled"] is False
         assert client.get("/").status_code == 200
         assert client.get("/assets/app.js").text == "void 0;"
+        session = client.get("/api/guest/session")
+        assert session.json()["available"] is False
+        assert session.headers["cache-control"] == "no-store"
+        assert {"HttpOnly", "Secure", "SameSite=strict", "Path=/api/guest"} <= {
+            part.strip() for part in session.headers["set-cookie"].split(";")
+        }
+        guest_submit = client.post("/api/guest/jobs", json={"prompt": "Do this"}, headers={
+            "Origin": "https://crewforge.example",
+        })
+        assert guest_submit.status_code == 503
+        assert "paid inference is disabled" in guest_submit.json()["error"]
         assert client.get("/api/chats").status_code == 401
         assert client.get("/api/settings").status_code == 401
         assert client.post("/mcp/workspace", headers=headers, json={}).status_code == 401
@@ -53,3 +71,175 @@ def test_release_serves_dashboard_and_anonymous_mcp(monkeypatch, tmp_path):
             "get_task_trace", "cancel_task",
         ))
         assert "admin" not in tools.text
+
+
+def test_guest_and_mcp_share_jobs_and_limits_without_sharing_job_access(monkeypatch, tmp_path):
+    frontend = tmp_path / "dist"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("CrewForge")
+    monkeypatch.setattr("crewforge.dashboard._FRONTEND_DIST_DIR", frontend)
+    monkeypatch.setenv("CREWFORGE_RELEASE_ENABLE_PAID_INFERENCE", "true")
+    monkeypatch.setenv("CREWFORGE_DASHBOARD_DATA_DIR", str(tmp_path / "dashboard"))
+    job_db = tmp_path / "public.db"
+    budget_db = tmp_path / "budget.db"
+    monkeypatch.setenv("CREWFORGE_PUBLIC_MCP_DB_PATH", str(job_db))
+    monkeypatch.setenv("CREWFORGE_PUBLIC_MCP_BUDGET_DB_PATH", str(budget_db))
+    providers = []
+
+    def fake_factory(settings):
+        provider = ChecklistFixtureProvider(
+            handler=_scripted_handler, model_name=settings.model, delay_seconds=0.12,
+        )
+        providers.append(provider)
+        return provider
+
+    public_app = None
+
+    def create_scripted_public_app(*, settings):
+        nonlocal public_app
+        public_app = create_public_mcp_app(
+            settings=settings, provider_factory=fake_factory,
+            max_concurrent_jobs=1, max_pending_jobs=1,
+        )
+        return public_app
+
+    monkeypatch.setattr("crewforge.production.create_public_mcp_app", create_scripted_public_app)
+    app = create_release_app(settings=CrewForgeSettings(
+        _env_file=None, model="test-model", provider="openai", allow_paid_runs=True,
+        max_cost_per_run_usd=0.0, max_cumulative_cost_usd=0.0,
+    ))
+    owner_origin = {"Origin": "https://testserver"}
+    mcp_headers = {"Accept": "application/json, text/event-stream"}
+    prompt = "Verify the budget ceiling. The budget ceiling is 420 USD."
+
+    def wait_for_end(client, task_id):
+        for _ in range(160):
+            response = client.get(f"/api/guest/jobs/{task_id}")
+            assert response.status_code == 200
+            if response.json()["result"] is not None:
+                return response.json()
+            time.sleep(0.05)
+        raise AssertionError("Guest job did not finish")
+
+    with TestClient(app, base_url="https://testserver") as owner:
+        stranger = TestClient(app, base_url="https://testserver")
+        assert owner.get("/api/guest/session").json()["available"] is True
+        assert stranger.get("/api/guest/session").json()["available"] is True
+        assert owner.cookies["crewforge_guest"] != stranger.cookies["crewforge_guest"]
+        assert owner.post("/api/guest/jobs", json={"prompt": prompt}).status_code == 403
+        assert owner.post("/api/guest/jobs", json={"prompt": prompt}, headers={
+            "Origin": "https://different.example",
+        }).status_code == 403
+        assert owner.post("/api/guest/jobs", json={
+            "prompt": prompt, "api_key": "client-controlled",
+        }, headers=owner_origin).status_code == 400
+        assert owner.post("/api/guest/jobs", json={"prompt": "x" * 530_000},
+                          headers=owner_origin).status_code == 413
+
+        init = owner.post("/mcp", headers=mcp_headers, json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "offline", "version": "1.0"},
+            },
+        })
+        mcp_headers["Mcp-Session-Id"] = init.headers["mcp-session-id"]
+        owner.post("/mcp", headers=mcp_headers, json={
+            "jsonrpc": "2.0", "method": "notifications/initialized",
+        })
+
+        def call_mcp(name, **arguments):
+            response = owner.post("/mcp", headers=mcp_headers, json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            })
+            assert response.status_code == 200
+            for line in response.text.splitlines():
+                if line.startswith("data: "):
+                    return json.loads(line[6:])["result"]["structuredContent"]
+            return response.json()["result"]["structuredContent"]
+
+        created = owner.post("/api/guest/jobs", json={"prompt": prompt}, headers=owner_origin)
+        assert created.status_code == 202
+        team = created.json()["task_id"]
+        assert call_mcp("run_task", prompt="Shared from MCP")["error_code"] == "capacity_exhausted"
+
+        path = f"/api/guest/jobs/{team}"
+        assert stranger.get(path).status_code == 404
+        assert stranger.post(f"{path}/cancel", headers=owner_origin).status_code == 404
+        assert stranger.post("/api/guest/jobs", json={"compare_to": team},
+                             headers=owner_origin).status_code == 404
+        for tool in ("get_task_status", "get_task_result", "get_task_trace", "cancel_task"):
+            assert call_mcp(tool, task_id=team)["found"] is False
+        assert owner.get("/api/chats").status_code == 401
+        assert owner.get("/api/guest/jobs").status_code == 405
+        team_result = wait_for_end(owner, team)
+        assert team_result["trace"]["agents"]
+        assert team_result["trace"]["review_decisions"]
+        assert "420 USD" in team_result["result"]["answer"]
+        assert team_result["result"]["usage"]["model_calls"] > 0
+
+        compare = owner.post("/api/guest/jobs", json={"compare_to": team}, headers=owner_origin)
+        assert compare.status_code == 202
+        single = compare.json()["task_id"]
+        single_result = wait_for_end(owner, single)
+        assert single_result["result"]["answer"].startswith("Baseline:")
+        assert single_result["result"]["verification"]["release_mode"] == "unverified_baseline"
+        assert single_result["result"]["usage"]["model_calls"] > 0
+        repeat = owner.post("/api/guest/jobs", json={"compare_to": team}, headers=owner_origin)
+        assert repeat.json()["task_id"] == single
+        assert len(providers) == 2
+        assert public_app.state.job_manager.budget_db_path == budget_db
+        with sqlite3.connect(job_db) as conn:
+            rows = conn.execute(
+                """SELECT mode, prompt, reference_documents_json, guest_owner FROM public_jobs
+                   WHERE task_id IN (?, ?) ORDER BY mode""", (team, single),
+            ).fetchall()
+        assert [row[0] for row in rows] == ["baseline", "network"]
+        assert rows[0][1:] == rows[1][1:]
+        assert rows[0][1] == prompt and rows[0][3] != owner.cookies["crewforge_guest"]
+
+        owned = owner.post(
+            "/api/guest/jobs", json={"prompt": "Cancel this run"}, headers=owner_origin,
+        )
+        assert owned.status_code == 202
+        cancel_path = f"/api/guest/jobs/{owned.json()['task_id']}/cancel"
+        assert owner.post(cancel_path).status_code == 403
+        assert owner.post(cancel_path, headers=owner_origin).json()["cancelled"] is True
+
+        mcp_job = call_mcp("run_task", prompt="MCP-only task")["task_id"]
+        assert owner.get(f"/api/guest/jobs/{mcp_job}").status_code == 404
+        assert owner.post("/api/guest/jobs", json={"compare_to": mcp_job},
+                          headers=owner_origin).status_code == 404
+        assert call_mcp("cancel_task", task_id=mcp_job)["found"] is True
+
+
+async def test_existing_public_jobs_remain_accessible_after_guest_schema_migration(tmp_path):
+    db_path = tmp_path / "existing.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE public_jobs (
+                task_id TEXT PRIMARY KEY, mode TEXT NOT NULL, status TEXT NOT NULL,
+                prompt TEXT NOT NULL, reference_documents_json TEXT NOT NULL,
+                idempotency_key TEXT, request_hash TEXT, current_stage TEXT NOT NULL,
+                progress REAL NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+                result_json TEXT, error TEXT, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, completed_at TEXT
+            );
+            CREATE UNIQUE INDEX idx_public_jobs_idempotency ON public_jobs (mode, idempotency_key)
+                WHERE idempotency_key IS NOT NULL;
+            INSERT INTO public_jobs VALUES (
+                'preexisting', 'network', 'completed', 'Original prompt', '[]', 'keep-key', NULL,
+                'completed', 1.0, 'openai', 'test-model', '{"answer":"Existing answer."}', NULL,
+                '2026-01-01', '2026-01-01', '2026-01-01'
+            );
+        """)
+    manager = create_public_mcp_app(
+        settings=CrewForgeSettings(_env_file=None), db_path=db_path,
+    ).state.job_manager
+    assert (await manager.get_task_result("preexisting"))["answer"] == "Existing answer."
+    assert not (await manager.get_task_result("preexisting", guest_owner="visitor"))["found"]
+    repeat = await manager.enqueue_task(
+        prompt="Original prompt", mode="network", idempotency_key="keep-key",
+    )
+    assert repeat["task_id"] == "preexisting"
+    assert repeat["deduplicated"] is True

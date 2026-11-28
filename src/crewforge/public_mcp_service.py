@@ -264,6 +264,7 @@ class PublicJobManager:
                     reference_documents_json TEXT NOT NULL,
                     idempotency_key TEXT,
                     request_hash TEXT,
+                    guest_owner TEXT,
                     current_stage TEXT NOT NULL,
                     progress REAL NOT NULL,
                     provider TEXT NOT NULL,
@@ -284,11 +285,21 @@ class PublicJobManager:
                 conn.execute("ALTER TABLE public_jobs ADD COLUMN idempotency_key TEXT")
             if "request_hash" not in cols:
                 conn.execute("ALTER TABLE public_jobs ADD COLUMN request_hash TEXT")
+            if "guest_owner" not in cols:
+                conn.execute("ALTER TABLE public_jobs ADD COLUMN guest_owner TEXT")
             conn.execute(
                 """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_public_jobs_idempotency
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_public_jobs_mcp_idempotency
                 ON public_jobs (mode, idempotency_key)
-                WHERE idempotency_key IS NOT NULL
+                WHERE guest_owner IS NULL AND idempotency_key IS NOT NULL
+                """
+            )
+            conn.execute("DROP INDEX IF EXISTS idx_public_jobs_idempotency")
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_public_jobs_guest_idempotency
+                ON public_jobs (guest_owner, mode, idempotency_key)
+                WHERE guest_owner IS NOT NULL AND idempotency_key IS NOT NULL
                 """
             )
             conn.commit()
@@ -336,6 +347,25 @@ class PublicJobManager:
         finally:
             conn.close()
 
+    def _visible_job(self, task_id: str, guest_owner: str | None) -> dict[str, Any] | None:
+        row = self._get_job_row(task_id)
+        return row if row is not None and row["guest_owner"] == guest_owner else None
+
+    async def compare_guest_job(self, task_id: str, guest_owner: str) -> dict[str, Any] | None:
+        """Reuse the original inputs without exposing them or accepting replacements."""
+        row = self._visible_job(task_id, guest_owner)
+        if row is None:
+            return None
+        if row["mode"] != "network":
+            raise ValueError("Select a team run to compare.")
+        return await self.enqueue_task(
+            prompt=row["prompt"],
+            reference_documents=json.loads(row["reference_documents_json"]),
+            mode="baseline",
+            idempotency_key=f"guest-comparison:{task_id}",
+            guest_owner=guest_owner,
+        )
+
     def _update_job(self, task_id: str, **fields: Any) -> None:
         if not fields:
             return
@@ -382,6 +412,7 @@ class PublicJobManager:
         reference_documents: list[dict[str, Any] | str] | None = None,
         mode: Literal["network", "baseline"],
         idempotency_key: str | None = None,
+        guest_owner: str | None = None,
     ) -> dict[str, Any]:
         """Validate inputs, persist a queued job, launch background execution, and return ID."""
         cleaned_prompt = (prompt or "").strip()
@@ -407,8 +438,9 @@ class PublicJobManager:
             try:
                 if cleaned_idem is not None:
                     existing = conn.execute(
-                        "SELECT * FROM public_jobs WHERE mode = ? AND idempotency_key = ?",
-                        (mode, cleaned_idem),
+                        "SELECT * FROM public_jobs WHERE mode = ? AND idempotency_key = ? "
+                        "AND guest_owner IS ?",
+                        (mode, cleaned_idem, guest_owner),
                     ).fetchone()
                     if existing is not None:
                         if not _legacy_row_matches_hash(existing, mode, req_hash):
@@ -457,11 +489,11 @@ class PublicJobManager:
                     """
                     INSERT INTO public_jobs (
                         task_id, mode, status, prompt, reference_documents_json,
-                        idempotency_key, request_hash,
+                        idempotency_key, request_hash, guest_owner,
                         current_stage, progress, provider, model,
                         result_json, error, created_at, updated_at, completed_at
                     ) VALUES (
-                        ?, ?, 'queued', ?, ?, ?, ?, 'queued', 0.0, ?, ?, NULL, NULL, ?, ?, NULL
+                        ?, ?, 'queued', ?, ?, ?, ?, ?, 'queued', 0.0, ?, ?, NULL, NULL, ?, ?, NULL
                     )
                     """,
                     (
@@ -471,6 +503,7 @@ class PublicJobManager:
                         docs_json,
                         cleaned_idem,
                         req_hash,
+                        guest_owner,
                         provider_name,
                         model_name,
                         now,
@@ -802,9 +835,11 @@ class PublicJobManager:
             "error": sanitize_error_message(run_res.error) if run_res.error else None,
         }
 
-    async def get_task_status(self, task_id: str) -> dict[str, Any]:
+    async def get_task_status(
+        self, task_id: str, *, guest_owner: str | None = None,
+    ) -> dict[str, Any]:
         """Return live execution state, stage, and progress without starting inference."""
-        row = self._get_job_row(task_id)
+        row = self._visible_job(task_id, guest_owner)
         if row is None:
             return {"found": False, "task_id": task_id, "error": "Task not found."}
 
@@ -840,15 +875,17 @@ class PublicJobManager:
             "error": row["error"],
         }
 
-    async def get_task_result(self, task_id: str) -> dict[str, Any]:
+    async def get_task_result(
+        self, task_id: str, *, guest_owner: str | None = None,
+    ) -> dict[str, Any]:
         """Return final answer, sources, evidence, verification status, and unresolved items."""
-        row = self._get_job_row(task_id)
+        row = self._visible_job(task_id, guest_owner)
         if row is None:
             return {"found": False, "ready": False, "task_id": task_id, "error": "Task not found."}
 
         status = str(row["status"])
         if status in {"queued", "running"}:
-            live = await self.get_task_status(task_id)
+            live = await self.get_task_status(task_id, guest_owner=guest_owner)
             return {
                 "found": True,
                 "ready": False,
@@ -885,9 +922,11 @@ class PublicJobManager:
             "error": row["error"],
         }
 
-    async def get_task_trace(self, task_id: str) -> dict[str, Any]:
+    async def get_task_trace(
+        self, task_id: str, *, guest_owner: str | None = None,
+    ) -> dict[str, Any]:
         """Return sanitized agent roles, assignments, messages, tools, reviews, and lineage."""
-        row = self._get_job_row(task_id)
+        row = self._visible_job(task_id, guest_owner)
         if row is None:
             return {"found": False, "task_id": task_id, "error": "Task not found."}
 
@@ -1062,9 +1101,11 @@ class PublicJobManager:
             "notice": "Anonymous public evaluation task — not a private personal workspace.",
         }
 
-    async def cancel_task(self, task_id: str) -> dict[str, Any]:
+    async def cancel_task(
+        self, task_id: str, *, guest_owner: str | None = None,
+    ) -> dict[str, Any]:
         """Safely cancel a queued or running task."""
-        row = self._get_job_row(task_id)
+        row = self._visible_job(task_id, guest_owner)
         if row is None:
             return {
                 "found": False,

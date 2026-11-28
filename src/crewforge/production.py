@@ -17,6 +17,7 @@ from starlette.routing import Mount, Route
 from crewforge.config import CrewForgeSettings
 from crewforge.core.baseline import build_provider_from_settings
 from crewforge.dashboard import create_dashboard_app
+from crewforge.guest import create_guest_app
 from crewforge.providers.base import ModelProvider, ProviderConfigurationError
 from crewforge.public_mcp_service import create_public_mcp_app
 
@@ -43,6 +44,7 @@ def create_release_app(*, settings: CrewForgeSettings | None = None) -> Starlett
 
     dashboard_dir = Path(os.environ.get("CREWFORGE_DASHBOARD_DATA_DIR", "/data/dashboard"))
     public_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    guest = create_guest_app(public.state.job_manager, public_domain=public_domain)
     dashboard = create_dashboard_app(
         db_path=dashboard_dir / "judge_session.db",
         budget_db_path=dashboard_dir / "judge_budget.db",
@@ -79,6 +81,7 @@ def create_release_app(*, settings: CrewForgeSettings | None = None) -> Starlett
         routes=[
             Route("/health", release_health),
             Route("/mcp", public, methods=["GET", "POST", "DELETE"]),
+            Mount("/api/guest", guest),
             Mount("/", dashboard),
         ],
         lifespan=lifespan,

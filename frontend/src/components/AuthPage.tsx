@@ -26,7 +26,8 @@ interface AuthPageProps {
   theme: ThemeMode;
   onToggleTheme: () => void;
   onAuthenticated: () => Promise<void>;
-  onCancelLocal?: () => void;
+  onCancel?: () => void;
+  cancelLabel?: string;
 }
 
 export const AuthPage: React.FC<AuthPageProps> = ({
@@ -34,7 +35,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   theme,
   onToggleTheme,
   onAuthenticated,
-  onCancelLocal,
+  onCancel,
+  cancelLabel,
 }) => {
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [step, setStep] = useState<"email" | "code">("email");
@@ -302,9 +304,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           >
             {isSignUp ? "Already have an account? Log in" : "Need an account? Sign up"}
           </button>
-          {onCancelLocal && (
-            <button type="button" className="btn-ghost btn-xs" onClick={onCancelLocal}>
-              Back to local workspace
+          {onCancel && (
+            <button type="button" className="btn-ghost btn-xs" onClick={onCancel}>
+              {cancelLabel}
             </button>
           )}
         </div>
