@@ -42,6 +42,7 @@ from crewforge.core.retrieval import ReferenceDocument
 from crewforge.providers.base import ModelProvider
 from crewforge.schemas import RunResult, RunStatus
 from crewforge.storage.database import Database
+from crewforge.tools.arithmetic import split_prompt_clauses
 
 logger = logging.getLogger("crewforge.public_mcp")
 
@@ -683,6 +684,47 @@ class PublicJobManager:
                     "title": doc.title,
                     "reliability": _enum_val(doc.reliability),
                 }
+
+        if run_res.mode == "network":
+            latest = {}
+            for claim in trace.claims:
+                if claim.claim_id not in latest or latest[claim.claim_id].version < claim.version:
+                    latest[claim.claim_id] = claim
+            pending = [latest[cid] for cid in run_res.referenced_claim_ids if cid in latest]
+            tools = {t.tool_execution_id: t for t in trace.tool_executions}
+            clauses = {
+                f"up_{index}": clause for index, clause in
+                enumerate(split_prompt_clauses(trace.prompt), 1)
+            }
+            seen_claims = set()
+            for claim in pending:
+                if claim.claim_id in seen_claims:
+                    continue
+                seen_claims.add(claim.claim_id)
+                pending.extend(
+                    latest[p.claim_id] for p in claim.premise_refs
+                    if p.claim_id in latest and latest[p.claim_id].version == p.claim_version
+                )
+                for tid in claim.tool_execution_ids:
+                    record = tools.get(tid)
+                    if not record or not record.inputs_grounded or record.matches_proposed is False:
+                        continue
+                    for binding in record.provenance_details.values():
+                        ref = binding.get("resolved_id")
+                        if (
+                            not binding.get("grounded") or binding.get("kind") != "prompt_span"
+                            or ref in seen_sources
+                        ):
+                            continue
+                        excerpt = clauses.get(ref) or binding.get("source_quote")
+                        if not excerpt or excerpt not in trace.prompt:
+                            continue
+                        source = {"source_ref": ref, "source_type": "user_prompt",
+                                  "reliability": "high"}
+                        seen_sources[ref] = source
+                        evidence_items.append({
+                            **source, "evidence_id": f"{tid}:{ref}", "excerpt": excerpt,
+                        })
 
         verification_info: dict[str, Any]
         if run_res.mode == "baseline":

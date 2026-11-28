@@ -267,7 +267,7 @@ async def test_challenger_resolves_specialist_disagreement_about_denominator(tmp
                     v = dict(
                         decision="needs_revision",
                         rationale="Wrong denominator population.",
-                        required_correction="Use the field auditor's 20 recaptures from up_2.",
+                        required_correction="Use the field auditor's recaptured population.",
                     )
                 elif stmt == correct:
                     assert "cohort=20 [up_2" in prompt and "computed=0.25" in prompt
@@ -286,7 +286,7 @@ async def test_challenger_resolves_specialist_disagreement_about_denominator(tmp
                 verdicts.append(dict(claim_id=cid, claim_version=int(ver), **v))
             return {"verdicts": verdicts}
         assert schema is RevisionOutput
-        assert "Use the field auditor's 20 recaptures" in prompt
+        assert "Use the field auditor's recaptured population" in prompt
         cid = re.search(r"Target claim: claim_id=(clm_\w+)", prompt)[1]
         repaired.append(cid)
         return {

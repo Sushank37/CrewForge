@@ -470,7 +470,7 @@ async def test_v23_three_document_procurement_six_claims_per_specialist_and_hone
     material_supported = [
         c for c in trace.claims if c.is_material and c.status == ClaimStatus.SUPPORTED
     ]
-    assert len(material_supported) == 8
+    assert len(material_supported) == 9
 
     assert "$10,000" in result.answer
     assert "$2,000" in result.answer
@@ -1324,8 +1324,8 @@ async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:
     assert result.verification.honesty_gate_passed is True
     assert result.verification.execution_completed is True
     assert result.verification.content_released_safely is True
-    assert result.verification.material_claim_count == 11
-    assert result.verification.supported_claim_count == 11
+    assert result.verification.material_claim_count == 12
+    assert result.verification.supported_claim_count == 12
 
     for expected in (
         "$50,000",

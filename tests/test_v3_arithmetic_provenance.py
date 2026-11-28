@@ -227,7 +227,7 @@ async def test_changed_premise_recovers_two_dependent_calculations_and_releases(
                 "estimate + fee", 97, "USD",
                 binding("estimate", 91, f"{upstream.claim_id}@v2"), binding("fee", 6, "up_3"),
             ),
-            "Candidates: 91 USD.",
+            "Correct the calculated value to 97 USD.",
         ),
         (balance.claim_id, 2): (
             "After the deposit the balance is $77.",
@@ -235,7 +235,7 @@ async def test_changed_premise_recovers_two_dependent_calculations_and_releases(
                 "charge - deposit", 77, "USD",
                 binding("charge", 97, f"{dependent.claim_id}@v3"), binding("deposit", 20, "up_4"),
             ),
-            "Candidates: 97 USD.",
+            "Correct the calculated value to 77 USD.",
         ),
     }
     approvals = {
@@ -325,15 +325,16 @@ async def test_changed_premise_recovers_two_dependent_calculations_and_releases(
             claim_refs=[ClaimVersionRef(claim_id=cid, claim_version=version)],
         ))
 
-    for original, old_value, new_value, operand in [
-        (dependent, "81", "91", "estimate"),
-        (balance, "61", "97", "charge"),
+    for original, new_result, new_value, operand in [
+        (dependent, "97", "91", "estimate"),
+        (balance, "77", "97", "charge"),
     ]:
         old = all_claims[original.claim_id, 2]
         assert old.status == ClaimStatus.REJECTED
         [tid] = old.tool_execution_ids
-        assert tools[tid].computed_result == old_value and not tools[tid].inputs_grounded
-        assert tools[tid].provenance_details[operand]["candidates"] == [f"{new_value} USD"]
+        assert tools[tid].computed_result == new_result and tools[tid].inputs_grounded
+        assert tools[tid].matches_proposed is False
+        assert tools[tid].provenance_details[operand]["value"] == new_value
 
     gate = HonestyGate(db)
     gate_args = dict(

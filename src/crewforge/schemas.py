@@ -681,6 +681,7 @@ class ReviewerBatchOutput(BaseModel):
 
     verdicts: list[ReviewerVerdictItem] = Field(default_factory=list)
     solution_challenge: str | None = Field(default=None, max_length=360)
+    challenge_calculation: ArithmeticRequest | None = None
     missing_requirement_coverage: list[str] = Field(default_factory=list)
 
 

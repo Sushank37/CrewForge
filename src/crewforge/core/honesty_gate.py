@@ -204,9 +204,14 @@ class HonestyGate:
         tool_owners = {tid: c for c in all_claims for tid in c.tool_execution_ids}
         current_calculations = {
             tid: tool_by_id[tid]
-            for claim in supported_claims
+            for claim in latest_claims
+            if claim.status == ClaimStatus.SUPPORTED
+            and claim.verification_status in _APPROVED_VERIFICATION_STATES
+            and (reviews := verdicts_by_key.get((claim.claim_id, claim.version)))
+            and all(v.decision == ReviewDecision.APPROVE
+                    and v.reviewer_id != claim.author_agent_id for v in reviews)
             for tid in claim.tool_execution_ids
-            if claim.category == ClaimCategory.COMPUTATION
+            if tool_owners.get(tid) == claim
             and tid in tool_by_id and make_tool_target(tool_by_id[tid]).is_trusted
             and not arithmetic_lineage_issue(
                 tool_by_id[tid], tool_by_id, latest_by_id, tool_owners,
@@ -264,11 +269,13 @@ class HonestyGate:
         for evd in evidence_list:
             if evd.verified_in_input and evd.source_type in {"user_prompt", "external_retrieved"}:
                 allowed_numbers.update(extract_numbers_from_text(evd.excerpt))
-        for rec in current_calculations.values():
-            assert rec.computed_result is not None
-            allowed_numbers.update(extract_numbers_from_text(rec.computed_result))
+        for tid, rec in current_calculations.items():
+            if tool_owners[tid].category == ClaimCategory.COMPUTATION:
+                allowed_numbers.update(extract_numbers_from_text(rec.computed_result or ""))
         for claim in supported_claims:
-            if _arithmetic_premises_current(claim) and (
+            if claim.category != ClaimCategory.RECOMMENDATION and (
+                _arithmetic_premises_current(claim)
+            ) and (
                 claim.category != ClaimCategory.COMPUTATION or any(
                     tid in current_calculations for tid in claim.tool_execution_ids
                 )
@@ -348,7 +355,34 @@ class HonestyGate:
                 ):
                     return None, f"Recommendation '{cid}' relies on an unverified premise."
                 rec_nums = extract_numbers_from_text(latest.statement)
-                extra_rec_nums = [n for n in rec_nums if n not in allowed_numbers]
+                local_numbers = set()
+                pending = [latest]
+                seen = set()
+                while pending:
+                    source = pending.pop()
+                    if source.claim_id in seen:
+                        continue
+                    seen.add(source.claim_id)
+                    if source is not latest:
+                        local_numbers.update(extract_numbers_from_text(source.statement))
+                    for eid in source.evidence_ids:
+                        evd = evidence_by_id.get(eid)
+                        if evd and evd.verified_in_input and evd.source_type in {
+                            "user_prompt", "external_retrieved",
+                        }:
+                            local_numbers.update(extract_numbers_from_text(evd.excerpt))
+                    for tid in source.tool_execution_ids:
+                        if record := current_calculations.get(tid):
+                            local_numbers.update(extract_numbers_from_text(
+                                record.computed_result or "",
+                            ))
+                            for binding in record.provenance_details.values():
+                                if binding.get("grounded"):
+                                    local_numbers.update(extract_numbers_from_text(
+                                        binding.get("value", ""),
+                                    ))
+                    pending.extend(latest_by_id[p.claim_id] for p in source.premise_refs)
+                extra_rec_nums = sorted(rec_nums - local_numbers)
                 if extra_rec_nums:
                     return (
                         None,
@@ -390,7 +424,9 @@ class HonestyGate:
 
             if require_supported or expected_segment_type == "recommendation":
                 if require_supported and (
-                    not latest.is_material or latest.category == ClaimCategory.ASSUMPTION
+                    not latest.is_material or latest.category in {
+                        ClaimCategory.ASSUMPTION, ClaimCategory.RECOMMENDATION,
+                    }
                 ):
                     return None, f"Non-factual claim '{cid}' cannot be released as accepted fact."
                 if latest.status != ClaimStatus.SUPPORTED:
@@ -964,24 +1000,26 @@ class HonestyGate:
             sections.append("\n".join(lines))
 
         if approved_accepted:
-            seen_norms: set[str] = set()
+            seen_norms = {
+                _canonical_norm(member.statement)
+                for _, members in approved_conditional for member in members
+            }
             clean_points: list[str] = []
-            for seg, members in approved_accepted:
-                texts = [seg.text]
-                if len(members) == 1 and members[0].author_agent_id == "lead":
-                    # A reviewed selection can overlap another checklist item. Render its
-                    # exact constituents once, keeping all coverage and lineage references.
-                    parts = [latest_by_id[p.claim_id].statement for p in members[0].premise_refs]
-                    if parts and seg.text == " ".join(parts):
-                        texts = parts
-                for text in texts:
-                    norm = _canonical_norm(text)
-                    if norm and norm not in seen_norms:
-                        seen_norms.add(norm)
-                        text_out = text.strip()
-                        if not text_out.endswith((".", "!", "?")):
-                            text_out += "."
-                        clean_points.append(text_out)
+            for _, members in approved_accepted:
+                for member in members:
+                    parts = [latest_by_id[p.claim_id].statement for p in member.premise_refs]
+                    texts = parts if (
+                        member.author_agent_id == "lead" and parts
+                        and member.statement == " ".join(parts)
+                    ) else [member.statement]
+                    for text in texts:
+                        norm = _canonical_norm(text)
+                        if norm and norm not in seen_norms:
+                            seen_norms.add(norm)
+                            text_out = text.strip()
+                            if not text_out.endswith((".", "!", "?")):
+                                text_out += "."
+                            clean_points.append(text_out)
             if len(clean_points) == 1:
                 sections.append(clean_points[0])
             else:

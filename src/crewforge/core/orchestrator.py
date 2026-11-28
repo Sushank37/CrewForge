@@ -18,7 +18,7 @@ from crewforge.core.planner import LeadPlanner, PlanValidationError
 from crewforge.core.repair import TargetedRepairEngine
 from crewforge.core.requirements import deliverable_lines, reviewed_deliverables
 from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
-from crewforge.core.reviewer import ReviewerPool
+from crewforge.core.reviewer import ReviewerPool, repair_feedback
 from crewforge.core.scheduler import DAGScheduler
 from crewforge.core.synthesis import LeadSynthesizer
 from crewforge.core.worker import SpecialistWorker
@@ -283,7 +283,7 @@ class NetworkRunner:
         objections = {}
         for v in trace.review_verdicts:
             objections.setdefault((v.claim_id, v.claim_version), []).append(
-                v.required_correction or v.rationale
+                repair_feedback(v)
             )
         target_ids = {d.deliverable_id for d in assigned}
         defects = []
@@ -301,9 +301,12 @@ class NetworkRunner:
                     f"{reason or c.revision_notes or ''}"
                 )
         challenges = [
-            entry["challenge"] for event in trace.events
+            entry["repair_hypothesis"] for event in trace.events
             for entry in event.payload.get("solution_challenges", [])
-            if not entry["open_deliverables"] or target_ids.intersection(entry["open_deliverables"])
+            if entry.get("repair_hypothesis") and (
+                not entry["open_deliverables"]
+                or target_ids.intersection(entry["open_deliverables"])
+            )
         ]
         lead = AgentSpec(agent_id="lead", role="Lead solution coordinator", instructions=(
             "Complete the missing parts of the solution from the team's current findings. "
@@ -354,7 +357,7 @@ class NetworkRunner:
             evidence_proposals=response.parsed.evidence_proposals,
             claim_proposals=proposals, recovery_tasks=tasks_by_item,
         )
-        selections = await self._ledger.record_solution_selections(
+        selections, rejected_selections = await self._ledger.record_solution_selections(
             run_id, response.parsed.selections, tasks_by_item,
             {d.deliverable_id for d in plan.deliverables if d.kind == "conditional"},
         )
@@ -365,6 +368,7 @@ class NetworkRunner:
             payload={
                 "proposed_selections": len(response.parsed.selections),
                 "persisted_selections": len(selections), "proposed_claims": len(proposals),
+                "rejected_selections": rejected_selections,
                 "candidate_claims": [c.claim_id for c in recovered],
                 "response_fields": sorted(response.parsed.model_fields_set),
                 "previously_covered": list(covered), "target_deliverables": list(tasks_by_item),

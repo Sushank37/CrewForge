@@ -372,7 +372,10 @@ class ClaimLedger:
 
             # Workers can NEVER promote their own claims to SUPPORTED.
             status = ClaimStatus.UNRESOLVED if prop_claim.is_unresolved else ClaimStatus.ASSERTED
-            is_material = prop_claim.category not in _NON_MATERIAL_CATEGORIES
+            is_material = prop_claim.category not in _NON_MATERIAL_CATEGORIES or (
+                prop_claim.category == ClaimCategory.RECOMMENDATION
+                and bool(prop_claim.requirement_refs)
+            )
 
             claim = Claim(
                 run_id=run_id,
@@ -437,7 +440,7 @@ class ClaimLedger:
     async def record_solution_selections(
         self, run_id: str, selections: list[SolutionSelection], tasks: dict[str, str],
         conditional_ids: set[str],
-    ) -> list[Claim]:
+    ) -> tuple[list[Claim], list[dict]]:
         """Assemble verbatim candidates from current factual members for a new review."""
         current = {
             f"{c.claim_id}@v{c.version}": c
@@ -445,14 +448,23 @@ class ClaimLedger:
             if c.is_material and c.status == ClaimStatus.SUPPORTED
         }
         candidates = []
-        for item in selections:
+        rejected = []
+        for position, item in enumerate(selections, 1):
             refs = list(dict.fromkeys(item.claim_refs))
-            if item.deliverable_id not in tasks or any(ref not in current for ref in refs):
-                continue
-            members = [current[ref] for ref in refs]
-            if item.deliverable_id not in conditional_ids and any(
-                c.assumptions or conditional_ids.intersection(c.requirement_refs) for c in members
-            ):
+            missing = [ref for ref in refs if ref not in current]
+            members = [current[ref] for ref in refs if ref in current]
+            reason = None
+            if item.deliverable_id not in tasks:
+                reason = "deliverable_not_assigned_for_recovery"
+            elif missing:
+                reason = "missing_stale_or_unsupported_member"
+            elif item.deliverable_id not in conditional_ids and any(c.assumptions for c in members):
+                reason = "explicit_assumptions_require_conditional_deliverable"
+            if reason:
+                rejected.append({
+                    "position": position, "deliverable_id": item.deliverable_id,
+                    "reason": reason, "claim_refs": refs, "unavailable_refs": missing,
+                })
                 continue
             candidate = Claim(
                 assumptions=list(dict.fromkeys(a for c in members for a in c.assumptions)),
@@ -465,7 +477,7 @@ class ClaimLedger:
             )
             await self._db.insert_claim(candidate)
             candidates.append(candidate)
-        return candidates
+        return candidates, rejected
 
     async def apply_targeted_revision(
         self,
@@ -581,7 +593,9 @@ class ClaimLedger:
         )
         next_category = category or prior_claim.category
         status = ClaimStatus.UNRESOLVED if is_unresolved else ClaimStatus.ASSERTED
-        is_material = next_category not in _NON_MATERIAL_CATEGORIES
+        is_material = next_category not in _NON_MATERIAL_CATEGORIES or (
+            next_category == ClaimCategory.RECOMMENDATION and bool(prior_claim.requirement_refs)
+        )
 
         # A revised claim NEVER inherits approval from its previous version.
         revised = Claim(

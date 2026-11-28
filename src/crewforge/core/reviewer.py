@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from graphlib import TopologicalSorter
 
@@ -25,9 +26,11 @@ from crewforge.schemas import (
 )
 from crewforge.storage.database import Database
 from crewforge.tools.arithmetic import (
+    DeterministicArithmeticTool,
     arithmetic_lineage_issue,
     build_provenance_catalog,
     extract_numbers_from_text,
+    make_tool_target,
     provenance_failures,
     recompute_bound_record,
 )
@@ -36,6 +39,25 @@ REVIEWER_EVIDENCE_ID = "reviewer_evidence"
 REVIEWER_NUMBERS_ID = "reviewer_numbers"
 REVIEWER_CONSISTENCY_ID = "reviewer_consistency"
 REVIEWER_COMBINED_ID = "reviewer_combined"
+
+
+def numerical_challenge(text: str) -> bool:
+    """Flag quantities and directional comparison assertions in reviewer prose."""
+    prose = re.sub(r"\b(?:clm|tlx|up|deliv|req|doc)_\w+(?:@v\d+)?\b", "", text)
+    return bool(extract_numbers_from_text(prose) or re.search(
+        r"\b(?:cheaper|costlier|cheapest|more expensive|within the (?:ceiling|budget)"
+        r"|less than|greater than|exceeds|higher than|lower than)\b", prose, re.I,
+    ))
+
+
+def repair_feedback(verdict: ReviewVerdict) -> str:
+    if verdict.review_dimension not in {"numbers"} and numerical_challenge(
+        f"{verdict.rationale} {verdict.required_correction or ''}"
+    ):
+        return "Independently check the disputed calculation against primary and pinned sources."
+    return verdict.rationale + (
+        f" Correction: {verdict.required_correction}" if verdict.required_correction else ""
+    )
 
 
 @dataclass
@@ -69,7 +91,10 @@ def _build_review_system_prompt(dimension: str) -> str:
         "- Challenge the solution with an alternative interpretation or counterexample where it "
         "could change the answer. Check scenario scope, completeness and optimality as applicable. "
         "Give the smallest concrete correction. Use solution_challenge for an omission, "
-        "conflict or alternative the lead must reconcile across the team, otherwise null.\n"
+        "conflict or alternative the lead must reconcile across the team, otherwise null. "
+        "Supply challenge_calculation with named, grounded operands and a proposed result for "
+        "a numerical counterclaim or signed comparison. The lead receives the checked expression, "
+        "while your direction, scope and formula remain hypotheses for independent review.\n"
         "- For inferences, verify the premises. Treat proposed plan or worker assumptions as "
         "conditional and require primary evidence for empirical values.\n"
         "- For each approved claim, list the exact deliv_N IDs it independently fulfills in "
@@ -673,11 +698,52 @@ class ReviewerPool:
                 )
                 outcome.reviewer_calls += 1
                 completed_dims.add(dimension)
-                if res.parsed.solution_challenge:
-                    challenges.append({
-                        "reviewer": reviewer_id, "challenge": res.parsed.solution_challenge,
+                if challenge := res.parsed.solution_challenge:
+                    entry = {
+                        "reviewer": reviewer_id, "challenge": challenge,
                         "open_deliverables": res.parsed.missing_requirement_coverage,
-                    })
+                        "repair_hypothesis": None,
+                    }
+                    if not numerical_challenge(challenge):
+                        entry["repair_hypothesis"] = challenge
+                    elif request := res.parsed.challenge_calculation:
+                        catalog = build_provenance_catalog(
+                            original_prompt=original_prompt, verified_evidence=trace.evidence,
+                            tool_records=trace.tool_executions, all_claims=trace.claims,
+                            run_id=run_id,
+                        )
+                        checked = DeterministicArithmeticTool.evaluate(
+                            run_id=run_id, actor=reviewer_id, request=request, catalog=catalog,
+                        )
+                        referenced_tools = {
+                            d["source_tool_execution_id"]
+                            for d in checked.provenance_details.values()
+                            if d.get("source_tool_execution_id")
+                        }
+                        reviewed = all(
+                            tid in tool_owners
+                            and latest_by_id.get(tool_owners[tid].claim_id) == tool_owners[tid]
+                            and tool_owners[tid].status == ClaimStatus.SUPPORTED
+                            and not arithmetic_lineage_issue(
+                                tool_by_id[tid], tool_by_id, latest_by_id, tool_owners,
+                                require_reviewed_sources=True,
+                            )
+                            for tid in referenced_tools
+                        )
+                        entry["calculation"] = checked.model_dump(mode="json")
+                        if (
+                            reviewed and make_tool_target(checked).is_trusted
+                            and checked.matches_proposed
+                        ):
+                            operands = ", ".join(
+                                f"{name}={value} [{checked.input_provenance_refs[name]}]"
+                                for name, value in checked.variables.items()
+                            )
+                            entry["repair_hypothesis"] = (
+                                f"Check applicability of `{checked.expression}` with {operands}. "
+                                f"It evaluates to {checked.computed_result} {checked.units}."
+                            )
+                    challenges.append(entry)
             except Exception as exc:
                 await self._db.append_event(
                     ExecutionEvent(

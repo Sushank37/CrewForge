@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import time
 from dataclasses import dataclass, field
 from graphlib import TopologicalSorter
@@ -11,7 +12,7 @@ from crewforge.core.claim_graph import ClaimDependencyGraph
 from crewforge.core.executor import ModelExecutor
 from crewforge.core.ledger import ClaimLedger, ClaimRevisionError
 from crewforge.core.messaging import MessageBus
-from crewforge.core.reviewer import ReviewerPool
+from crewforge.core.reviewer import ReviewerPool, repair_feedback
 from crewforge.prompts.worker import build_worker_system_prompt
 from crewforge.schemas import (
     AgentSpec,
@@ -65,8 +66,7 @@ def _build_revision_prompt(
     for claim in disputed_claims:
         verdicts = verdicts_by_claim_key.get((claim.claim_id, claim.version), [])
         obj_lines = [
-            f"  - [{v.reviewer_id}/{v.review_dimension}] {v.decision.value}: {v.rationale}"
-            + (f" | Required: {v.required_correction}" if v.required_correction else "")
+            f"  - [{v.reviewer_id}/{v.review_dimension}] {v.decision.value}: {repair_feedback(v)}"
             for v in verdicts
         ]
         evd_lines = [
@@ -142,6 +142,7 @@ def _rebind_calculation(
     tools: dict[str, ToolExecutionRecord],
     owners: dict[str, Claim],
     latest: dict[str, Claim],
+    *, refresh_named_operands: bool = False,
 ) -> ArithmeticRequest | None:
     if len(claim.tool_execution_ids) != 1:
         return None
@@ -157,6 +158,10 @@ def _rebind_calculation(
     if any(ref not in bound_refs and ref not in claim.depends_on_claim_ids for ref in invalid):
         return None  # An unresolvable declared premise needs an explicit specialist correction.
 
+    named = {
+        node.id for node in ast.walk(ast.parse(record.expression, mode="eval"))
+        if isinstance(node, ast.Name)
+    } if refresh_named_operands and record.success else set()
     rebound = False
     bindings = []
     for name, value in record.variables.items():
@@ -183,6 +188,17 @@ def _rebind_calculation(
             source = tools.get(premise.tool_execution_ids[0])
             if source and units and source.units.casefold().startswith(units.casefold() + "/"):
                 units = source.units
+            # Only substitute a value on the same dependency edge with the same typed unit.
+            # The old proposed result remains an assertion to check, even if its sign changes.
+            old_source = tools.get(detail.get("source_tool_execution_id") or resolved_id)
+            if (
+                name in named and owner and premise.claim_id == owner.claim_id
+                and old_source and source and make_tool_target(source).is_trusted
+                and source.units and source.units.casefold() == old_source.units.casefold()
+                and detail.get("units", "") in {"", source.units.casefold()}
+                and source.computed_result is not None
+            ):
+                value = source.computed_result
         if premise_id and not units:
             units = detail.get("source_units", "")
             if units == "%" and detail.get("value") != detail.get("source_value"):
@@ -193,8 +209,7 @@ def _rebind_calculation(
 
     if not rebound:
         return None
-    # Reuse existing operand values and the proposed result as checks. A changed
-    # premise must fail grounding and return to targeted repair with its new value.
+    # Keep the old proposed result to detect changes that require new prose and review.
     return ArithmeticRequest(
         expression=record.expression,
         variable_bindings=bindings,
@@ -426,9 +441,7 @@ class TargetedRepairEngine:
                     ] or c_verdicts
                     sender_id = blocking_v[0].reviewer_id if blocking_v else "reviewer_combined"
                     msg_content = "; ".join(
-                        f"{v.rationale}"
-                        + (f" Correction: {v.required_correction}" if v.required_correction else "")
-                        for v in blocking_v
+                        repair_feedback(v) for v in blocking_v
                     )
                     sent_msg = await self._bus.send_message(
                         run_id=run_id,
@@ -689,7 +702,9 @@ class TargetedRepairEngine:
                     author_agent_id=claim.author_agent_id,
                     original_prompt=original_prompt,
                     premise_claim_ids=up_ids,
-                    computation_request=_rebind_calculation(claim, tools, owners, latest_by_id),
+                    computation_request=_rebind_calculation(
+                        claim, tools, owners, latest_by_id, refresh_named_operands=True,
+                    ),
                     plan_assumptions=plan.assumptions,
                     revision_notes="Revalidate dependent claim using current premise versions.",
                 )
