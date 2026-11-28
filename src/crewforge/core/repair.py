@@ -405,6 +405,7 @@ class TargetedRepairEngine:
                         operation="revision",
                         prompt=revision_prompt,
                         response_model=RevisionOutput,
+                        reserve_calls_after=2,
                         system_prompt=build_worker_system_prompt(agent),
                         run_deadline_monotonic=run_deadline_monotonic,
                     )

@@ -185,10 +185,9 @@ async def test_correct_arithmetic_with_invalid_provenance_is_rejected(
 
 async def test_changed_premise_recovers_two_dependent_calculations_and_releases(run_db):
     db, settings = run_db
-    settings = settings.model_copy(update={
-        "max_revision_rounds": 2, "max_model_calls_per_run": 16,
-        "separate_review_dimensions": False, "max_retries": 0,
-    })
+    # Exercise the production call ceiling and one permitted revision per claim.
+    assert settings.max_revision_rounds == 1
+    assert settings.max_model_calls_per_run == 16
     ledger = ClaimLedger(db)
     prompt = (
         "The initial estimate is $75. The corrected amount is $91. The fee is $6. "
@@ -634,3 +633,56 @@ async def test_invalid_declared_premise_cannot_seed_a_same_response_intermediate
     assert all(not record.inputs_grounded for record in records)
     assert records[0].provenance_details["__claim_premises__"]["values"] == ["clm_unknown"]
     assert records[1].provenance_details["weight"]["code"] == "unknown_reference"
+
+
+async def test_elapsed_days_requires_two_grounded_calendar_dates(run_db):
+    db, _ = run_db
+    tool = DeterministicArithmeticTool(db)
+    request = computation(
+        "days_between(start, end)", 4, "days",
+        binding("start", 20280227, quote="2028-02-27", units="date"),
+        binding("end", 20280302, "up_2", quote="2028-03-02", units="date"),
+    )
+    record = await tool.execute(
+        run_id="offline", actor="lead", request=request,
+        grounded_texts=["Access starts on 2028-02-27. Access ends on 2028-03-02."],
+    )
+    assert record.success and record.matches_proposed and record.inputs_grounded
+    assert record.provenance_details["start"]["source_token"] == "2028-02-27"
+    fabricated = await tool.execute(
+        run_id="offline", actor="lead",
+        request=computation(
+            "days_between(start, end)", 4, "days",
+            binding("start", 20280227, units="date"),
+            binding("end", 20280302, "up_2", units="date"),
+        ),
+        grounded_texts=["The batch code is 20280227. Access ends on 2028-03-02."],
+    )
+    assert fabricated.success and fabricated.matches_proposed
+    assert not fabricated.inputs_grounded and fabricated.formula_appropriate is False
+
+
+async def test_fair_coins_do_not_imply_independent_tosses(run_db):
+    db, _ = run_db
+    tool = DeterministicArithmeticTool(db)
+    request = computation(
+        "binomial_pmf(n, k, p)", "0.375", "probability",
+        binding("n", 4), binding("k", 2, "up_2"),
+        binding("p", "0.5", "const:fair_coin_probability"),
+    )
+    result = await tool.execute(
+        run_id="offline", actor="lead", request=request,
+        grounded_texts=["There are 4 fair coin tosses. Find the chance of 2 heads."],
+    )
+    assert result.success and result.matches_proposed and result.formula_appropriate is False
+    assert "independence" in result.provenance_details["__formula__"]["note"]
+    independent = await tool.execute(
+        run_id="offline", actor="lead",
+        request=computation(
+            "binomial_pmf(n, k, p)", "0.375", "probability",
+            binding("n", 4), binding("k", 2, "up_2"),
+            binding("p", "0.5", "const:fair_coin_probability"),
+        ),
+        grounded_texts=["There are 4 fair independent coin tosses. Find the chance of 2 heads."],
+    )
+    assert independent.inputs_grounded and independent.matches_proposed

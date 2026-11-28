@@ -7,6 +7,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
 
@@ -55,6 +56,14 @@ _FIXED_CONSTANTS = {
 _FAIR_COIN = re.compile(
     r"(?<!not )\bfair (?:(?:and )?independent )?coins?\b|\bcoins? (?:is|are) fair\b", re.I,
 )
+_ISO_DATE = re.compile(r"(?<![\w-])([0-9]{4})-([0-9]{2})-([0-9]{2})(?![\w-])")
+_COIN_INDEPENDENCE = re.compile(
+    r"(?<!not )\bindependent (?:fair )?coins?\b|"
+    r"\bcoin (?:tosses|flips) (?:are )?(?:fair and )?independent\b",
+    re.I,
+)
+_BINOMIAL_FUNCTIONS = {"binomial_pmf", "binomial_cdf", "binomial_sf"}
+
 _TIME_CONVERSIONS = {
     "months_per_year": ("years", "months"),
     "hours_per_day": ("days", "hours"),
@@ -72,6 +81,7 @@ _ROLE_WORDS = _EMPIRICAL_ROLES | {
 
 
 _EXACT_UNIT_NORMALIZATIONS = {
+    "date": "date",
     "ms": "ms",
     "millisecond": "ms",
     "milliseconds": "ms",
@@ -699,7 +709,20 @@ def _units_conflict(declared: str, found: str, *, scaled: bool = False) -> bool:
 def _extract_numeric_occurrences(text: str) -> list[_NumericOccurrence]:
     """Extract source quantities with exact offsets and local operand metadata."""
     raw_spans: list[tuple[Decimal, Decimal | None, int, int, str, str]] = []
+    for match in _ISO_DATE.finditer(text):
+        year, month, day = map(int, match.groups())
+        try:
+            date(year, month, day)
+        except ValueError:
+            continue
+        raw_spans.append((
+            Decimal(year * 10000 + month * 100 + day), None, match.start(), match.end(),
+            match[0], "date",
+        ))
+    date_spans = [(start, end) for _, _, start, end, _, _ in raw_spans]
     for match in _SOURCE_NUMBER_RE.finditer(text):
+        if any(start <= match.start() < end for start, end in date_spans):
+            continue
         token = match.group(0)
         cleaned = token.replace(",", "").replace("−", "-").strip()
         suffix = cleaned[-1].lower()
@@ -900,7 +923,7 @@ def _valid_constant_usage(
             return (
                 isinstance(parent, ast.Call)
                 and isinstance(parent.func, ast.Name)
-                and parent.func.id in {"binomial_pmf", "binomial_cdf", "binomial_sf"}
+                and parent.func.id in _BINOMIAL_FUNCTIONS
                 and len(parent.args) == 3 and node is parent.args[2]
                 and all(_node_has_input(arg, details) for arg in parent.args[:2])
             )
@@ -945,6 +968,45 @@ def _valid_constant_usage(
         ) or (divide and result in {"", "ratio"} and other_units == "%")
 
     return bool(uses) and all(valid(node) for node in uses)
+
+
+def _formula_source_issue(
+    tree: ast.AST, details: dict[str, dict[str, Any]], catalog: ProvenanceCatalog,
+) -> str | None:
+    day_operands = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id == "days_between":
+            if len(node.args) != 2 or any(
+                not isinstance(arg, ast.Name)
+                or details.get(arg.id, {}).get("source_units") != "date"
+                or details[arg.id].get("units") != "date"
+                for arg in node.args
+            ):
+                return "days_between requires two named operands grounded in cited ISO dates."
+            day_operands.update(node.args)
+        if node.func.id in _BINOMIAL_FUNCTIONS:
+            coin_contexts = [catalog.original_prompt] if _FAIR_COIN.search(
+                catalog.original_prompt
+            ) else []
+            coin_contexts.extend(
+                target.text for entry in details.values()
+                if (target := catalog.targets_by_key.get(str(entry.get("ref"))))
+                and target.kind == "verified_evidence" and _FAIR_COIN.search(target.text)
+            )
+            if coin_contexts and not any(_COIN_INDEPENDENCE.search(text) for text in coin_contexts):
+                return (
+                    "A binomial coin model needs independence as well as fairness. "
+                    "Supply an independent-toss premise or qualify the unknown result."
+                )
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name) and details.get(node.id, {}).get("source_units") == "date"
+            and node not in day_operands
+        ):
+            return "Use ISO date operands inside days_between rather than as ordinary numbers."
+    return None
 
 
 def _ungrounded_literals(
@@ -1146,6 +1208,7 @@ def _eval_ast_node(
             "perm",
             "P",
             "factorial",
+            "days_between",
             "binomial_pmf",
             "binomial_cdf",
             "binomial_sf",
@@ -1222,6 +1285,16 @@ def _eval_ast_node(
                 if len(args) != 1:
                     raise MalformedExpressionError("abs() takes exactly 1 argument.")
                 return abs(args[0])
+            if fn_name == "days_between":
+                if len(args) != 2:
+                    raise MalformedExpressionError("days_between(start, end) takes two ISO dates.")
+                dates = []
+                for arg in args:
+                    packed = _to_bounded_int(arg, name="ISO date", min_val=10101, max_val=99991231)
+                    year, month_day = divmod(packed, 10000)
+                    month, day = divmod(month_day, 100)
+                    dates.append(date(year, month, day))
+                return Decimal((dates[1] - dates[0]).days)
             if fn_name == "round":
                 if len(args) not in {1, 2}:
                     raise MalformedExpressionError("round() takes 1 or 2 arguments.")
@@ -1256,7 +1329,7 @@ def _eval_ast_node(
                 if abs(res) > _MAX_MAGNITUDE:
                     raise UnsafeExpressionError("Computed value exceeds safe numerical bounds.")
                 return res
-            if fn_name in {"binomial_pmf", "binomial_cdf", "binomial_sf"}:
+            if fn_name in _BINOMIAL_FUNCTIONS:
                 if len(args) != 3:
                     raise MalformedExpressionError(
                         f"{fn_name}() takes exactly 3 arguments (n, k, p)."
@@ -1646,6 +1719,13 @@ class DeterministicArithmeticTool:
                     if b.source_quote is not None
                 },
             )
+            formula_issue = _formula_source_issue(tree, prov_details, runtime_catalog)
+            if formula_issue:
+                inputs_grounded = False
+                prov_details["__formula__"] = {
+                    "kind": "formula", "grounded": False,
+                    "code": "formula_source_mismatch", "note": formula_issue,
+                }
             ungrounded_literals = _ungrounded_literals(tree, request.units, prov_details)
             has_ungrounded_literals = bool(ungrounded_literals)
             if has_ungrounded_literals:
@@ -1681,6 +1761,7 @@ class DeterministicArithmeticTool:
                 computed_result=computed_str,
                 units=request.units.strip(),
                 assumptions=list(request.assumptions),
+                formula_appropriate=False if formula_issue else None,
                 matches_proposed=matches_proposed,
                 inputs_grounded=inputs_grounded,
                 has_ungrounded_literals=has_ungrounded_literals,

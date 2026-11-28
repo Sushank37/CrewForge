@@ -42,7 +42,7 @@ def build_partial_synthesis_output(
     recommendations: list[ReleaseSegment] = []
     unresolved: list[str] = [f"Partial execution notice: {reason}"]
 
-    for claim in claims:
+    for claim in ([] if plan.deliverables else claims):
         ref = ClaimVersionRef(claim_id=claim.claim_id, claim_version=claim.version)
         if claim.status == ClaimStatus.SUPPORTED and claim.is_material:
             accepted.append(
@@ -53,7 +53,10 @@ def build_partial_synthesis_output(
                     is_factual_assertion=True,
                 )
             )
-        elif claim.category == ClaimCategory.RECOMMENDATION:
+        elif (
+            claim.category == ClaimCategory.RECOMMENDATION
+            and claim.status == ClaimStatus.SUPPORTED
+        ):
             recommendations.append(
                 ReleaseSegment(
                     segment_type="recommendation",
@@ -90,6 +93,8 @@ def build_deterministic_fast_path_output(
 
     Returns None when model synthesis is needed (e.g., no supported claims or uncovered reqs).
     """
+    if plan.deliverables:
+        return None
     supported = [c for c in claims if c.is_material and c.status == ClaimStatus.SUPPORTED]
     if not supported:
         return None
@@ -118,7 +123,7 @@ def build_deterministic_fast_path_output(
             is_factual_assertion=False,
         )
         for c in claims
-        if c.category == ClaimCategory.RECOMMENDATION and c.status != ClaimStatus.REJECTED
+        if c.category == ClaimCategory.RECOMMENDATION and c.status == ClaimStatus.SUPPORTED
     ]
     for rec in recommendations:
         if rec.requirement_ref:
@@ -282,15 +287,15 @@ class LeadSynthesizer:
             )
         )
 
-        # Preserve all supported material claims deterministically even if model synthesis
-        # omitted them or focused on unresolved/rejected supplementary claims.
+        # Preserve legacy claim-linked runs. New plans recover only reviewed deliverables
+        # inside the Gate, after the original synthesis segments have been validated.
         parsed_synthesis = res.parsed
         existing_accepted_ids = {
             ref.claim_id for seg in parsed_synthesis.accepted_segments for ref in seg.claim_refs
         }
         extra_supported_segments: list[ReleaseSegment] = []
         extra_ref_ids: list[str] = []
-        for claim in latest_claims:
+        for claim in ([] if plan.deliverables else latest_claims):
             if (
                 claim.is_material
                 and claim.status == ClaimStatus.SUPPORTED

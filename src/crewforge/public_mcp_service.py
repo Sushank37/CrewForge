@@ -709,6 +709,7 @@ class PublicJobManager:
                 "release_mode": gate.release_mode if gate else "unknown",
                 "execution_completed": v_sum.execution_completed if v_sum else False,
                 "content_released_safely": v_sum.content_released_safely if v_sum else False,
+                "answer_complete": v_sum.answer_complete if v_sum else None,
                 "material_claim_count": v_sum.material_claim_count if v_sum else 0,
                 "supported_claim_count": v_sum.supported_claim_count if v_sum else 0,
                 "unresolved_claim_count": v_sum.unresolved_claim_count if v_sum else 0,

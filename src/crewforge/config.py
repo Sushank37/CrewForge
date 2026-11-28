@@ -276,7 +276,7 @@ class CrewForgeSettings(BaseSettings):
         override: int | None = None
         if operation in {"planner", "plan_repair"}:
             override = self.planner_max_output_tokens
-        elif operation in {"worker", "worker_followup"}:
+        elif operation in {"worker", "worker_followup", "requirement_recovery"}:
             override = self.worker_max_output_tokens
         elif operation in {"review", "review_evidence", "review_consistency"}:
             override = self.review_max_output_tokens

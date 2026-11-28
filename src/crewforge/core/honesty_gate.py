@@ -6,10 +6,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from crewforge.core.requirements import reviewed_deliverables
 from crewforge.schemas import (
     Claim,
     ClaimCategory,
     ClaimStatus,
+    ClaimVersionRef,
     Evidence,
     ExecutionEvent,
     ExecutionPlan,
@@ -219,6 +221,14 @@ class HonestyGate:
             ):
                 allowed_numbers.update(extract_numbers_from_text(claim.statement))
 
+        covered_by_review = reviewed_deliverables(plan, all_claims, verdicts)
+        qualified_claims = {
+            (claim.claim_id, claim.version)
+            for item in plan.deliverables
+            for claim in covered_by_review.get(item.deliverable_id, [])
+            if item.kind == "conditional" or claim.category == ClaimCategory.UNCERTAINTY
+        }
+
         def _validate_claim_ref(
             cid: str,
             cver: int,
@@ -270,32 +280,34 @@ class HonestyGate:
                     )
 
             if expected_segment_type == "recommendation":
-                if (
-                    latest.category != ClaimCategory.RECOMMENDATION
-                    and latest.status != ClaimStatus.SUPPORTED
+                if latest.category != ClaimCategory.RECOMMENDATION:
+                    return None, f"Unsupported factual claim '{cid}' cannot be a recommendation."
+                if latest.status != ClaimStatus.SUPPORTED or not latest.premise_refs:
+                    return None, f"Recommendation '{cid}' lacks review or verified premises."
+                if any(
+                    not latest_by_id[pref.claim_id].is_material
+                    or latest_by_id[pref.claim_id].status != ClaimStatus.SUPPORTED
+                    for pref in latest.premise_refs
                 ):
+                    return None, f"Recommendation '{cid}' relies on an unverified premise."
+                rec_nums = extract_numbers_from_text(latest.statement)
+                extra_rec_nums = [n for n in rec_nums if n not in allowed_numbers]
+                if extra_rec_nums:
                     return (
                         None,
-                        f"Unsupported factual claim '{cid}' cannot be released "
-                        "under recommendations.",
+                        f"Recommendation '{cid}' contains unverified numbers: "
+                        f"{extra_rec_nums[:2]}.",
                     )
-                if latest.category == ClaimCategory.RECOMMENDATION:
-                    rec_nums = extract_numbers_from_text(latest.statement)
-                    extra_rec_nums = [n for n in rec_nums if n not in allowed_numbers]
-                    if extra_rec_nums:
-                        return (
-                            None,
-                            f"Recommendation '{cid}' contains unverified "
-                            f"number(s): {extra_rec_nums[:2]}.",
-                        )
-                    c_verdicts = verdicts_by_key.get((cid, cver), [])
-                    if any(
-                        v.decision in {ReviewDecision.REJECT, ReviewDecision.NEEDS_REVISION}
-                        for v in c_verdicts
-                    ):
-                        return None, f"Recommendation '{cid}' v{cver} was rejected in review."
 
             if expected_segment_type == "conditional_conclusion":
+                if plan.deliverables and (cid, cver) not in qualified_claims:
+                    return None, f"Conditional claim '{cid}' lacks reviewed qualification."
+                if (
+                    latest.category == ClaimCategory.COMPUTATION
+                    and latest.status == ClaimStatus.SUPPORTED
+                    and not any(tid in current_calculations for tid in latest.tool_execution_ids)
+                ):
+                    return None, f"Conditional calculation '{cid}' lacks current provenance."
                 factual_cats = {
                     ClaimCategory.GIVEN_FACT,
                     ClaimCategory.COMPUTATION,
@@ -320,8 +332,10 @@ class HonestyGate:
                         f"number(s): {extra_cond_nums[:2]}.",
                     )
 
-            if require_supported:
-                if not latest.is_material or latest.category == ClaimCategory.ASSUMPTION:
+            if require_supported or expected_segment_type == "recommendation":
+                if require_supported and (
+                    not latest.is_material or latest.category == ClaimCategory.ASSUMPTION
+                ):
                     return None, f"Non-factual claim '{cid}' cannot be released as accepted fact."
                 if latest.status != ClaimStatus.SUPPORTED:
                     return (
@@ -367,8 +381,19 @@ class HonestyGate:
                     return None, f"External factual claim '{cid}' lacks retrieved evidence."
             return latest, None
 
-        # 1. Claim-locked accepted factual segments.
+        # Scenario claims keep their qualification even if synthesis puts them among facts.
+        factual_segments = []
+        conditional_segments = list(synthesis.conditional_conclusions)
         for seg in synthesis.accepted_segments:
+            if seg.claim_refs and all(
+                (ref.claim_id, ref.claim_version) in qualified_claims for ref in seg.claim_refs
+            ):
+                conditional_segments.append(seg)
+            else:
+                factual_segments.append(seg)
+
+        # 1. Claim-locked accepted factual segments.
+        for seg in factual_segments:
             if not seg.claim_refs:
                 reason = "Accepted factual segment rejected: missing claim version reference."
                 rejected_segments.append({"text": seg.text, "reason": reason})
@@ -414,7 +439,7 @@ class HonestyGate:
                         used_claim_ids.append(c.claim_id)
 
         # 2. Claim-locked conditional conclusions (block missing refs, rewrites, rejected, stale).
-        for seg in synthesis.conditional_conclusions:
+        for seg in conditional_segments:
             if not seg.claim_refs:
                 reason = (
                     "Conditional segment rejected: requires a verified or qualified ledger ref."
@@ -506,6 +531,34 @@ class HonestyGate:
                 for c in valid_claims:
                     if c.claim_id not in used_claim_ids:
                         used_claim_ids.append(c.claim_id)
+
+        # Fill only unrepresented, independently endorsed deliverables. Every recovered
+        # segment must pass the same claim reference, premise and numeric checks.
+        for item in plan.deliverables:
+            candidates = covered_by_review.get(item.deliverable_id, [])
+            if any(claim.claim_id in used_claim_ids for claim in candidates):
+                continue
+            for claim in candidates:
+                if claim.category == ClaimCategory.RECOMMENDATION:
+                    lane, destination = "recommendation", approved_recommendations
+                elif (claim.claim_id, claim.version) in qualified_claims:
+                    lane, destination = "conditional_conclusion", approved_conditional
+                else:
+                    lane, destination = "accepted_claim", approved_accepted
+                _, err = _validate_claim_ref(
+                    claim.claim_id, claim.version, require_supported=lane == "accepted_claim",
+                    expected_segment_type=None if lane == "accepted_claim" else lane,
+                )
+                if err is not None:
+                    continue
+                destination.append((ReleaseSegment(
+                    segment_type=lane, text=claim.statement, requirement_ref=item.requirement_ref,
+                    claim_refs=[ClaimVersionRef(
+                        claim_id=claim.claim_id, claim_version=claim.version,
+                    )],
+                ), [claim]))
+                used_claim_ids.append(claim.claim_id)
+                break
 
         # 4. Block new Lead factual assertions & strip laundering from auxiliary synthesis fields.
         unresolved_items: list[str] = []
@@ -625,6 +678,64 @@ class HonestyGate:
 
         for idx, req_text in enumerate(reqs, start=1):
             req_id = f"req_{idx}"
+            items = [d for d in plan.deliverables if d.requirement_ref == req_id]
+            if items:
+                fulfilled = {
+                    d.deliverable_id: [
+                        c for c in covered_by_review.get(d.deliverable_id, [])
+                        if c.claim_id in used_claim_ids
+                    ]
+                    for d in items
+                }
+                outstanding = [d for d in items if not fulfilled[d.deliverable_id]]
+                linked = [
+                    c for c in latest_claims
+                    if any(d.deliverable_id in c.requirement_refs for d in items)
+                ]
+                released = {
+                    c.claim_id: c for cs in fulfilled.values() for c in cs
+                }
+                if not outstanding:
+                    status = "answered"
+                    answered_count += 1
+                    qualification = [
+                        d.text for d in items
+                        if all(
+                            c.category == ClaimCategory.UNCERTAINTY
+                            for c in fulfilled[d.deliverable_id]
+                        )
+                    ]
+                    rationale = (
+                        "Reviewed evidence limits apply to " + ", ".join(qualification)
+                        if qualification
+                        else "All deliverables have independently reviewed answers."
+                    )
+                elif released:
+                    status = "partially_answered"
+                    partial_count += 1
+                    rationale = "Outstanding deliverables include " + ", ".join(
+                        d.text for d in outstanding
+                    )
+                elif linked:
+                    status = "unresolved"
+                    unresolved_req_count += 1
+                    rationale = "No reviewed answer was released for " + ", ".join(
+                        d.text for d in outstanding
+                    )
+                else:
+                    status = "missing"
+                    missing_req_count += 1
+                    rationale = "No claim addresses " + ", ".join(d.text for d in outstanding)
+                req_score += (len(items) - len(outstanding)) / len(items)
+                req_items.append(RequirementCoverageItem(
+                    requirement_id=req_id, text=req_text, status=status, rationale=rationale,
+                    linked_claim_refs=[
+                        ClaimVersionRef(claim_id=c.claim_id, claim_version=c.version)
+                        for c in (list(released.values()) or linked)
+                    ],
+                ))
+                continue
+
             acc_claims = list(
                 {
                     c.claim_id: c
@@ -718,6 +829,16 @@ class HonestyGate:
 
         requirement_coverage: float | None = round(req_score / len(reqs), 4) if reqs else None
 
+        answer_complete = (
+            all(item.status == "answered" for item in req_items) if plan.deliverables else None
+        )
+        if plan.deliverables:
+            for item in req_items:
+                if item.status != "answered":
+                    missing_notice = f"{item.requirement_id} ({item.status}): {item.rationale}"
+                    clean_missing.append(missing_notice)
+                    dedup_unresolved.append(missing_notice)
+
         if is_partial_run or incomplete_tasks:
             for item in req_items:
                 if item.status == "missing":
@@ -767,6 +888,34 @@ class HonestyGate:
                 lines.append(f"- {seg.text} [advisory; {refs}]")
             sections.append("\n".join(lines))
 
+        if plan.deliverables:
+            workings = []
+            for cid in used_claim_ids:
+                claim = latest_by_id[cid]
+                citations = list(dict.fromkeys(
+                    evidence_by_id[eid].source_ref or eid for eid in claim.evidence_ids
+                    if eid in evidence_by_id and evidence_by_id[eid].verified_in_input
+                    and evidence_by_id[eid].source_type in {"user_prompt", "external_retrieved"}
+                ))
+                for tid in claim.tool_execution_ids:
+                    rec = current_calculations.get(tid)
+                    if rec is None:
+                        continue
+                    bindings = ", ".join(
+                        f"{name}={detail['value']} [{detail['resolved_id']}]"
+                        for name, detail in rec.provenance_details.items()
+                        if detail.get("grounded") and detail.get("resolved_id")
+                        and "value" in detail
+                    )
+                    workings.append(
+                        f"- `{rec.expression}` = {rec.computed_result} {rec.units} "
+                        f"({bindings or 'see source references'})."
+                    )
+                if citations:
+                    workings.append(f"- {cid}@v{claim.version} sources: {', '.join(citations)}.")
+            if workings:
+                sections.append("**Calculations and Sources**\n" + "\n".join(workings))
+
         if not (approved_accepted or approved_conditional or approved_recommendations):
             sections.append(
                 "**Insufficient Verified Conclusions:** No assertions passed "
@@ -800,7 +949,7 @@ class HonestyGate:
         gate_passed = content_released_safely and not stale_claims and execution_completed
 
         release_mode: Literal["full", "partial", "blocked"]
-        if gate_passed:
+        if gate_passed and (not plan.deliverables or answer_complete):
             release_mode = "full"
         elif has_usable_output:
             release_mode = "partial"
@@ -823,9 +972,13 @@ class HonestyGate:
             requirements_missing=missing_req_count,
             requirement_statuses=req_items,
             execution_completed=execution_completed,
+            answer_complete=answer_complete,
             release_checks_executed=True,
             content_released_safely=content_released_safely,
-            coverage_methodology="internal_claim_linkage_not_independent_grade",
+            coverage_methodology=(
+                "independently_reviewed_deliverables"
+                if plan.deliverables else "internal_claim_linkage_not_independent_grade"
+            ),
             independent_grade=None,
             honesty_gate_passed=gate_passed,
             honesty_gate_reasons=list(dict.fromkeys(gate_reasons)),

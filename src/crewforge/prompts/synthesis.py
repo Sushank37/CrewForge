@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from crewforge.core.requirements import deliverable_lines
 from crewforge.schemas import AgentMessage, Claim, ExecutionPlan, TaskSpec, ToolExecutionRecord
 
 
@@ -19,6 +20,9 @@ def build_synthesis_system_prompt() -> str:
         "`recommendations` (with `claim_refs` and verbatim text), and gaps in "
         "`unresolved_issues`.\n"
         "- Set `requirement_ref` on segments using stable IDs (`req_1`, `req_2`, ...).\n"
+        "- Cover every independently reviewed atomic deliverable. Write grounded scenarios "
+        "under conditional_conclusions with the triggering condition in the cited claim. "
+        "Keep uncertainty and recommendations separate from established facts.\n"
         "- Never repeat a `rejected` or `stale` claim as fact.\n"
         "- Do NOT introduce new unreviewed material factual assertions in any segment or "
         "auxiliary field (`assumptions`, `missing_information`, `unresolved_issues`).\n"
@@ -81,6 +85,7 @@ def build_synthesis_user_prompt(
 
     return (
         f"Original user request:\n{original_prompt}\n\n"
+        f"Atomic deliverables:\n{deliverable_lines(plan.deliverables) or 'None listed.'}\n\n"
         f"User requirements:\n{req_block}\n\n"
         f"Reviewed Claim Ledger (latest versions):\n{claims_block}\n\n"
         f"Deterministic tool executions:\n{tools_block}\n\n"

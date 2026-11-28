@@ -26,11 +26,18 @@ def build_worker_system_prompt(agent: AgentSpec) -> str:
         "functions `sum`, `min`, `max`, `avg`, `abs`, `round`, `comb(n,k)`, `perm(n,k)`, "
         "`factorial(n)`, `binomial_pmf(n,k,p)`, `binomial_cdf(n,k,p)` (P(X <= k)), "
         "`binomial_sf(n,k,p)` (inclusive P(X >= k)), "
-        "or `sum(expr for i in range(a,b))`). Use named `variable_bindings` with `name`, "
+        "or `sum(expr for i in range(a,b))`). For sourced YYYY-MM-DD dates use "
+        "`days_between(start,end)` with YYYYMMDD values, units 'date' and quoted ISO dates. "
+        "Use named `variable_bindings` with `name`, "
         "numeric `value`, and the exact `provenance_ref`. When a source lists several quantities, "
         "give the verbatim `source_quote` identifying the operand. Put known input `units` on "
         "each binding and result `units` and `proposed_result` on the computation. "
         "Use 0.08 as a ratio for 8%, or 8 with operand units '%'.\n"
+        "- For each assigned deliverable make a separate claim. For hypothetical calculations, "
+        "put the condition in the claim statement and compute the amount. For recommendations "
+        "explicitly cite the relevant premise_claim_ids, including earlier local claim_refs. "
+        "For genuinely unavailable inputs use an uncertainty claim naming the specific missing "
+        "evidence, without inventing the value.\n"
         "- Derive subtotals, complements and other intermediate quantities in the formula "
         "or use a current verified `clm_...@vN` or `tlx_...` result. To use a calculation from "
         "an earlier claim in this response, cite its unique `claim_ref` or `clm_N` "
@@ -83,6 +90,7 @@ def build_worker_user_prompt(
     peer_directory: list[str],
     provenance_lines: list[str] | None = None,
     user_requirements: list[str] | None = None,
+    assigned_deliverables: str = "",
 ) -> str:
     """Assemble bounded task context for a specialist without dumping full transcripts."""
     reqs_block = (
@@ -121,6 +129,8 @@ def build_worker_user_prompt(
         f"Assigned task ({task.task_ref or task.task_id}): {task.title}\n"
         f"Task description:\n{task.description}\n\n"
         f"Expected deliverables:\n{deliverables_block}\n\n"
+        f"Assigned atomic deliverables (tag the exact deliv_N in requirement_refs):\n"
+        f"{assigned_deliverables or 'None listed.'}\n\n"
         f"Relevant acceptance criteria:\n{criteria_block}\n\n"
         f"Shared plan assumptions:\n{assumptions_block}\n\n"
         f"Completed dependency findings:\n{deps_block}\n\n"

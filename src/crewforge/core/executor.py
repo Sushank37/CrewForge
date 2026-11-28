@@ -9,7 +9,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from crewforge.config import CrewForgeSettings, sanitize_error_message
-from crewforge.core.budget import BudgetManager, BudgetReservation
+from crewforge.core.budget import BudgetExceededError, BudgetManager, BudgetReservation
 from crewforge.providers.base import (
     ModelProvider,
     ProviderError,
@@ -79,6 +79,7 @@ class ModelExecutor:
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
+        reserve_calls_after: int = 0,
         run_deadline_monotonic: float | None = None,
     ) -> StructuredGenerationResult[T]:
         """Run a structured generation call with per-attempt reservation and bounded retries."""
@@ -88,6 +89,13 @@ class ModelExecutor:
 
         attempt_index = 0
         while True:
+            if reserve_calls_after:
+                usage = await self._db.get_budget_summary(run_id)
+                remaining = (
+                    self._settings.max_model_calls_per_run - int(usage["run_committed_calls"])
+                )
+                if remaining <= reserve_calls_after:
+                    raise BudgetExceededError("Remaining calls reserved for review or synthesis.")
             attempt_timeout = self._effective_timeout(timeout_seconds, run_deadline_monotonic)
             reservation: BudgetReservation = await self._budget.reserve_call(
                 run_id=run_id,

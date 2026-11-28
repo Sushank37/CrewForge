@@ -317,6 +317,7 @@ _MIGRATIONS: tuple[tuple[int, str, str], ...] = (
     (2, "phase2_network_ledger_messaging", _MIGRATION_V2_SQL),
     (3, "phase3_verification_tools_and_gate", _MIGRATION_V3_SQL),
     (4, "phase4_evidence_lineage_and_retrieval", _MIGRATION_V4_SQL),
+    (5, "reviewed_requirement_deliverables", "SELECT 1;"),
 )
 
 
@@ -446,6 +447,14 @@ class Database:
                         "INTEGER NOT NULL DEFAULT 0",
                     )
                     _ensure_column(conn, "tool_executions", "formula_appropriate", "INTEGER")
+                if version == 5:
+                    _ensure_column(
+                        conn, "execution_plans", "deliverables_json", "TEXT NOT NULL DEFAULT '[]'"
+                    )
+                    _ensure_column(
+                        conn, "review_verdicts", "covered_deliverables_json",
+                        "TEXT NOT NULL DEFAULT '[]'",
+                    )
                 conn.execute(
                     "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                     (version, name, _utc_iso()),
@@ -988,8 +997,9 @@ class Database:
                 """
                 INSERT INTO execution_plans (
                     plan_id, run_id, goal, user_requirements_json, acceptance_criteria_json,
-                    assumptions_json, missing_information_json, created_by, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    assumptions_json, missing_information_json, created_by, created_at,
+                    deliverables_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan.plan_id,
@@ -1001,6 +1011,7 @@ class Database:
                     json.dumps(plan.missing_information, ensure_ascii=False),
                     plan.created_by,
                     plan.created_at.isoformat(),
+                    json.dumps([d.model_dump() for d in plan.deliverables], ensure_ascii=False),
                 ),
             )
 
@@ -1789,8 +1800,9 @@ class Database:
                 INSERT INTO review_verdicts (
                     verdict_id, run_id, claim_id, claim_version, reviewer_id,
                     review_dimension, decision, rationale, evidence_refs_json,
-                    required_correction, blocking_severity, blocking_issues_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    required_correction, blocking_severity, blocking_issues_json, created_at,
+                    covered_deliverables_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     verdict.verdict_id,
@@ -1806,6 +1818,7 @@ class Database:
                     verdict.blocking_severity,
                     json.dumps(verdict.blocking_issues, ensure_ascii=False),
                     verdict.created_at.isoformat(),
+                    json.dumps(verdict.covered_deliverable_refs, ensure_ascii=False),
                 ),
             )
 
@@ -2055,6 +2068,10 @@ class Database:
                 run_id=plan_row["run_id"],
                 goal=plan_row["goal"],
                 user_requirements=json.loads(plan_row["user_requirements_json"]),
+                deliverables=(
+                    json.loads(plan_row["deliverables_json"])
+                    if "deliverables_json" in set(plan_row.keys()) else []
+                ),
                 acceptance_criteria=json.loads(plan_row["acceptance_criteria_json"]),
                 agents=agents,
                 tasks=tasks,
@@ -2127,6 +2144,10 @@ class Database:
                 ),
                 decision=ReviewDecision(row["decision"]),
                 rationale=row["rationale"],
+                covered_deliverable_refs=(
+                    json.loads(row["covered_deliverables_json"])
+                    if "covered_deliverables_json" in set(row.keys()) else []
+                ),
                 evidence_refs=(
                     json.loads(row["evidence_refs_json"])
                     if "evidence_refs_json" in set(row.keys())

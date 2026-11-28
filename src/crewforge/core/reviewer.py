@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from crewforge.config import CrewForgeSettings
 from crewforge.core.claim_graph import ClaimDependencyGraph
 from crewforge.core.executor import ModelExecutor
+from crewforge.core.requirements import claim_addresses_kind, deliverable_lines
 from crewforge.schemas import (
     Claim,
     ClaimCategory,
@@ -58,6 +59,14 @@ def _build_review_system_prompt(dimension: str) -> str:
         "(even when arithmetic succeeded).\n"
         "- For inferences, verify the premises. Treat proposed plan or worker assumptions as "
         "conditional and require primary evidence for empirical values.\n"
+        "- For each approved claim, list the exact deliv_N IDs it independently fulfills in "
+        "`covered_deliverable_refs`. Review each obligation against the original request. "
+        "An accurate but incomplete calculation, comparison, or proof may be approved as a claim "
+        "without covering its obligation. A recommendation needs verified premises and a decision "
+        "that answers the requested action. Mark an uncertainty as covering an obligation only "
+        "when it identifies the missing evidence and the outcome genuinely cannot be determined. "
+        "Review calculable conditional cases independently of the unknown actual outcome. "
+        "List unfulfilled checklist IDs in `missing_requirement_coverage`.\n"
         "- Use `approve`, `reject`, `needs_revision`, or `unresolved` with `blocking_severity` "
         "set to `blocking` when the claim cannot safely be released as stated.\n"
         "- Keep each `rationale` and `required_correction` concise (under 150 characters) "
@@ -137,6 +146,7 @@ def _build_review_user_prompt(
             f"Claim {claim.claim_id} (version={claim.version}, alias={alias}, "
             f"category={claim.category.value}, author={claim.author_agent_id}):\n"
             f"  Statement: {claim.statement}\n"
+            f"  Requested coverage: {claim.requirement_refs}\n"
             f"  Assumptions: {claim.assumptions or ['None']}\n"
             f"  Evidence:\n" + ("\n".join(evd_lines) if evd_lines else "  - None") + "\n"
             "  ToolExecutions:\n" + ("\n".join(tool_lines) if tool_lines else "  - None") + "\n"
@@ -146,6 +156,7 @@ def _build_review_user_prompt(
     prompt = (
         f"Original user prompt:\n{original_prompt}\n\n"
         f"User requirements:\n{reqs}\n\n"
+        f"Atomic deliverables:\n{deliverable_lines(plan.deliverables) or 'None listed.'}\n\n"
         "Claims to audit independently (reference alias or claim_id):\n\n"
         + "\n\n".join(claim_blocks)
     )
@@ -210,7 +221,9 @@ class ReviewerPool:
         plan_assumptions: list[str] | None = None,
     ) -> tuple[ReviewVerdict | None, ClaimStatus | None, VerificationStatus | None]:
         """Apply zero-cost deterministic checks prior to LLM review."""
-        if not claim.is_material:
+        if not claim.is_material and claim.category not in {
+            ClaimCategory.RECOMMENDATION, ClaimCategory.UNCERTAINTY,
+        }:
             return None, None, None
 
         # Check premise integrity and exact version currency first.
@@ -245,6 +258,17 @@ class ReviewerPool:
                     blocking_issues=["Unverified, stale, or superseded premise dependency"],
                 )
                 return verdict, ClaimStatus.STALE, VerificationStatus.STALE_PENDING_REVIEW
+
+        if claim.category == ClaimCategory.RECOMMENDATION and not claim.premise_refs:
+            return (
+                ReviewVerdict(
+                    run_id=run_id, claim_id=claim.claim_id, claim_version=claim.version,
+                    reviewer_id=REVIEWER_CONSISTENCY_ID, review_dimension="consistency",
+                    decision=ReviewDecision.NEEDS_REVISION, blocking_severity="blocking",
+                    rationale="A recommendation needs current verified premise claims.",
+                ),
+                ClaimStatus.REJECTED, VerificationStatus.UNSUPPORTED,
+            )
 
         if claim.category == ClaimCategory.COMPUTATION:
             records = [tool_by_id[tid] for tid in claim.tool_execution_ids if tid in tool_by_id]
@@ -487,7 +511,12 @@ class ReviewerPool:
             if target_claims is not None
             else latest_all
         )
-        material_claims = [c for c in claims_to_review if c.is_material]
+        material_claims = [
+            c for c in claims_to_review if c.is_material
+            or c.category == ClaimCategory.RECOMMENDATION
+            or (plan.deliverables and c.category == ClaimCategory.UNCERTAINTY)
+        ]
+        items = {d.deliverable_id: d for d in plan.deliverables}
 
         outcome = ReviewRoundOutcome(updated_claims=dict(latest_by_id))
         if not material_claims:
@@ -520,7 +549,7 @@ class ReviewerPool:
                 outcome.verdicts.append(verdict)
                 outcome.updated_claims[claim.claim_id] = updated
                 latest_by_id[claim.claim_id] = updated
-                needs_repair = updated.is_material and (
+                needs_repair = (updated.is_material or updated.requirement_refs) and (
                     verdict.blocking_severity == "blocking"
                     or verdict.decision == ReviewDecision.NEEDS_REVISION
                 )
@@ -590,6 +619,7 @@ class ReviewerPool:
                     operation="review",
                     prompt=review_prompt,
                     response_model=ReviewerBatchOutput,
+                    reserve_calls_after=1,
                     system_prompt=_build_review_system_prompt(dimension),
                     run_deadline_monotonic=run_deadline_monotonic,
                 )
@@ -607,6 +637,7 @@ class ReviewerPool:
                 continue
 
             valid_targets = {(c.claim_id, c.version): c for c in eligible_claims}
+            reported_gaps = set(res.parsed.missing_requirement_coverage)
             for item in res.parsed.verdicts:
                 if item.claim_id in alias_map:
                     resolved_cid, resolved_ver = alias_map[item.claim_id]
@@ -662,6 +693,13 @@ class ReviewerPool:
                     decision=item.decision,
                     rationale=item.rationale,
                     evidence_refs=safe_evd_refs,
+                    covered_deliverable_refs=[
+                        ref for ref in dict.fromkeys(item.covered_deliverable_refs)
+                        if item.decision == ReviewDecision.APPROVE
+                        and ref not in reported_gaps
+                        and ref in target_claim.requirement_refs and ref in items
+                        and claim_addresses_kind(target_claim, items[ref])
+                    ],
                     required_correction=item.required_correction,
                     blocking_severity=severity,
                     blocking_issues=[item.required_correction] if item.required_correction else [],
@@ -727,7 +765,7 @@ class ReviewerPool:
                     v.decision == ReviewDecision.NEEDS_REVISION for v in rejections
                 )
                 blocking = any(v.blocking_severity == "blocking" for v in rejections) or (
-                    claim.is_material and has_actionable_revision
+                    (claim.is_material or claim.requirement_refs) and has_actionable_revision
                 )
                 next_status = ClaimStatus.REJECTED
                 next_ver = (

@@ -16,6 +16,7 @@ from crewforge.core.ledger import ClaimLedger
 from crewforge.core.messaging import MessageBus
 from crewforge.core.planner import LeadPlanner, PlanValidationError
 from crewforge.core.repair import TargetedRepairEngine
+from crewforge.core.requirements import reviewed_deliverables
 from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
 from crewforge.core.reviewer import ReviewerPool
 from crewforge.core.scheduler import DAGScheduler
@@ -29,6 +30,7 @@ from crewforge.schemas import (
     ExecutionPlan,
     RunResult,
     RunStatus,
+    TaskSpec,
     TaskStatus,
 )
 from crewforge.storage.database import Database
@@ -227,6 +229,75 @@ class NetworkRunner:
 
         return uncertainties, deadline_exceeded, budget_exhausted
 
+    async def _recover_missing_deliverables(
+        self,
+        *,
+        run_id: str,
+        original_prompt: str,
+        plan: ExecutionPlan,
+        tasks: dict[str, TaskSpec],
+        run_deadline_monotonic: float | None,
+    ) -> None:
+        """Run one targeted wave on completed assignments, with one independent re-review."""
+        trace = await self._db.get_run_trace(run_id)
+        assert trace is not None
+        covered = reviewed_deliverables(plan, trace.claims, trace.review_verdicts)
+        missing = [d for d in plan.deliverables if d.deliverable_id not in covered]
+        if not missing:
+            return
+        latest = await self._ledger.get_claims(run_id, latest_only=True)
+        gaps = {}
+        for item in missing:
+            statuses = {c.status.value for c in latest if item.deliverable_id in c.requirement_refs}
+            gaps[item.deliverable_id] = (
+                "missing" if not statuses else
+                "partially_answered" if "supported" in statuses else "/".join(sorted(statuses))
+            )
+        await self._db.append_event(ExecutionEvent(
+            run_id=run_id, actor="orchestrator", event_type="deliverables_missing",
+            message="Identified unfulfilled deliverables before synthesis.",
+            payload={"deliverable_statuses": gaps},
+        ))
+        agents = {a.agent_id: a for a in plan.agents}
+        completed = {tid: task for tid, task in tasks.items()
+                     if task.status == TaskStatus.COMPLETED}
+        recovered: list[Claim] = []
+        for task in completed.values():
+            assigned = [d for d in missing if d.task_ref == task.task_ref]
+            if not assigned:
+                continue
+            summary = await self._db.get_budget_summary(run_id)
+            remaining = self._settings.max_model_calls_per_run - int(summary["run_committed_calls"])
+            if remaining < 3 or (
+                run_deadline_monotonic is not None
+                and run_deadline_monotonic - time.monotonic() < 25
+            ):
+                await self._db.append_event(ExecutionEvent(
+                    run_id=run_id, actor="orchestrator", event_type="optional_stage_skipped",
+                    message="Reserved remaining resources for independent review and synthesis.",
+                    payload={"stage": "requirement_recovery"},
+                ))
+                break
+            try:
+                outcome = await self._worker.execute_task(
+                    run_id=run_id, original_prompt=original_prompt, plan=plan, task=task,
+                    agent=agents[task.assigned_agent_id], completed_tasks_by_id=completed,
+                    run_deadline_monotonic=run_deadline_monotonic, missing_deliverables=assigned,
+                )
+            except (ProviderError, BudgetError, RunDeadlineExceededError) as exc:
+                await self._db.append_event(ExecutionEvent(
+                    run_id=run_id, actor=task.assigned_agent_id,
+                    event_type="requirement_recovery_stopped",
+                    message=sanitize_error_message(str(exc)),
+                ))
+                break
+            recovered.extend(outcome.claims)
+        if recovered:
+            await self._reviewer.review_claims(
+                run_id=run_id, original_prompt=original_prompt, plan=plan,
+                target_claims=recovered, run_deadline_monotonic=run_deadline_monotonic,
+            )
+
     async def run(
         self,
         prompt: str,
@@ -392,6 +463,15 @@ class NetworkRunner:
                         message="Independent review stage disabled by ablation config.",
                         payload={"stage": "independent_review"},
                     )
+                )
+
+            if (
+                plan.deliverables and self._settings.enable_independent_review
+                and self._settings.enable_targeted_repair
+            ):
+                await self._recover_missing_deliverables(
+                    run_id=resolved_run_id, original_prompt=cleaned_prompt, plan=plan,
+                    tasks=sched_outcome.tasks_by_id, run_deadline_monotonic=run_deadline_monotonic,
                 )
 
             trace_snapshot = await self._db.get_run_trace(resolved_run_id)

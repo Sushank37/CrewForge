@@ -163,6 +163,19 @@ def validate_and_materialize_plan(
     if seen_task_refs and visited_count != len(seen_task_refs):
         errors.append("Task dependency graph contains a cycle.")
 
+    requirements = [r.strip() for r in raw_plan.user_requirements if r.strip()]
+    if raw_plan.deliverables is not None:
+        req_ids = {f"req_{i}" for i in range(1, len(requirements) + 1)}
+        assigned_req_ids = {d.requirement_ref for d in raw_plan.deliverables}
+        deliverable_ids = {d.deliverable_id for d in raw_plan.deliverables}
+        if req_ids != assigned_req_ids:
+            errors.append("Deliverables must cover every numbered user requirement.")
+        if len(deliverable_ids) != len(raw_plan.deliverables):
+            errors.append("Deliverable IDs must be unique.")
+        for d in raw_plan.deliverables:
+            if d.task_ref not in seen_task_refs or not d.text.strip():
+                errors.append(f"Deliverable {d.deliverable_id} needs text and a valid task_ref.")
+
     if errors:
         raise PlanValidationError(errors)
 
@@ -170,7 +183,8 @@ def validate_and_materialize_plan(
         plan_id=plan_id,
         run_id=run_id,
         goal=raw_plan.goal.strip(),
-        user_requirements=[r.strip() for r in raw_plan.user_requirements if r.strip()],
+        user_requirements=requirements,
+        deliverables=raw_plan.deliverables or [],
         acceptance_criteria=[c.strip() for c in raw_plan.acceptance_criteria if c.strip()],
         agents=list(agent_refs.values()),
         tasks=materialized_tasks,

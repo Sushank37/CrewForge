@@ -8,6 +8,7 @@ from crewforge.config import sanitize_error_message
 from crewforge.core.executor import ModelExecutor
 from crewforge.core.ledger import ClaimLedger, ClaimRevisionError
 from crewforge.core.messaging import MessageBus
+from crewforge.core.requirements import deliverable_lines
 from crewforge.prompts.worker import (
     build_followup_user_prompt,
     build_worker_system_prompt,
@@ -21,6 +22,7 @@ from crewforge.schemas import (
     ExecutionEvent,
     ExecutionPlan,
     FollowUpOutput,
+    RequirementDeliverable,
     SpecialistOutput,
     TaskSpec,
     ToolExecutionRecord,
@@ -81,6 +83,7 @@ class SpecialistWorker:
         completed_tasks_by_id: dict[str, TaskSpec],
         run_deadline_monotonic: float | None = None,
         compact_recovery: bool = False,
+        missing_deliverables: list[RequirementDeliverable] | None = None,
     ) -> WorkerExecutionOutcome:
         """Execute a specialist's assigned task with dependency context and inbox delivery."""
         dependency_findings: list[tuple[str, str]] = []
@@ -140,6 +143,10 @@ class SpecialistWorker:
             peer_directory=peer_directory,
             provenance_lines=prov_catalog.prompt_summary_lines(),
             user_requirements=plan.user_requirements,
+            assigned_deliverables=deliverable_lines([
+                d for d in (missing_deliverables or plan.deliverables)
+                if d.task_ref == task.task_ref
+            ]),
         )
         if compact_recovery:
             user_prompt += (
@@ -151,12 +158,22 @@ class SpecialistWorker:
                 "`is_unresolved=true` claim."
             )
 
+        if missing_deliverables:
+            user_prompt += (
+                "\n\nTARGETED REQUIREMENT RECOVERY: Supply only the listed missing deliverables "
+                "and essential supporting premises. Reuse current verified claims and sources. "
+                "Prior claims may be correct but incomplete, so address the full checklist item. "
+                "If it cannot be answered from available evidence, give an uncertainty claim "
+                "stating the specific missing evidence and what it would resolve."
+            )
+
         response = await self._executor.execute_structured(
             run_id=run_id,
             actor=agent.agent_id,
-            operation="worker",
+            operation="requirement_recovery" if missing_deliverables else "worker",
             prompt=user_prompt,
             response_model=SpecialistOutput,
+            reserve_calls_after=2 if missing_deliverables else 0,
             system_prompt=system_prompt,
             run_deadline_monotonic=run_deadline_monotonic,
         )
