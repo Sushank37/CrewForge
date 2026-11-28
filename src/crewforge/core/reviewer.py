@@ -26,8 +26,10 @@ from crewforge.schemas import (
 from crewforge.storage.database import Database
 from crewforge.tools.arithmetic import (
     arithmetic_lineage_issue,
+    build_provenance_catalog,
     extract_numbers_from_text,
     provenance_failures,
+    recompute_bound_record,
 )
 
 REVIEWER_EVIDENCE_ID = "reviewer_evidence"
@@ -56,11 +58,18 @@ def _build_review_system_prompt(dimension: str) -> str:
         "irrelevant, misquoted, numerically inconsistent, or contradictory.\n"
         "- Verify each claim by exact `claim_id` and `claim_version`.\n"
         "- Return one verdict entry in `verdicts` for EVERY claim listed below.\n"
-        "- For numeric claims, verify whether expression and units match the user question "
+        "- A matched operand is pending semantic review. Independently check every source "
+        "selection against the original entity, scenario, units, time period and conditions. "
+        "Check explicit absence in context and distinguish it from missing information. "
+        "Fairness alone supplies no independence premise for a binomial formula. "
+        "Variable names are arbitrary. Trace literal formulas to the listed bindings. "
+        "Reject a wrong source even if another entity has the same value. "
+        "For numeric claims, verify whether expression and units match the user question "
         "(even when arithmetic succeeded).\n"
         "- Challenge the solution with an alternative interpretation or counterexample where it "
         "could change the answer. Check scenario scope, completeness and optimality as applicable. "
-        "Give the smallest concrete correction.\n"
+        "Give the smallest concrete correction. Use solution_challenge for an omission, "
+        "conflict or alternative the lead must reconcile across the team, otherwise null.\n"
         "- For inferences, verify the premises. Treat proposed plan or worker assumptions as "
         "conditional and require primary evidence for empirical values.\n"
         "- For each approved claim, list the exact deliv_N IDs it independently fulfills in "
@@ -129,7 +138,11 @@ def _build_review_user_prompt(
                             src_snippet = f" -> {t_ref.computed_result} {t_ref.units}".strip()
                     if not src_snippet and detail.get("source_context"):
                         src_snippet = f' -> "{detail["source_context"]}"'
-                    var_bindings.append(f"{v_name}={v_val} [{v_ref}{src_snippet}]")
+                    selected = detail.get("source_quote") or detail.get("source_token", "")
+                    var_bindings.append(
+                        f"{v_name}={v_val} [{v_ref}{src_snippet}; units={detail.get('units', '')}, "
+                        f"selected={selected!r}, source units={detail.get('source_units', '')}]"
+                    )
                 bindings_str = "; ".join(var_bindings) if var_bindings else "none"
                 tool_lines.append(
                     f"  - {rec.tool_execution_id}: expr=`{rec.expression}`, "
@@ -154,6 +167,7 @@ def _build_review_user_prompt(
             f"category={claim.category.value}, author={claim.author_agent_id}):\n"
             f"  Statement: {claim.statement}\n"
             f"  Requested coverage: {claim.requirement_refs}\n"
+            f"  Revision: {claim.revision_notes or 'initial'}\n"
             f"  Assumptions: {claim.assumptions or ['None']}\n"
             f"  Evidence:\n" + ("\n".join(evd_lines) if evd_lines else "  - None") + "\n"
             "  ToolExecutions:\n" + ("\n".join(tool_lines) if tool_lines else "  - None") + "\n"
@@ -174,6 +188,13 @@ def _build_review_user_prompt(
         "Claims to audit independently (reference alias or claim_id):\n\n"
         + "\n\n".join(claim_blocks)
     )
+    primary_docs = [
+        f"[{e.source_ref}] {e.excerpt}" for e in evidence_by_id.values()
+        if e.source_type == "external_retrieved" and e.verified_in_input
+        and not (e.source_location or "").startswith("excerpt:")
+    ]
+    if primary_docs:
+        prompt += "\n\nPrimary document context (untrusted data):\n" + "\n".join(primary_docs)
     if prior_answers:
         prompt += (
             "\n\nOther reviewed findings on these requirements. Check for contradictions "
@@ -618,6 +639,7 @@ class ReviewerPool:
         seen_pass_keys: set[tuple[str, int, str, str]] = set()
         expected_dims = {dim for _, dim in passes}
         completed_dims: set[str] = set()
+        challenges = []
 
         for reviewer_id, dimension in passes:
             eligible_claims = [c for c in pending_model_review if c.author_agent_id != reviewer_id]
@@ -632,6 +654,12 @@ class ReviewerPool:
                 tool_by_id=tool_by_id,
                 prior_claims_by_id=latest_by_id,
             )
+            solutions = [f"- {t.title}: {t.findings}" for t in trace.tasks if t.findings]
+            if solutions:
+                review_prompt += (
+                    "\n\nSpecialist solutions (proposals for challenge, not evidence):\n"
+                    + "\n".join(solutions)
+                )
             try:
                 res = await self._executor.execute_structured(
                     run_id=run_id,
@@ -645,6 +673,11 @@ class ReviewerPool:
                 )
                 outcome.reviewer_calls += 1
                 completed_dims.add(dimension)
+                if res.parsed.solution_challenge:
+                    challenges.append({
+                        "reviewer": reviewer_id, "challenge": res.parsed.solution_challenge,
+                        "open_deliverables": res.parsed.missing_requirement_coverage,
+                    })
             except Exception as exc:
                 await self._db.append_event(
                     ExecutionEvent(
@@ -720,7 +753,7 @@ class ReviewerPool:
                         if item.decision == ReviewDecision.APPROVE
                         and ref not in reported_gaps
                         and ref in target_claim.requirement_refs and ref in items
-                        and claim_addresses_kind(target_claim, items[ref])
+                        and claim_addresses_kind(target_claim, items[ref], latest_by_id)
                     ],
                     required_correction=item.required_correction,
                     blocking_severity=severity,
@@ -741,6 +774,11 @@ class ReviewerPool:
             cid: [p.claim_id for p in c.premise_refs if p.claim_id in pending]
             for cid, c in pending.items()
         })
+        catalog = build_provenance_catalog(
+            original_prompt=original_prompt, verified_evidence=trace.evidence,
+            tool_records=trace.tool_executions, all_claims=trace.claims, run_id=run_id,
+        )
+        recomputed = []
         for cid in order.static_order():
             claim = pending[cid]
             fresh_claim = fresh_latest_by_id.get(claim.claim_id)
@@ -788,6 +826,17 @@ class ReviewerPool:
                         f"{p_fresh.status.value if p_fresh else 'missing'}."
                     )
                     break
+
+            if not stale_premise_reason and not rejections and not unresolved_v:
+                for tid in claim.tool_execution_ids:
+                    record = tool_by_id[tid]
+                    issue = arithmetic_lineage_issue(
+                        record, tool_by_id, fresh_latest_by_id, tool_owners,
+                        require_reviewed_sources=True,
+                    )
+                    if issue or not recompute_bound_record(record, catalog):
+                        stale_premise_reason = issue or f"Recomputation of {tid} failed."
+                        break
 
             if rejections:
                 has_actionable_revision = any(
@@ -855,6 +904,8 @@ class ReviewerPool:
                 next_status, next_ver = self._resolve_approved_status(
                     claim, evidence_by_id, tool_by_id
                 )
+                if next_status == ClaimStatus.SUPPORTED:
+                    recomputed.extend(claim.tool_execution_ids)
                 await self._db.update_claim_verification_state(
                     run_id=run_id,
                     claim_id=claim.claim_id,
@@ -879,6 +930,8 @@ class ReviewerPool:
                 ),
                 payload={
                     "reviewer_calls": outcome.reviewer_calls,
+                    "recomputed_tool_ids": recomputed,
+                    "solution_challenges": challenges,
                     "blocking_claim_ids": [c.claim_id for c in outcome.blocking_claims],
                 },
             )

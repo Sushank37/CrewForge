@@ -383,7 +383,7 @@ async def test_invalid_claim_remains_blocked_when_repair_produces_bad_provenance
                 "assumptions": [],
                 "missing_information": [],
             }
-        if schema_name in {"WorkerOutput", "SpecialistOutput"}:
+        if schema_name in {"WorkerOutput", "SpecialistOutput", "ReconciliationOutput"}:
             return {
                 "findings": "Draft 999.",
                 "evidence": [

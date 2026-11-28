@@ -356,7 +356,8 @@ async def test_arithmetic_lineage_rejects_swaps_fabricated_unrelated_stale_and_l
                 proposed_result="1",
             ),
         )
-        assert swapped.inputs_grounded is False
+        assert swapped.inputs_grounded and swapped.matches_proposed is False
+        assert swapped.provenance_details["inv"]["binding_status"] == "pending_semantic_review"
 
         # 2. Fabricated provenance reference
         fabricated = await tool.execute(
@@ -383,7 +384,10 @@ async def test_arithmetic_lineage_rejects_swaps_fabricated_unrelated_stale_and_l
                 units="months",
             ),
         )
-        assert wrong_sentence.inputs_grounded is False
+        assert wrong_sentence.inputs_grounded
+        assert wrong_sentence.provenance_details["exp"]["source_units"] == "ms"
+        detail = wrong_sentence.provenance_details["exp"]
+        assert detail["binding_status"] == "pending_semantic_review"
 
         # 4. Correct expression using ungrounded inline constant (5000 hardcoded inside AST)
         inline_const = await tool.execute(

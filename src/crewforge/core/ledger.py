@@ -17,6 +17,7 @@ from crewforge.schemas import (
     ExecutionEvent,
     ProposedClaim,
     ProposedEvidence,
+    SolutionSelection,
     ToolExecutionRecord,
     VerificationStatus,
 )
@@ -237,8 +238,12 @@ class ClaimLedger:
             for alias in local_aliases[idx]:
                 premise_available.setdefault(alias, ready)
 
-        combined_tool_records = [
-            r for r in [*prior_tool_records, *all_new_tool_records]
+        reviewed_tool_ids = {
+            tid for c in existing_claims if c.status == ClaimStatus.SUPPORTED
+            for tid in c.tool_execution_ids
+        }
+        reviewed_records = [
+            r for r in prior_tool_records if r.tool_execution_id in reviewed_tool_ids
             if (target := catalog.targets_by_key.get(r.tool_execution_id)) and target.is_trusted
         ]
 
@@ -249,13 +254,19 @@ class ClaimLedger:
         }
         retrieved_sources_text = "\n".join(dict.fromkeys(retrieved_sources_by_ref.values()))
         retrieved_refs = set(retrieved_sources_by_ref.keys())
-        for proposal in evidence_proposals:
+        evidence_indices = {
+            i for idx in selected_tasks for i in claim_proposals[idx].evidence_indices
+        }
+        evidence_by_position = {}
+        for pos, proposal in enumerate(evidence_proposals):
+            if recovery_tasks is not None and pos not in evidence_indices:
+                continue
             effective_source_type = proposal.source_type
             check = verify_evidence_proposal(
                 proposal=proposal,
                 original_prompt=original_prompt,
                 dependency_findings_text=dependency_findings_text,
-                matching_tool_records=combined_tool_records,
+                matching_tool_records=reviewed_records,
                 retrieved_sources_text=retrieved_sources_text,
                 retrieved_sources_by_ref=retrieved_sources_by_ref,
             )
@@ -279,7 +290,7 @@ class ClaimLedger:
                     proposal=retrieved_proposal,
                     original_prompt=original_prompt,
                     dependency_findings_text=dependency_findings_text,
-                    matching_tool_records=combined_tool_records,
+                    matching_tool_records=reviewed_records,
                     retrieved_sources_text=retrieved_sources_text,
                     retrieved_sources_by_ref=retrieved_sources_by_ref,
                 )
@@ -313,6 +324,7 @@ class ClaimLedger:
             )
             await self._db.insert_evidence(evd)
             persisted_evidence.append(evd)
+            evidence_by_position[pos] = evd
 
         persisted_claims: list[Claim] = []
         local_ref_map: dict[str, Claim] = {}
@@ -326,9 +338,9 @@ class ClaimLedger:
                 local_ref_map.update(dict.fromkeys(local_aliases[idx], reused[idx]))
                 continue
             linked_evidence_ids = [
-                persisted_evidence[e_idx].evidence_id
+                evidence_by_position[e_idx].evidence_id
                 for e_idx in prop_claim.evidence_indices
-                if 0 <= e_idx < len(persisted_evidence)
+                if e_idx in evidence_by_position
             ]
 
             premise_refs: list[ClaimVersionRef] = []
@@ -395,7 +407,7 @@ class ClaimLedger:
                 message="Used current reviewed calculations for repeated recovery proposals.",
                 payload={"versions": [f"{c.claim_id}@v{c.version}" for c in reused.values()]},
             ))
-        if persisted_evidence or persisted_claims:
+        if persisted_evidence or persisted_claims or recovery_tasks is not None:
             await self._db.append_event(
                 ExecutionEvent(
                     run_id=run_id,
@@ -407,6 +419,12 @@ class ClaimLedger:
                     ),
                     payload={
                         "task_id": task_id,
+                        "proposed_claims": len(claim_proposals),
+                        "proposed_evidence": len(evidence_proposals),
+                        "filtered_positions": [
+                            i + 1 for i in range(len(claim_proposals)) if i not in selected_tasks
+                        ],
+                        "reused_positions": [i + 1 for i in reused],
                         "claim_ids": [c.claim_id for c in persisted_claims],
                         "evidence_ids": [e.evidence_id for e in persisted_evidence],
                         "tool_execution_ids": [t.tool_execution_id for t in all_new_tool_records],
@@ -415,6 +433,39 @@ class ClaimLedger:
             )
 
         return persisted_evidence, persisted_claims, all_new_tool_records
+
+    async def record_solution_selections(
+        self, run_id: str, selections: list[SolutionSelection], tasks: dict[str, str],
+        conditional_ids: set[str],
+    ) -> list[Claim]:
+        """Assemble verbatim candidates from current factual members for a new review."""
+        current = {
+            f"{c.claim_id}@v{c.version}": c
+            for c in await self.get_claims(run_id, latest_only=True)
+            if c.is_material and c.status == ClaimStatus.SUPPORTED
+        }
+        candidates = []
+        for item in selections:
+            refs = list(dict.fromkeys(item.claim_refs))
+            if item.deliverable_id not in tasks or any(ref not in current for ref in refs):
+                continue
+            members = [current[ref] for ref in refs]
+            if item.deliverable_id not in conditional_ids and any(
+                c.assumptions or conditional_ids.intersection(c.requirement_refs) for c in members
+            ):
+                continue
+            candidate = Claim(
+                assumptions=list(dict.fromkeys(a for c in members for a in c.assumptions)),
+                run_id=run_id, category=ClaimCategory.INFERENCE, author_agent_id="lead",
+                statement=" ".join(c.statement for c in members),
+                task_id=tasks[item.deliverable_id], requirement_refs=[item.deliverable_id],
+                premise_refs=[ClaimVersionRef(claim_id=c.claim_id, claim_version=c.version)
+                              for c in members],
+                depends_on_claim_ids=[c.claim_id for c in members],
+            )
+            await self._db.insert_claim(candidate)
+            candidates.append(candidate)
+        return candidates
 
     async def apply_targeted_revision(
         self,

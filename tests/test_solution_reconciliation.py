@@ -8,7 +8,13 @@ from crewforge.config import CrewForgeSettings
 from crewforge.core.budget import BudgetManager
 from crewforge.core.orchestrator import NetworkRunner
 from crewforge.core.retrieval import ReferenceDocument
-from crewforge.schemas import PlannerOutput, ReviewerBatchOutput, SpecialistOutput, SynthesisOutput
+from crewforge.schemas import (
+    PlannerOutput,
+    ReconciliationOutput,
+    ReviewerBatchOutput,
+    SpecialistOutput,
+    SynthesisOutput,
+)
 from crewforge.storage.database import Database
 from tests.fake_provider import FakeProvider
 from tests.test_requirement_recovery import approved, calculation, one_task_plan
@@ -86,7 +92,8 @@ async def test_numerical_solution_reconciles_two_specialists_once(tmp_path, reco
             for idx in (1, 3):
                 plan["deliverables"][idx]["task_ref"] = "t2"
             return plan
-        if schema is SpecialistOutput and "TARGETED REQUIREMENT RECOVERY" in model_prompt:
+        if schema is ReconciliationOutput:
+            assert "Compare the confirmed totals before choosing the supplier." in model_prompt
             linen_id, v1 = seen[linen]
             slate_id, v2 = seen[slate]
             linen_ref, slate_ref = f"{linen_id}@v{v1}", f"{slate_id}@v{v2}"
@@ -110,12 +117,18 @@ async def test_numerical_solution_reconciles_two_specialists_once(tmp_path, reco
         assert schema is ReviewerBatchOutput
         if choice in model_prompt:
             assert "computed=15" in model_prompt and linen in model_prompt and slate in model_prompt
-        return approved(model_prompt, {
+        result = approved(model_prompt, {
             linen: (["deliv_1"], "Nine prints at four dollars with no rebate gives 36."),
             slate: (["deliv_2"], "The Slate quote is explicitly $51."),
             savings: (["deliv_3"], "Subtract the reviewed bill from the flat quote."),
             choice: (["deliv_4"], "The reviewed saving favors Linen."),
         }, seen)
+        if choice not in seen:
+            result["solution_challenge"] = (
+                "Compare the confirmed totals before choosing the supplier."
+            )
+            result["missing_requirement_coverage"] = ["deliv_3", "deliv_4"]
+        return result
 
     result, trace = await run_case(tmp_path, prompt, script)
     check_solution(result, trace, [linen, slate, savings, choice], 6, record_property)
@@ -245,7 +258,7 @@ async def test_two_missing_comparisons_reuse_the_same_reviewed_total(tmp_path, r
             for item in plan["deliverables"][2:]:
                 item["task_ref"] = "t2"
             return plan
-        if schema is SpecialistOutput and "TARGETED REQUIREMENT RECOVERY" in model_prompt:
+        if schema is ReconciliationOutput:
             checklist = model_prompt.split("Assigned atomic deliverables", 1)[1].split(
                 "Relevant acceptance criteria", 1,
             )[0]

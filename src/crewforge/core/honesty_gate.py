@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from graphlib import CycleError, TopologicalSorter
 from typing import Any, Literal
 
 from crewforge.core.requirements import claim_addresses_kind, reviewed_deliverables
@@ -153,6 +154,10 @@ class HonestyGate:
         is_partial_run: bool,
     ) -> HonestyGateResult:
         """Audit structured synthesis against persisted claims, tools, and verdicts."""
+        all_claims = [c for c in all_claims if c.run_id == run_id]
+        tool_executions = [t for t in tool_executions if t.run_id == run_id]
+        verdicts = [v for v in verdicts if v.run_id == run_id]
+        evidence_list = [e for e in evidence_list if e.run_id == run_id]
         latest_by_id: dict[str, Claim] = {}
         for claim in all_claims:
             prev = latest_by_id.get(claim.claim_id)
@@ -205,12 +210,14 @@ class HonestyGate:
             and tid in tool_by_id and make_tool_target(tool_by_id[tid]).is_trusted
             and not arithmetic_lineage_issue(
                 tool_by_id[tid], tool_by_id, latest_by_id, tool_owners,
+                require_reviewed_sources=True,
             )
         }
 
         def _arithmetic_premises_current(claim: Claim) -> bool:
             """Check versioned premises, including arithmetic behind intermediate claims."""
             pending = [claim]
+            graph = TopologicalSorter()
             seen: set[tuple[str, int]] = set()
             while pending:
                 current = pending.pop()
@@ -225,7 +232,9 @@ class HonestyGate:
                 ):
                     return False
                 pinned = {ref.claim_id: ref.claim_version for ref in current.premise_refs}
-                for premise_id in set(current.depends_on_claim_ids) | pinned.keys():
+                parents = set(current.depends_on_claim_ids) | pinned.keys()
+                graph.add(key[0], *parents)
+                for premise_id in parents:
                     premise = latest_by_id.get(premise_id)
                     if (
                         premise is None or premise.version != pinned.get(premise_id, 1)
@@ -233,11 +242,22 @@ class HonestyGate:
                         or premise.verification_status == VerificationStatus.STALE_PENDING_REVIEW
                     ):
                         return False
+                    if premise.is_material:
+                        reviews = verdicts_by_key.get((premise.claim_id, premise.version), [])
+                        if premise.status != ClaimStatus.SUPPORTED or not reviews or any(
+                            v.reviewer_id == premise.author_agent_id
+                            or v.decision != ReviewDecision.APPROVE for v in reviews
+                        ):
+                            return False
                     if premise.category == ClaimCategory.COMPUTATION and not any(
                         tid in current_calculations for tid in premise.tool_execution_ids
                     ):
                         return False
                     pending.append(premise)
+            try:
+                graph.prepare()
+            except CycleError:
+                return False
             return True
 
         allowed_numbers = extract_numbers_from_text(original_prompt)
@@ -588,11 +608,11 @@ class HonestyGate:
                 if err is not None:
                     continue
                 destination.append((ReleaseSegment(
-                    segment_type=lane, text=claim.statement, requirement_ref=item.requirement_ref,
+                    segment_type=lane, requirement_ref=item.requirement_ref,
                     claim_refs=[ClaimVersionRef(
                         claim_id=claim.claim_id, claim_version=claim.version,
                     )],
-                ), [claim]))
+                ).model_copy(update={"text": claim.statement}), [claim]))
                 used_claim_ids.append(claim.claim_id)
                 break
 
@@ -634,7 +654,7 @@ class HonestyGate:
                     claim_refs=[ClaimVersionRef(
                         claim_id=claim.claim_id, claim_version=claim.version,
                     )],
-                ), [claim]))
+                ).model_copy(update={"text": claim.statement}), [claim]))
                 used_claim_ids.append(claim.claim_id)
                 shown_requirements.add(item.requirement_ref)
                 break
@@ -946,14 +966,22 @@ class HonestyGate:
         if approved_accepted:
             seen_norms: set[str] = set()
             clean_points: list[str] = []
-            for seg, _claims in approved_accepted:
-                norm = _canonical_norm(seg.text)
-                if norm and norm not in seen_norms:
-                    seen_norms.add(norm)
-                    text_out = seg.text.strip()
-                    if not text_out.endswith((".", "!", "?")):
-                        text_out += "."
-                    clean_points.append(text_out)
+            for seg, members in approved_accepted:
+                texts = [seg.text]
+                if len(members) == 1 and members[0].author_agent_id == "lead":
+                    # A reviewed selection can overlap another checklist item. Render its
+                    # exact constituents once, keeping all coverage and lineage references.
+                    parts = [latest_by_id[p.claim_id].statement for p in members[0].premise_refs]
+                    if parts and seg.text == " ".join(parts):
+                        texts = parts
+                for text in texts:
+                    norm = _canonical_norm(text)
+                    if norm and norm not in seen_norms:
+                        seen_norms.add(norm)
+                        text_out = text.strip()
+                        if not text_out.endswith((".", "!", "?")):
+                            text_out += "."
+                        clean_points.append(text_out)
             if len(clean_points) == 1:
                 sections.append(clean_points[0])
             else:

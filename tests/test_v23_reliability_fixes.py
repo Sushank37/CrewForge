@@ -767,13 +767,13 @@ def test_v23_exact_cloud_complex_002_provenance_and_swapped_controls() -> None:
     )
     assert ok_tx is True
 
-    # Swapped-quantity negative controls must remain rejected.
-    swap_vendor, _ = DeterministicArithmeticTool.check_inputs_grounded(
+    # Unambiguous occurrences still require independent semantic review.
+    swap_vendor, vendor = DeterministicArithmeticTool.check_inputs_grounded(
         variables={"alpha": Decimal("56000")},
         input_provenance_refs={"alpha": "doc_2"},
         catalog=cat,
     )
-    assert swap_vendor is False
+    assert swap_vendor and vendor["alpha"]["binding_status"] == "pending_semantic_review"
 
     swap_fee, _ = DeterministicArithmeticTool.check_inputs_grounded(
         variables={"setup_fee": Decimal("50000")},
@@ -782,12 +782,13 @@ def test_v23_exact_cloud_complex_002_provenance_and_swapped_controls() -> None:
     )
     assert swap_fee is False
 
-    swap_forecast, _ = DeterministicArithmeticTool.check_inputs_grounded(
+    swap_forecast, forecast = DeterministicArithmeticTool.check_inputs_grounded(
         variables={"stress": Decimal("100000")},
         input_provenance_refs={"stress": "doc_1"},
         catalog=cat,
     )
-    assert swap_forecast is False
+    assert swap_forecast and forecast["stress"]["binding_status"] == "pending_semantic_review"
+    assert "base case" in forecast["stress"]["source_context"]
 
 
 async def test_v23_exact_cloud_complex_002_end_to_end(tmp_path: Path) -> None:

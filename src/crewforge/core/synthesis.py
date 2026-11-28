@@ -102,9 +102,26 @@ def build_deterministic_fast_path_output(
                 c.statement.casefold().strip() for c in covered.get(item.deliverable_id, [])
             }) > 1:
                 return None  # Let the lead reconcile distinct reviewed answers to this decision.
-        if all(d.deliverable_id in covered for d in plan.deliverables):
-            return SynthesisOutput()
-        return None
+        candidate = SynthesisOutput(user_requirements=plan.user_requirements)
+        for item in plan.deliverables:
+            findings = covered.get(item.deliverable_id, [])
+            if not findings:
+                return None
+            claim = findings[0]
+            if claim.claim_id in candidate.referenced_claim_ids:
+                continue
+            if claim.category == ClaimCategory.RECOMMENDATION:
+                lane, segments = "recommendation", candidate.recommendations
+            elif item.kind == "conditional" or claim.category == ClaimCategory.UNCERTAINTY:
+                lane, segments = "conditional_conclusion", candidate.conditional_conclusions
+            else:
+                lane, segments = "accepted_claim", candidate.accepted_segments
+            segments.append(ReleaseSegment(
+                segment_type=lane, requirement_ref=item.requirement_ref,
+                claim_refs=[ClaimVersionRef(claim_id=claim.claim_id, claim_version=claim.version)],
+            ))
+            candidate.referenced_claim_ids.append(claim.claim_id)
+        return candidate
     supported = [c for c in claims if c.is_material and c.status == ClaimStatus.SUPPORTED]
     if not supported:
         return None
@@ -239,7 +256,8 @@ class LeadSynthesizer:
                             "Used deterministic claim-locked synthesis fast path without extra "
                             "model call."
                         ),
-                        payload={"lead_messages_consumed": len(lead_inbox)},
+                        payload={"lead_messages_consumed": len(lead_inbox),
+                                 "candidate_claim_ids": fast_output.referenced_claim_ids},
                     )
                 )
                 gate_result = self._gate.evaluate(

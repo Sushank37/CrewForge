@@ -182,7 +182,14 @@ def verify_evidence_proposal(
 
     if proposal.source_type in {"calculation", "computation"}:
         records = matching_tool_records or []
-        valid_records = [r for r in records if r.success and r.inputs_grounded]
+        valid_records = [
+            r for r in records
+            if r.tool_execution_id == proposal.source_ref and r.success and r.inputs_grounded
+            and r.computed_result is not None and r.matches_proposed is not False
+            and proposal.excerpt.strip() in {
+                r.computed_result, f"{r.computed_result} {r.units}".strip(),
+            }
+        ]
         if valid_records:
             return ProvenanceCheckResult(
                 reliability=EvidenceReliability.HIGH,

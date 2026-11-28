@@ -30,9 +30,9 @@ from crewforge.schemas import (
     ClaimStatus,
     ExecutionEvent,
     ExecutionPlan,
+    ReconciliationOutput,
     RunResult,
     RunStatus,
-    SpecialistOutput,
     TaskSpec,
     TaskStatus,
 )
@@ -300,6 +300,11 @@ class NetworkRunner:
                     f"- {label}: {c.status.value}: {c.statement} | "
                     f"{reason or c.revision_notes or ''}"
                 )
+        challenges = [
+            entry["challenge"] for event in trace.events
+            for entry in event.payload.get("solution_challenges", [])
+            if not entry["open_deliverables"] or target_ids.intersection(entry["open_deliverables"])
+        ]
         lead = AgentSpec(agent_id="lead", role="Lead solution coordinator", instructions=(
             "Complete the missing parts of the solution from the team's current findings. "
             "Resolve contradictions against primary evidence. Use exact versioned premise IDs."
@@ -309,7 +314,13 @@ class NetworkRunner:
             "TARGETED REQUIREMENT RECOVERY: Return only new answers to the following items "
             "and their essential new premises. Reuse existing reviewed results by ID. "
             "Check each proposed decision against its premises and competing alternatives.",
+            "Build a complete candidate for each open item. In selections use the deliverable_id "
+            "and the exact versioned claim_refs in answer order if reviewed facts together "
+            "already answer it. For a new decision or missing work return claims, tagged with "
+            "the exact deliv_N. No repeated evidence for selected facts.",
             "Assigned atomic deliverables:\n" + deliverable_lines(assigned),
+            "Independent challenges (check against sources):\n"
+            + "\n".join(dict.fromkeys(challenges)),
             "Relevant acceptance criteria:\n" + "\n".join(plan.acceptance_criteria),
             "Primary sources and reusable findings:\n" + "\n".join(catalog.prompt_summary_lines()),
             "Remaining defects (these statements are not evidence):\n" + "\n".join(defects),
@@ -319,7 +330,7 @@ class NetworkRunner:
         try:
             response = await self._executor.execute_structured(
                 run_id=run_id, actor="lead", operation="requirement_recovery", prompt=prompt,
-                system_prompt=build_worker_system_prompt(lead), response_model=SpecialistOutput,
+                system_prompt=build_worker_system_prompt(lead), response_model=ReconciliationOutput,
                 reserve_calls_after=2, run_deadline_monotonic=run_deadline_monotonic,
             )
         except (ProviderError, BudgetError, RunDeadlineExceededError) as exc:
@@ -328,13 +339,37 @@ class NetworkRunner:
                 message=sanitize_error_message(str(exc)),
             ))
             return
+        tasks_by_item = {d.deliverable_id: completed[d.task_ref].task_id for d in assigned}
+        proposals = []
+        for proposal in response.parsed.claims:
+            tags = list(proposal.requirement_refs)
+            if not any(ref.startswith("deliv_") for ref in tags):
+                matches = [d for d in assigned if d.requirement_ref in tags]
+                if len(matches) == 1:
+                    tags.append(matches[0].deliverable_id)
+            proposals.append(proposal.model_copy(update={"requirement_refs": tags}))
         _, recovered, _ = await self._ledger.record_specialist_outputs(
             run_id=run_id, agent_id="lead", task_id=None, original_prompt=original_prompt,
             dependency_findings_text="", plan_assumptions=plan.assumptions,
             evidence_proposals=response.parsed.evidence_proposals,
-            claim_proposals=response.parsed.claims,
-            recovery_tasks={d.deliverable_id: completed[d.task_ref].task_id for d in assigned},
+            claim_proposals=proposals, recovery_tasks=tasks_by_item,
         )
+        selections = await self._ledger.record_solution_selections(
+            run_id, response.parsed.selections, tasks_by_item,
+            {d.deliverable_id for d in plan.deliverables if d.kind == "conditional"},
+        )
+        recovered.extend(selections)
+        await self._db.append_event(ExecutionEvent(
+            run_id=run_id, actor="lead", event_type="solution_candidate",
+            message="Submitted candidate claims and selections for independent review.",
+            payload={
+                "proposed_selections": len(response.parsed.selections),
+                "persisted_selections": len(selections), "proposed_claims": len(proposals),
+                "candidate_claims": [c.claim_id for c in recovered],
+                "response_fields": sorted(response.parsed.model_fields_set),
+                "previously_covered": list(covered), "target_deliverables": list(tasks_by_item),
+            },
+        ))
         if recovered:
             await self._reviewer.review_claims(
                 run_id=run_id, original_prompt=original_prompt, plan=plan,

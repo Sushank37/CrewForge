@@ -9,6 +9,7 @@ from crewforge.core.budget import BudgetManager
 from crewforge.core.orchestrator import NetworkRunner
 from crewforge.schemas import (
     PlannerOutput,
+    ReconciliationOutput,
     ReviewerBatchOutput,
     RunStatus,
     SpecialistOutput,
@@ -109,7 +110,7 @@ async def test_targeted_recovery_qualification_and_synthesis_omissions(tmp_path,
                     ("req_3", "State whether the inspection outcome is known", "explanation"),
                 ],
             )
-        if schema is SpecialistOutput and "TARGETED REQUIREMENT RECOVERY" in prompt:
+        if schema is ReconciliationOutput:
             assigned = prompt.split("Assigned atomic deliverables", 1)[1].split(
                 "Relevant acceptance criteria", 1,
             )[0]
@@ -219,7 +220,7 @@ async def test_feasible_claim_does_not_count_as_optimality_proof(tmp_path):
                 ("req_1", "Report a project that fits the budget", "explanation"),
                 ("req_1", "Prove optimality across feasible alternatives", "explanation"),
             ])
-        if schema is SpecialistOutput and "TARGETED REQUIREMENT RECOVERY" in prompt:
+        if schema is ReconciliationOutput:
             recovered.append(prompt)
             return {"findings": "No complete optimality argument.", "claims": []}
         if schema is SpecialistOutput:

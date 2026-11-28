@@ -8,6 +8,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 def _utc_now() -> datetime:
@@ -560,7 +561,7 @@ class ProposedEvidence(BaseModel):
 class ProposedClaim(BaseModel):
     """Compact atomic claim assertion emitted by a specialist."""
 
-    claim_ref: str | None = Field(default=None, max_length=32)
+    claim_ref: SkipJsonSchema[str | None] = Field(default=None, max_length=32)
     statement: str = Field(min_length=1, max_length=360)
     category: ClaimCategory = ClaimCategory.INFERENCE
     evidence_indices: list[int] = Field(default_factory=list)
@@ -610,6 +611,21 @@ class SpecialistOutput(BaseModel):
     task_completed: bool = True
 
 
+class SolutionSelection(BaseModel):
+    """A proposed joint answer from existing reviewed facts, in presentation order."""
+
+    deliverable_id: str
+    claim_refs: list[str] = Field(min_length=1, max_length=48)
+
+
+class ReconciliationOutput(BaseModel):
+    """Lead selects current findings or proposes only genuinely missing reasoning."""
+
+    selections: list[SolutionSelection] = Field(default_factory=list, max_length=48)
+    claims: list[ProposedClaim] = Field(default_factory=list)
+    evidence_proposals: list[ProposedEvidence] = Field(default_factory=list)
+
+
 class TargetedClaimRevision(BaseModel):
     """Explicit claim-ID and version-targeted revision emitted by a specialist."""
 
@@ -652,7 +668,6 @@ class ReviewerVerdictItem(BaseModel):
 
     claim_id: str = Field(min_length=1)
     claim_version: int | None = Field(default=None, ge=1)
-    review_dimension: str = Field(default="combined_evidence_consistency", min_length=1)
     decision: ReviewDecision
     rationale: str = Field(min_length=1, max_length=250)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -665,6 +680,7 @@ class ReviewerBatchOutput(BaseModel):
     """Batched independent reviewer output."""
 
     verdicts: list[ReviewerVerdictItem] = Field(default_factory=list)
+    solution_challenge: str | None = Field(default=None, max_length=360)
     missing_requirement_coverage: list[str] = Field(default_factory=list)
 
 

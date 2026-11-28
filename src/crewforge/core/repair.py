@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from graphlib import TopologicalSorter
 
 from crewforge.config import CrewForgeSettings, sanitize_error_message
 from crewforge.core.claim_graph import ClaimDependencyGraph
@@ -28,8 +29,10 @@ from crewforge.schemas import (
 )
 from crewforge.storage.database import CrossRunReferenceError, Database
 from crewforge.tools.arithmetic import (
+    DeterministicArithmeticTool,
     ProvenanceCatalog,
     build_provenance_catalog,
+    make_tool_target,
     provenance_failures,
 )
 
@@ -168,10 +171,18 @@ def _rebind_calculation(
             premise_id = owner.claim_id if owner else ""
         if premise := latest.get(premise_id):
             ref = f"{premise.claim_id}@v{premise.version}"
-            quote = None
+            if premise.tool_execution_ids:
+                quote = None
             rebound = True
 
         units = detail.get("units", "")
+        # A typed result already carries its period/denominator. In a new revision
+        # restore the exact source unit when the proposal supplied only its numerator.
+        # Never exchange currencies, change values, or infer a conversion.
+        if premise and len(premise.tool_execution_ids) == 1:
+            source = tools.get(premise.tool_execution_ids[0])
+            if source and units and source.units.casefold().startswith(units.casefold() + "/"):
+                units = source.units
         if premise_id and not units:
             units = detail.get("source_units", "")
             if units == "%" and detail.get("value") != detail.get("source_value"):
@@ -301,8 +312,8 @@ class TargetedRepairEngine:
                 remaining_calls = self._settings.max_model_calls_per_run - int(
                     summary["run_committed_calls"]
                 )
-                # Need at least 1 call for repair + 1 for re-review + 1 for synthesis = 3.
-                if remaining_calls < 3 + reserve_gap_calls:
+                # Typed metadata repair needs only independent review plus synthesis.
+                if remaining_calls < 2 + reserve_gap_calls:
                     result.skipped_reason = (
                         "Remaining call budget reserved for re-review and synthesis."
                     )
@@ -340,6 +351,72 @@ class TargetedRepairEngine:
                     repair_attempts[c.claim_id] = repair_attempts.get(c.claim_id, 0) + 1
 
                 agent = agents_by_id[author_id]
+                dep_texts: list[str] = []
+                for c in claims_for_author:
+                    if c.task_id and c.task_id in tasks_by_id:
+                        task = tasks_by_id[c.task_id]
+                        for dep_id in task.depends_on:
+                            dep_task = tasks_by_id.get(dep_id)
+                            if dep_task and dep_task.findings:
+                                dep_texts.append(dep_task.findings)
+                dep_blob = "\n".join(dict.fromkeys(dep_texts))
+
+                repair_catalog = build_provenance_catalog(
+                    original_prompt=original_prompt,
+                    verified_evidence=[e for e in fresh_trace.evidence if e.verified_in_input],
+                    all_claims=fresh_trace.claims,
+                    tool_records=fresh_trace.tool_executions,
+                    assumptions=plan.assumptions,
+                    run_id=run_id,
+                )
+                # Fix metadata on an existing typed edge without regenerating a solution.
+                # Only deterministic operand objections qualify. A semantic challenge must
+                # go back to the specialist, even if the numerical value is unchanged.
+                remaining_claims = []
+                owners = {t: c for c in fresh_trace.claims for t in c.tool_execution_ids}
+                for disputed in claims_for_author:
+                    objections = verdicts_by_key.get((disputed.claim_id, disputed.version), [])
+                    ids = disputed.tool_execution_ids
+                    record = tool_by_id.get(ids[0]) if len(ids) == 1 else None
+                    if not record or record.inputs_grounded or not objections or any(
+                        v.review_dimension != "numbers" for v in objections
+                    ):
+                        remaining_claims.append(disputed)
+                        continue
+                    request = _rebind_calculation(disputed, tool_by_id, owners, fresh_latest)
+                    if not request or any(
+                        p.claim_id not in fresh_latest
+                        or fresh_latest[p.claim_id].status != ClaimStatus.SUPPORTED
+                        for p in disputed.premise_refs
+                    ):
+                        remaining_claims.append(disputed)
+                        continue
+                    checked = DeterministicArithmeticTool.evaluate(
+                        run_id=run_id, actor=author_id, request=request, catalog=repair_catalog,
+                    )
+                    if not checked.inputs_grounded or checked.matches_proposed is not True:
+                        remaining_claims.append(disputed)
+                        continue
+                    revised = await self._ledger.apply_targeted_revision(
+                        run_id=run_id, original_prompt=original_prompt,
+                        author_agent_id=author_id, target_claim_id=disputed.claim_id,
+                        expected_version=disputed.version, new_statement=disputed.statement,
+                        computation_request=request,
+                        revision_notes="Rebound typed operands to current reviewed result IDs.",
+                    )
+                    result.revised_claims.append(revised)
+                    revised_this_round.append(revised)
+                    result.invalidated_dependents.extend(await self._graph.invalidate_dependents(
+                        run_id=run_id, root_claim_id=revised.claim_id,
+                        reason="Rebound arithmetic operand metadata.",
+                        superseded_version=disputed.version,
+                    ))
+                claims_for_author = remaining_claims
+                if not claims_for_author:
+                    continue
+                if remaining_calls < 3 + reserve_gap_calls:
+                    result.skipped_reason = "Remaining calls reserved for re-review and synthesis."
+                    continue
                 # Send structured review messages from objecting reviewers via MessageBus.
                 sent_review_msgs = []
                 for disputed in claims_for_author:
@@ -373,24 +450,6 @@ class TargetedRepairEngine:
                     mark_delivered=True,
                 )
 
-                dep_texts: list[str] = []
-                for c in claims_for_author:
-                    if c.task_id and c.task_id in tasks_by_id:
-                        task = tasks_by_id[c.task_id]
-                        for dep_id in task.depends_on:
-                            dep_task = tasks_by_id.get(dep_id)
-                            if dep_task and dep_task.findings:
-                                dep_texts.append(dep_task.findings)
-                dep_blob = "\n".join(dict.fromkeys(dep_texts))
-
-                repair_catalog = build_provenance_catalog(
-                    original_prompt=original_prompt,
-                    verified_evidence=[e for e in fresh_trace.evidence if e.verified_in_input],
-                    all_claims=fresh_trace.claims,
-                    tool_records=fresh_trace.tool_executions,
-                    assumptions=plan.assumptions,
-                    run_id=run_id,
-                )
                 revision_prompt = _build_revision_prompt(
                     original_prompt=original_prompt,
                     disputed_claims=claims_for_author,
@@ -597,24 +656,25 @@ class TargetedRepairEngine:
             tools = {t.tool_execution_id: t for t in trace.tool_executions}
             owners = {tid: c for c in trace.claims for tid in c.tool_execution_ids}
 
-            for claim in latest_all:
-                if not (
+            staged = set()
+            graph = {
+                c.claim_id: set(c.depends_on_claim_ids) | {p.claim_id for p in c.premise_refs}
+                for c in latest_all
+            }
+            for cid in TopologicalSorter(graph).static_order():
+                claim = latest_by_id.get(cid)
+                if not claim or not (
                     claim.status == ClaimStatus.STALE
                     or claim.verification_status == VerificationStatus.STALE_PENDING_REVIEW
                 ):
                     continue
-                up_ids = sorted(
-                    {p.claim_id for p in claim.premise_refs} | set(claim.depends_on_claim_ids)
-                )
-                if not up_ids:
-                    continue
-                all_supported = all(
-                    (up := latest_by_id.get(uid)) is not None
-                    and up.status == ClaimStatus.SUPPORTED
-                    and up.verification_status != VerificationStatus.STALE_PENDING_REVIEW
-                    for uid in up_ids
-                )
-                if not all_supported:
+                up_ids = sorted(graph[cid])
+                if not up_ids or not all(
+                    uid in staged or (
+                        (up := latest_by_id.get(uid)) and up.status == ClaimStatus.SUPPORTED
+                        and up.verification_status != VerificationStatus.STALE_PENDING_REVIEW
+                    ) for uid in up_ids
+                ):
                     continue
                 key = (claim.claim_id, tuple(latest_by_id[uid].version for uid in up_ids))
                 if key in attempted:
@@ -634,6 +694,17 @@ class TargetedRepairEngine:
                     revision_notes="Revalidate dependent claim using current premise versions.",
                 )
                 ready.append(new_claim)
+                latest_by_id[cid] = new_claim
+                if new_claim.tool_execution_ids:
+                    current_tools = await self._db.get_tool_executions_for_run(run_id)
+                    tools.update({t.tool_execution_id: t for t in current_tools})
+                    if not all(
+                        tid in tools and make_tool_target(tools[tid]).is_trusted
+                        for tid in new_claim.tool_execution_ids
+                    ):
+                        continue
+                    owners.update(dict.fromkeys(new_claim.tool_execution_ids, new_claim))
+                staged.add(cid)  # Provisional until this whole batch is independently reviewed.
 
             if not ready:
                 break

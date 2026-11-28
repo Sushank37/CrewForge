@@ -56,7 +56,7 @@ def _scripted_handler(prompt: str, response_model: Any) -> Any:
             "assumptions": [],
             "missing_information": [],
         }
-    if schema_name in {"WorkerOutput", "SpecialistOutput"}:
+    if schema_name in {"WorkerOutput", "SpecialistOutput", "ReconciliationOutput"}:
         return {
             "findings": "Verified budget ceiling is 420 USD from doc_1.",
             "evidence": [

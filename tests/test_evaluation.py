@@ -1609,7 +1609,7 @@ def test_phase5e_compact_protocol_evidence_lineage_recovery_and_telemetry(tmp_pa
                         }
                     ],
                 }
-            if "Specialist" in name and "TARGETED REQUIREMENT RECOVERY" in prompt:
+            if name == "ReconciliationOutput":
                 return {"findings": "The optional item remains unverified.", "claims": []}
             if "Specialist" in name:
                 worker_calls += 1

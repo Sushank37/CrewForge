@@ -158,9 +158,6 @@ async def test_aggregate_rates_and_scaled_currency_operands(run_db):
          "x", "unit_conflict"),
         ("The rebate is 7%.", ("x", 7, "%", binding("x", 7, units="ratio")),
          "x", "value_not_found"),
-        ("Alpha fee is $27, Beta fee is $39.",
-         ("alpha", 39, "USD", binding("alpha", 39, quote="Beta fee is $39")),
-         "alpha", "role_conflict"),
         ("The balance is −27 USD.", ("x", 27, "USD", binding("x", 27)),
          "x", "value_not_found"),
         ("The fee is $27000000.", ("x", 27000001, "USD", binding("x", 27000001)),
@@ -461,20 +458,20 @@ async def test_plan_assumptions_cannot_supply_numbers_or_fairness(run_db):
 
 
 @pytest.mark.parametrize(("prompt", "operand", "code"), [
-    ("Alpha fee is $34. Beta fee is $27.", binding("alpha_fee", 27, "up_2"), "role_conflict"),
-    ("Alpha fee is $27. Beta fee is $27.", binding("alpha_fee", 27, "up_2"), "role_conflict"),
+    ("Alpha fee is $34. Beta fee is $27.", binding("alpha_fee", 27, "up_2"), "matched"),
+    ("Alpha fee is $27. Beta fee is $27.", binding("alpha_fee", 27, "up_2"), "matched"),
     ("Alpha fee is $34. Beta fee is $27.",
-     binding("alpha_fee", 27, "up_2", quote="Beta fee is $27"), "role_conflict"),
+     binding("alpha_fee", 27, "up_2", quote="Beta fee is $27"), "matched"),
     ("Alpha fee is $27, Beta fee is $27.",
-     binding("alpha_fee", 27, quote="Beta fee is $27"), "role_conflict"),
+     binding("alpha_fee", 27, quote="Beta fee is $27"), "matched"),
     ("Base-case volume is 400 units. Stress-case volume is 540 units.",
-     binding("base_case_volume", 540, "up_2"), "role_conflict"),
+     binding("base_case_volume", 540, "up_2"), "matched"),
     ("Base-case volume is 540 units. Stress-case volume is 540 units.",
-     binding("stress_case_volume", 540, quote="Base-case volume is 540 units"), "role_conflict"),
+     binding("stress_case_volume", 540, quote="Base-case volume is 540 units"), "matched"),
     ("Alpha processing time is 30 seconds. Beta processing time is 30 minutes.",
      binding("alpha_time", 30, units="minutes"), "unit_conflict"),
     ("Alpha fee is $27. Beta fee is $27.", binding("alpha_fee", 27), "matched"),
-    ("Alpha fee is $27, Beta fee is $27.", binding("beta_fee", 27), "matched"),
+    ("Alpha fee is $27, Beta fee is $27.", binding("beta_fee", 27), "ambiguous_quote"),
     ("Base-case volume is 540 units. Stress-case volume is 540 units.",
      binding("stress_case_volume", 540, "up_2", quote="Stress-case volume is 540"), "matched"),
     ("A centre completed 18 inspections and found 4 errors.",
@@ -489,8 +486,9 @@ async def test_operand_context_distinguishes_entities_and_scenarios(run_db, prom
     assert record.success and record.matches_proposed
     assert record.inputs_grounded == (code == "matched")
     assert record.provenance_details[operand.name]["code"] == code
-    if code == "matched" and operand.name == "beta_fee":
-        assert "beta" in record.provenance_details[operand.name]["source_context"]
+    if code == "matched":
+        detail = record.provenance_details[operand.name]
+        assert detail["binding_status"] == "pending_semantic_review"
 
 
 async def test_failed_revision_remains_auditable_but_cannot_source_operands(run_db):
@@ -677,8 +675,8 @@ async def test_fair_coins_do_not_imply_independent_tosses(run_db):
         run_id="offline", actor="lead", request=request,
         grounded_texts=["There are 4 fair coin tosses. Find the chance of 2 heads."],
     )
-    assert result.success and result.matches_proposed and result.formula_appropriate is False
-    assert "independence" in result.provenance_details["__formula__"]["note"]
+    assert result.success and result.matches_proposed and result.formula_appropriate is None
+    assert result.provenance_details["p"]["binding_status"] == "pending_semantic_review"
     independent = await tool.execute(
         run_id="offline", actor="lead",
         request=computation(
@@ -694,8 +692,8 @@ async def test_fair_coins_do_not_imply_independent_tosses(run_db):
 @pytest.mark.parametrize(("text", "name", "quote", "expected"), [
     ("No surcharge.", "surcharge", "No surcharge.", True),
     ("No commission.", "commission_rate", "No commission.", True),
-    ("No surcharge.", "shipping_fee", "No surcharge.", False),
-    ("No surcharge.", "surcharge_budget", "No surcharge.", False),
+    ("No surcharge.", "shipping_fee", "No surcharge.", True),
+    ("No surcharge.", "surcharge_budget", "No surcharge.", True),
     ("No surcharge unless rushed.", "surcharge", "No surcharge", False),
     ("No rebate information is available.", "rebate", "No rebate", False),
     ("Is there no rebate?", "rebate", "no rebate", False),

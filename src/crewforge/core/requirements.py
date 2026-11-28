@@ -19,13 +19,28 @@ def deliverable_lines(items: list[RequirementDeliverable]) -> str:
     )
 
 
-def claim_addresses_kind(claim: Claim, item: RequirementDeliverable) -> bool:
+def claim_addresses_kind(
+    claim: Claim, item: RequirementDeliverable, latest: dict[str, Claim] | None = None,
+) -> bool:
     if claim.category == ClaimCategory.UNCERTAINTY:
         return True  # Review must explicitly confirm the missing evidence justifies uncertainty.
     if item.kind == "recommendation":
         return claim.category == ClaimCategory.RECOMMENDATION
     if item.kind == "calculation":
-        return claim.category == ClaimCategory.COMPUTATION
+        if claim.category == ClaimCategory.COMPUTATION:
+            return True
+        # A lead selection can display multiple existing results, but cannot add a
+        # single digit or word. Their calculation records stay with their owners.
+        members = [(latest or {}).get(ref.claim_id) for ref in claim.premise_refs]
+        return (
+            claim.author_agent_id == "lead" and claim.category == ClaimCategory.INFERENCE
+            and bool(members) and all(
+                c and c.status == ClaimStatus.SUPPORTED and c.version == ref.claim_version
+                and c.category == ClaimCategory.COMPUTATION and c.tool_execution_ids
+                for c, ref in zip(members, claim.premise_refs, strict=True)
+            )
+            and claim.statement == " ".join(c.statement for c in members if c)
+        )
     return claim.is_material and claim.category != ClaimCategory.RECOMMENDATION
 
 
@@ -76,7 +91,8 @@ def reviewed_deliverables(
         for item_id in approved.get(key, set()):
             item = items.get(item_id)
             if (
-                item and item_id in claim.requirement_refs and claim_addresses_kind(claim, item)
+                item and item_id in claim.requirement_refs
+                and claim_addresses_kind(claim, item, latest)
             ):
                 covered.setdefault(item_id, []).append(claim)
     return covered
