@@ -632,7 +632,10 @@ async def test_invalid_declared_premise_cannot_seed_a_same_response_intermediate
     assert all(record.success and record.matches_proposed for record in records)
     assert all(not record.inputs_grounded for record in records)
     assert records[0].provenance_details["__claim_premises__"]["values"] == ["clm_unknown"]
-    assert records[1].provenance_details["weight"]["code"] == "unknown_reference"
+    assert records[1].provenance_details["weight"]["code"] == "untrusted_reference"
+    assert records[1].provenance_details["weight"]["source_tool_execution_id"] == (
+        records[0].tool_execution_id
+    )
 
 
 async def test_elapsed_days_requires_two_grounded_calendar_dates(run_db):
@@ -686,3 +689,186 @@ async def test_fair_coins_do_not_imply_independent_tosses(run_db):
         grounded_texts=["There are 4 fair independent coin tosses. Find the chance of 2 heads."],
     )
     assert independent.inputs_grounded and independent.matches_proposed
+
+
+@pytest.mark.parametrize(("text", "name", "quote", "expected"), [
+    ("No surcharge.", "surcharge", "No surcharge.", True),
+    ("No commission.", "commission_rate", "No commission.", True),
+    ("No surcharge.", "shipping_fee", "No surcharge.", False),
+    ("No surcharge.", "surcharge_budget", "No surcharge.", False),
+    ("No surcharge unless rushed.", "surcharge", "No surcharge", False),
+    ("No rebate information is available.", "rebate", "No rebate", False),
+    ("Is there no rebate?", "rebate", "no rebate", False),
+    ("No commission.", "commission", None, False),
+])
+async def test_zero_requires_an_explicit_matching_exclusion(run_db, text, name, quote, expected):
+    db, _ = run_db
+    rec = await DeterministicArithmeticTool(db).execute(
+        run_id="offline", actor="lead", grounded_texts=[text],
+        request=computation(name, 0, "USD", binding(name, 0, quote=quote)),
+    )
+    assert rec.matches_proposed and rec.inputs_grounded == expected
+
+
+async def test_legacy_percent_complement_requires_a_sourced_fraction(run_db):
+    db, _ = run_db
+    tool = DeterministicArithmeticTool(db)
+    for source, ok in [("The rebate is 8%.", True), ("The fee is $0.08.", False)]:
+        record = await tool.execute(
+            run_id="offline", actor="lead",
+            grounded_texts=["The price is $50.", source],
+            request=computation("50*(1-0.08)", 46, "USD",
+                                binding("price", 50), binding("rebate", "0.08", "up_2")),
+        )
+        assert record.matches_proposed and record.inputs_grounded == ok
+
+
+async def test_failed_local_alias_rebinds_only_after_source_repair(run_db):
+    db, settings = run_db
+    ledger = ClaimLedger(db)
+    agent = AgentSpec(run_id="offline", role="Estimator", instructions="Calculate an invoice.")
+    task = TaskSpec(run_id="offline", title="Invoice", description="Apply the rates",
+                    assigned_agent_id=agent.agent_id)
+    plan = ExecutionPlan(run_id="offline", goal="Invoice", agents=[agent], tasks=[task])
+    await db.save_execution_plan(plan)
+    prompt = "One carton costs $16. Wrapping costs $3. Delivery costs $7."
+    subtotal = "The wrapped carton costs $19."
+    total = "The delivered carton costs $26."
+    request = computation("carton+wrap", 19, "USD", binding("carton", 16),
+                          binding("wrap", 3, "up_2"))
+    _, claims, records = await ledger.record_specialist_outputs(
+        run_id="offline", agent_id=agent.agent_id, task_id=task.task_id, original_prompt=prompt,
+        dependency_findings_text="", evidence_proposals=[], claim_proposals=[
+            claim(subtotal, computation("carton+wrap", 19, "USD", binding("carton", 16),
+                                        binding("wrap", 3, "up_3")), alias="wrapped"),
+            claim(total, computation("wrapped+delivery", 26, "USD",
+                                     binding("wrapped", 19, "wrapped"),
+                                     binding("delivery", 7, "up_3"))),
+        ],
+    )
+    assert not any(r.inputs_grounded for r in records)
+    assert records[1].provenance_details["wrapped"]["code"] == "untrusted_reference"
+    assert claims[1].premise_refs[0].claim_id == claims[0].claim_id
+
+    def script(model_prompt, schema):
+        if schema is RevisionOutput:
+            assert "wrap=3" in model_prompt
+            return {"updated_findings": subtotal, "revisions": [{
+                "target_claim_id": claims[0].claim_id, "expected_version": 1,
+                "new_statement": subtotal, "computation": request.model_dump(),
+                "revision_notes": "Use the wrapping clause.",
+            }, {
+                "target_claim_id": claims[1].claim_id, "expected_version": 1,
+                "new_statement": "The total is $900.", "revision_notes": "Unrequested rewrite.",
+            }]}
+        assert schema is ReviewerBatchOutput
+        cid, version = re.search(r"Claim (clm_\w+) \(version=(\d+)", model_prompt).groups()
+        assert int(version) == 2
+        if cid == claims[0].claim_id:
+            assert subtotal in model_prompt and "computed=19" in model_prompt
+        else:
+            assert cid == claims[1].claim_id and total in model_prompt
+            assert "computed=26" in model_prompt and f"{claims[0].claim_id}@v2" in model_prompt
+        return {"verdicts": [{"claim_id": cid, "claim_version": 2, "decision": "approve",
+                              "rationale": "The stated amounts sum to the recorded result."}]}
+
+    executor = ModelExecutor(provider=FakeProvider(handler=script), database=db,
+                             budget_manager=BudgetManager(db, settings), settings=settings)
+    reviewer = ReviewerPool(executor=executor, database=db, settings=settings)
+    initial = await reviewer.review_claims(run_id="offline", original_prompt=prompt, plan=plan)
+    repair = TargetedRepairEngine(executor=executor, database=db, ledger=ledger,
+                                  message_bus=MessageBus(db), reviewer_pool=reviewer,
+                                  settings=settings)
+    outcome = await repair.resolve_disputes(run_id="offline", original_prompt=prompt, plan=plan,
+                                            blocking_claims=initial.blocking_claims,
+                                            verdicts=initial.verdicts)
+    assert outcome.repair_calls == 1 and outcome.re_review_calls == 2
+    current = await db.get_claims_for_run("offline", latest_only=True)
+    assert all(c.version == 2 and c.status == ClaimStatus.SUPPORTED for c in current)
+    assert current[1].statement == total and current[1].premise_refs[0].claim_version == 2
+    trace = await db.get_run_trace("offline")
+    assert any(e.event_type == "revision_rejected" for e in trace.events)
+    assert all(c.statement != "The total is $900." for c in trace.claims)
+
+
+async def test_transitive_invalidation_uses_root_version_only_on_direct_edges(run_db):
+    from crewforge.core.claim_graph import ClaimDependencyGraph
+
+    db, _ = run_db
+    ledger = ClaimLedger(db)
+    prompt = "The room is booked."
+    _, original, _ = await ledger.record_specialist_outputs(
+        run_id="offline", agent_id="lead", task_id=None, original_prompt=prompt,
+        dependency_findings_text="", evidence_proposals=[], claim_proposals=[
+            ProposedClaim(claim_ref="booking", statement=prompt),
+            ProposedClaim(statement="The room is occupied.", premise_claim_ids=["booking"]),
+        ],
+    )
+    root, middle = original
+    middle = await ledger.apply_targeted_revision(
+        run_id="offline", target_claim_id=middle.claim_id, expected_version=1,
+        new_statement="The reservation occupies the room.", author_agent_id="lead",
+        original_prompt=prompt,
+    )
+    _, leaves, _ = await ledger.record_specialist_outputs(
+        run_id="offline", agent_id="lead", task_id=None, original_prompt=prompt,
+        dependency_findings_text="", evidence_proposals=[], claim_proposals=[
+            ProposedClaim(statement="Reserve the annex instead.", category="recommendation",
+                          premise_claim_ids=[f"{middle.claim_id}@v2"]),
+            ProposedClaim(statement="Silently dropping an obsolete edge is unsafe.",
+                          premise_claim_ids=[f"{middle.claim_id}@v1", root.claim_id]),
+        ],
+    )
+    assert len(leaves) == 1 and leaves[0].premise_refs[0].claim_version == 2
+    await ledger.apply_targeted_revision(
+        run_id="offline", target_claim_id=root.claim_id, expected_version=1,
+        new_statement="The reservation has been cancelled.", author_agent_id="lead",
+        original_prompt=prompt,
+    )
+    stale = await ClaimDependencyGraph(db).invalidate_dependents(
+        run_id="offline", root_claim_id=root.claim_id, superseded_version=1, reason="Cancelled.",
+    )
+    assert {c.claim_id for c in stale} == {middle.claim_id, leaves[0].claim_id}
+    assert all(c.status == ClaimStatus.STALE for c in stale)
+
+
+async def test_exact_prompt_citation_cannot_borrow_another_entitys_quote(run_db):
+    db, _ = run_db
+    ledger = ClaimLedger(db)
+    evidence, _, _ = await ledger.record_specialist_outputs(
+        run_id="offline", agent_id="lead", task_id=None, original_prompt=(
+            "Rowan declined delivery. Linden accepted delivery."
+        ), dependency_findings_text="", claim_proposals=[], evidence_proposals=[
+            ProposedEvidence(source_type="user_prompt", source_ref="up_1",
+                             excerpt="Linden accepted delivery."),
+            ProposedEvidence(source_type="user_prompt", source_ref="up_2",
+                             excerpt="Linden accepted delivery."),
+        ],
+    )
+    assert [e.verified_in_input for e in evidence] == [False, True]
+
+
+async def test_evidence_and_arithmetic_share_document_aliases_for_chunked_sources(run_db):
+    db, _ = run_db
+    for name, excerpt in [("runbook", "Archive the duplicate."), ("runbook", "Keep the original."),
+                          ("doc_1", "Restoration takes 8 hours.")]:
+        await db.insert_evidence(Evidence(
+            run_id="offline", created_by="lead", source_type="external_retrieved",
+            verified_in_input=True, source_ref=name, excerpt=excerpt,
+        ))
+    ledger = ClaimLedger(db)
+    for _ in range(2):
+        evds, _, records = await ledger.record_specialist_outputs(
+            run_id="offline", agent_id="lead", task_id=None, original_prompt="How long to restore?",
+            dependency_findings_text="", evidence_proposals=[
+                ProposedEvidence(source_type="external_retrieved", source_ref="doc_1",
+                                 excerpt="Restoration takes 8 hours."),
+                ProposedEvidence(source_type="external_retrieved", source_ref="doc_2",
+                                 excerpt="Restoration takes 8 hours."),
+            ], claim_proposals=[
+                claim("Restore in 8 hours.", computation("duration", 8, "hours",
+                                                         binding("duration", 8, "doc_1"))),
+            ],
+        )
+        assert [e.verified_in_input for e in evds] == [True, False]
+        assert records[0].inputs_grounded

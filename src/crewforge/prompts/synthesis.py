@@ -12,6 +12,9 @@ def build_synthesis_system_prompt() -> str:
         "You are the Lead Synthesizer of CrewForge. Organize the final release strictly from "
         "reviewed claims, deterministic tool records, and completed task context.\n\n"
         "Release discipline rules:\n"
+        "- Lead with the decision and decisive comparison. Group related current premises by "
+        "scenario, then give the grounds and qualifications. Select claims by version reference "
+        "and leave segment text empty so the renderer supplies their approved wording.\n"
         "- CLAIM-LOCKED RELEASE: copy the exact `statement` text verbatim from `supported` "
         "claims (or set `text` empty) and provide exact `(claim_id, claim_version)` in "
         "`claim_refs`. Any rewritten statement is rejected by the Honesty Gate.\n"
@@ -47,7 +50,7 @@ def build_synthesis_user_prompt(
     )
     completed_block = (
         "\n".join(
-            f"- [{t.task_ref or t.task_id}] {t.title}: {t.findings or 'No findings.'}"
+            f"- [{t.task_ref or t.task_id}] {t.title}"
             for t in completed_tasks
         )
         or "None."

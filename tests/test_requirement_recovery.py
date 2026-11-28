@@ -251,6 +251,7 @@ async def test_feasible_claim_does_not_count_as_optimality_proof(tmp_path):
         assert not result.verification.answer_complete
         assert result.verification.requirement_coverage == 0.5
         assert len(recovered) == 1 and "Prove optimality" in recovered[0]
+        assert "Feasibility alone is established." in recovered[0]
         assert feasible in result.answer and "Outstanding" in result.answer
     finally:
         await db.close()

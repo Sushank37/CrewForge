@@ -254,6 +254,8 @@ async def test_true_concurrent_execution_dependency_ordering_and_messaging(
         if response_model is FollowUpOutput:
             followup_prompts.append(prompt)
             assert "Note from a1: verify constraint X=42." in prompt
+            assert "Finding B completed." in prompt
+            assert "Prompt includes keyword alpha." in prompt
             targets = _TARGET_CLAIM_RE.findall(prompt)
             assert targets, "FollowUp prompt must expose target claim_id and expected_version"
             cid, cver = targets[0]

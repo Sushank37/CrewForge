@@ -13,7 +13,7 @@ from crewforge.schemas import (
     ProposedEvidence,
     ToolExecutionRecord,
 )
-from crewforge.tools.arithmetic import extract_numbers_from_text
+from crewforge.tools.arithmetic import extract_numbers_from_text, split_prompt_clauses
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _NEGATION_WORDS = frozenset(
@@ -148,9 +148,14 @@ def verify_evidence_proposal(
         )
 
     if proposal.source_type == "user_prompt":
+        source = original_prompt
+        if proposal.source_ref.startswith("up_"):
+            clauses = {f"up_{idx}": clause for idx, clause in
+                       enumerate(split_prompt_clauses(original_prompt), start=1)}
+            source = clauses.get(proposal.source_ref, "")
         matched, note = _preserves_numbers_and_negation(
             excerpt=proposal.excerpt,
-            source_text=original_prompt,
+            source_text=source,
         )
         return ProvenanceCheckResult(
             reliability=EvidenceReliability.MEDIUM if matched else EvidenceReliability.UNVERIFIED,

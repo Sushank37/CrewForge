@@ -27,6 +27,7 @@ from crewforge.schemas import (
     VerificationStatus,
 )
 from crewforge.storage.database import Database
+from crewforge.tools.arithmetic import build_provenance_catalog
 from tests.fake_provider import FakeProvider
 from tests.test_requirement_recovery import approved, one_task_plan
 
@@ -225,6 +226,11 @@ async def test_advice_and_condition_check_transitive_arithmetic_lineage(tmp_path
         "requirement_refs": ["deliv_2"],
     })
     all_claims = [premise, derived, intermediate, advice, conditional]
+    catalog = build_provenance_catalog(
+        original_prompt="Load 30, handling adds 5, capacity is 40.",
+        all_claims=all_claims, tool_records=[record], run_id="run",
+    )
+    assert catalog.targets_by_key[intermediate.claim_id].is_trusted == (not superseded)
     verdicts = [
         ReviewVerdict(
             run_id="run", claim_id=c.claim_id, claim_version=c.version, reviewer_id="reviewer",

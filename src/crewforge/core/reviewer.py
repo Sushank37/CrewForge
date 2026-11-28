@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from graphlib import TopologicalSorter
 
 from crewforge.config import CrewForgeSettings
 from crewforge.core.claim_graph import ClaimDependencyGraph
@@ -57,6 +58,9 @@ def _build_review_system_prompt(dimension: str) -> str:
         "- Return one verdict entry in `verdicts` for EVERY claim listed below.\n"
         "- For numeric claims, verify whether expression and units match the user question "
         "(even when arithmetic succeeded).\n"
+        "- Challenge the solution with an alternative interpretation or counterexample where it "
+        "could change the answer. Check scenario scope, completeness and optimality as applicable. "
+        "Give the smallest concrete correction.\n"
         "- For inferences, verify the premises. Treat proposed plan or worker assumptions as "
         "conditional and require primary evidence for empirical values.\n"
         "- For each approved claim, list the exact deliv_N IDs it independently fulfills in "
@@ -123,6 +127,8 @@ def _build_review_user_prompt(
                         elif resolved_id in tool_by_id:
                             t_ref = tool_by_id[resolved_id]
                             src_snippet = f" -> {t_ref.computed_result} {t_ref.units}".strip()
+                    if not src_snippet and detail.get("source_context"):
+                        src_snippet = f' -> "{detail["source_context"]}"'
                     var_bindings.append(f"{v_name}={v_val} [{v_ref}{src_snippet}]")
                 bindings_str = "; ".join(var_bindings) if var_bindings else "none"
                 tool_lines.append(
@@ -141,7 +147,8 @@ def _build_review_user_prompt(
                 if (p_obj is not None and p_obj.version == p.claim_version)
                 else "stale_or_missing"
             )
-            premise_lines.append(f"  - {p.claim_id} v{p.claim_version}: {p_status}")
+            content = p_obj.statement if p_obj and p_obj.version == p.claim_version else ""
+            premise_lines.append(f"  - {p.claim_id} v{p.claim_version}: {p_status} {content}")
         claim_blocks.append(
             f"Claim {claim.claim_id} (version={claim.version}, alias={alias}, "
             f"category={claim.category.value}, author={claim.author_agent_id}):\n"
@@ -153,6 +160,13 @@ def _build_review_user_prompt(
             "  Premises:\n" + ("\n".join(premise_lines) if premise_lines else "  - None")
         )
 
+    targeted_ids = {c.claim_id for c in claims}
+    tags = {ref for c in claims for ref in c.requirement_refs}
+    prior_answers = [
+        f"- {c.claim_id}@v{c.version}: {c.statement}" for c in prior_claims_by_id.values()
+        if c.claim_id not in targeted_ids and c.status == ClaimStatus.SUPPORTED
+        and tags.intersection(c.requirement_refs)
+    ]
     prompt = (
         f"Original user prompt:\n{original_prompt}\n\n"
         f"User requirements:\n{reqs}\n\n"
@@ -160,6 +174,11 @@ def _build_review_user_prompt(
         "Claims to audit independently (reference alias or claim_id):\n\n"
         + "\n\n".join(claim_blocks)
     )
+    if prior_answers:
+        prompt += (
+            "\n\nOther reviewed findings on these requirements. Check for contradictions "
+            "using the source evidence:\n" + "\n".join(prior_answers)
+        )
     return prompt, alias_map
 
 
@@ -270,7 +289,7 @@ class ReviewerPool:
                 ClaimStatus.REJECTED, VerificationStatus.UNSUPPORTED,
             )
 
-        if claim.category == ClaimCategory.COMPUTATION:
+        if claim.category == ClaimCategory.COMPUTATION or claim.tool_execution_ids:
             records = [tool_by_id[tid] for tid in claim.tool_execution_ids if tid in tool_by_id]
             if not records:
                 verdict = ReviewVerdict(
@@ -492,6 +511,7 @@ class ReviewerPool:
         original_prompt: str,
         plan: ExecutionPlan,
         target_claims: list[Claim] | None = None,
+        reserve_calls_after: int = 1,
         run_deadline_monotonic: float | None = None,
     ) -> ReviewRoundOutcome:
         """Review latest material claims deterministically and via independent model review."""
@@ -573,7 +593,7 @@ class ReviewerPool:
             summary["run_committed_calls"]
         )
         # Keep at least 1 call reserved for Lead synthesis.
-        if remaining_calls <= 1:
+        if remaining_calls <= reserve_calls_after:
             for claim in pending_model_review:
                 await self._mark_unresolved_missing_review(
                     run_id=run_id,
@@ -584,7 +604,7 @@ class ReviewerPool:
             return outcome
 
         passes: list[tuple[str, str]]
-        if self._settings.separate_review_dimensions and remaining_calls >= 3:
+        if self._settings.separate_review_dimensions and remaining_calls >= reserve_calls_after + 2:
             passes = [
                 (REVIEWER_EVIDENCE_ID, "evidence"),
                 (REVIEWER_CONSISTENCY_ID, "consistency"),
@@ -619,7 +639,7 @@ class ReviewerPool:
                     operation="review",
                     prompt=review_prompt,
                     response_model=ReviewerBatchOutput,
-                    reserve_calls_after=1,
+                    reserve_calls_after=reserve_calls_after,
                     system_prompt=_build_review_system_prompt(dimension),
                     run_deadline_monotonic=run_deadline_monotonic,
                 )
@@ -641,6 +661,8 @@ class ReviewerPool:
             for item in res.parsed.verdicts:
                 if item.claim_id in alias_map:
                     resolved_cid, resolved_ver = alias_map[item.claim_id]
+                    if item.claim_version is not None and item.claim_version != resolved_ver:
+                        continue
                 else:
                     resolved_cid = item.claim_id
                     if item.claim_version is not None:
@@ -712,8 +734,15 @@ class ReviewerPool:
         fresh_claims_list = await self._db.get_claims_for_run(run_id, latest_only=True)
         fresh_latest_by_id = {c.claim_id: c for c in fresh_claims_list}
 
-        # Finalize claim verification states from collected independent verdicts.
-        for claim in pending_model_review:
+        # A revision can depend on a later-created premise. Finalize independent verdicts
+        # in dependency order so both can pass in the same batch, independent of row order.
+        pending = {c.claim_id: c for c in pending_model_review}
+        order = TopologicalSorter({
+            cid: [p.claim_id for p in c.premise_refs if p.claim_id in pending]
+            for cid, c in pending.items()
+        })
+        for cid in order.static_order():
+            claim = pending[cid]
             fresh_claim = fresh_latest_by_id.get(claim.claim_id)
             if fresh_claim is not None and (
                 fresh_claim.version != claim.version

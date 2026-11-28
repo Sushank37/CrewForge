@@ -107,18 +107,7 @@ def _build_revision_prompt(
             + ("\n".join(tool_lines) if tool_lines else "  - None")
         )
 
-    prov_lines: list[str] = []
-    if provenance_catalog is not None:
-        seen_targets: set[tuple[str, str]] = set()
-        for key, target in provenance_catalog.targets_by_key.items():
-            if not target.is_trusted:
-                continue
-            dedup_key = (key, target.target_id)
-            if dedup_key in seen_targets:
-                continue
-            seen_targets.add(dedup_key)
-            snippet = target.text.replace("\n", " ")
-            prov_lines.append(f"  - {key} ({target.kind}): {snippet}")
+    prov_lines = provenance_catalog.prompt_summary_lines() if provenance_catalog else []
     prov_section = (
         "Valid provenance references and source passages:\n" + "\n".join(prov_lines) + "\n\n"
         if prov_lines
@@ -156,6 +145,14 @@ def _rebind_calculation(
     record = tools.get(claim.tool_execution_ids[0])
     if record is None:
         return None
+
+    invalid = record.provenance_details.get("__claim_premises__", {}).get("values", [])
+    bound_refs = {
+        d.get("ref") for d in record.provenance_details.values()
+        if d.get("source_tool_execution_id") in owners
+    }
+    if any(ref not in bound_refs and ref not in claim.depends_on_claim_ids for ref in invalid):
+        return None  # An unresolvable declared premise needs an explicit specialist correction.
 
     rebound = False
     bindings = []
@@ -225,6 +222,7 @@ class TargetedRepairEngine:
         plan: ExecutionPlan,
         blocking_claims: list[Claim],
         verdicts: list[ReviewVerdict],
+        reserve_gap_calls: int = 0,
         run_deadline_monotonic: float | None = None,
     ) -> RepairRoundOutcome:
         """Execute up to `max_revision_rounds` of targeted specialist repair + re-review."""
@@ -297,14 +295,14 @@ class TargetedRepairEngine:
                             message=result.skipped_reason,
                         )
                     )
-                    return result
+                    break
 
                 summary = await self._db.get_budget_summary(run_id)
                 remaining_calls = self._settings.max_model_calls_per_run - int(
                     summary["run_committed_calls"]
                 )
                 # Need at least 1 call for repair + 1 for re-review + 1 for synthesis = 3.
-                if remaining_calls < 3:
+                if remaining_calls < 3 + reserve_gap_calls:
                     result.skipped_reason = (
                         "Remaining call budget reserved for re-review and synthesis."
                     )
@@ -316,7 +314,7 @@ class TargetedRepairEngine:
                             message=result.skipped_reason,
                         )
                     )
-                    return result
+                    break
 
                 # Refresh ledger and provenance catalog before each repair batch.
                 fresh_trace = await self._db.get_run_trace(run_id)
@@ -331,8 +329,13 @@ class TargetedRepairEngine:
                     if prev is None or fc.version > prev.version:
                         fresh_latest[fc.claim_id] = fc
                 claims_for_author = [
-                    fresh_latest.get(c.claim_id, c) for c in claims_for_author
+                    current for c in claims_for_author
+                    if (current := fresh_latest.get(c.claim_id)) and current.status in {
+                        ClaimStatus.REJECTED, ClaimStatus.STALE, ClaimStatus.ASSERTED,
+                    }
                 ]
+                if not claims_for_author:
+                    continue
                 for c in claims_for_author:
                     repair_attempts[c.claim_id] = repair_attempts.get(c.claim_id, 0) + 1
 
@@ -405,7 +408,7 @@ class TargetedRepairEngine:
                         operation="revision",
                         prompt=revision_prompt,
                         response_model=RevisionOutput,
-                        reserve_calls_after=2,
+                        reserve_calls_after=2 + reserve_gap_calls,
                         system_prompt=build_worker_system_prompt(agent),
                         run_deadline_monotonic=run_deadline_monotonic,
                     )
@@ -451,7 +454,14 @@ class TargetedRepairEngine:
                 for e in new_evd:
                     evidence_by_id[e.evidence_id] = e
 
+                allowed_targets = {(c.claim_id, c.version) for c in claims_for_author}
                 for rev in res.parsed.revisions:
+                    if (rev.target_claim_id, rev.expected_version) not in allowed_targets:
+                        await self._db.append_event(ExecutionEvent(
+                            run_id=run_id, actor=author_id, event_type="revision_rejected",
+                            message="Revision targeted a claim outside this repair batch.",
+                        ))
+                        continue
                     evd_ids = [
                         new_evd[e_idx].evidence_id
                         for e_idx in rev.evidence_indices
@@ -510,7 +520,7 @@ class TargetedRepairEngine:
                 run_id=run_id,
                 original_prompt=original_prompt,
                 plan=plan,
-                target_claims=to_rereview,
+                target_claims=to_rereview, reserve_calls_after=1 + reserve_gap_calls,
                 run_deadline_monotonic=run_deadline_monotonic,
             )
             result.re_review_calls += review_outcome.reviewer_calls
@@ -521,7 +531,7 @@ class TargetedRepairEngine:
                 run_id=run_id,
                 original_prompt=original_prompt,
                 plan=plan,
-                verdicts_by_key=verdicts_by_key,
+                verdicts_by_key=verdicts_by_key, reserve_calls_after=1 + reserve_gap_calls,
                 run_deadline_monotonic=run_deadline_monotonic,
             )
             result.re_review_calls += dep_calls
@@ -563,13 +573,21 @@ class TargetedRepairEngine:
         original_prompt: str,
         plan: ExecutionPlan,
         verdicts_by_key: dict[tuple[str, int], list[ReviewVerdict]],
+        reserve_calls_after: int = 1,
         run_deadline_monotonic: float | None,
     ) -> tuple[int, list[ReviewVerdict], list[Claim]]:
         """Re-submit stale dependent claims once all upstream premises are supported."""
         total_calls = 0
         all_verdicts: list[ReviewVerdict] = []
         all_blocking: list[Claim] = []
-        for _pass in range(2):
+        # Each wave promotes at least one new version or stops. The review reservation
+        # bounds depth while permitting long unchanged-value dependency chains.
+        attempted: set[tuple[str, tuple[int, ...]]] = set()
+        for _pass in range(self._settings.max_model_calls_per_run):
+            summary = await self._db.get_budget_summary(run_id)
+            remaining = self._settings.max_model_calls_per_run - summary["run_committed_calls"]
+            if remaining <= reserve_calls_after:
+                break
             latest_all = await self._db.get_claims_for_run(run_id, latest_only=True)
             latest_by_id = {c.claim_id: c for c in latest_all}
             ready: list[Claim] = []
@@ -598,6 +616,10 @@ class TargetedRepairEngine:
                 )
                 if not all_supported:
                     continue
+                key = (claim.claim_id, tuple(latest_by_id[uid].version for uid in up_ids))
+                if key in attempted:
+                    continue
+                attempted.add(key)
 
                 new_claim = await self._ledger.apply_targeted_revision(
                     run_id=run_id,
@@ -629,7 +651,7 @@ class TargetedRepairEngine:
                 run_id=run_id,
                 original_prompt=original_prompt,
                 plan=plan,
-                target_claims=ready,
+                target_claims=ready, reserve_calls_after=reserve_calls_after,
                 run_deadline_monotonic=run_deadline_monotonic,
             )
             total_calls += sub_outcome.reviewer_calls

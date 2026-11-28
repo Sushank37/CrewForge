@@ -23,6 +23,7 @@ from crewforge.schemas import (
 from crewforge.storage.database import CrossRunReferenceError, Database
 from crewforge.tools.arithmetic import (
     DeterministicArithmeticTool,
+    ProvenanceCatalog,
     build_provenance_catalog,
     make_tool_target,
 )
@@ -48,8 +49,6 @@ def _calculation_premises(
     """Translate numerical lineage into ledger dependencies the graph can invalidate."""
     dependencies: list[str] = []
     for detail in record.provenance_details.values():
-        if not detail.get("grounded"):
-            continue
         owner = owners.get(detail.get("source_tool_execution_id", ""))
         if owner is None and detail.get("kind") == "supported_claim":
             claim_id = detail["resolved_id"].partition("@v")[0]
@@ -57,6 +56,31 @@ def _calculation_premises(
         if owner is not None and owner.claim_id not in dependencies:
             dependencies.append(owner.claim_id)
     return dependencies
+
+
+def _same_source_calculation(
+    request: ArithmeticRequest, record: ToolExecutionRecord, catalog: ProvenanceCatalog,
+) -> bool:
+    """Reuse only an identical request whose operand identities are still current."""
+    if (
+        record.expression != request.expression.strip() or record.units != request.units.strip()
+        or request.assumptions != record.assumptions or record.matches_proposed is not True
+        or str(request.proposed_result) != record.proposed_result
+        or len(request.variable_bindings) != len(record.variables)
+        or {k: str(v) for k, v in request.variables.items()} != record.variables
+    ):
+        return False
+    for binding in request.variable_bindings:
+        source = catalog.targets_by_key.get(binding.provenance_ref)
+        detail = record.provenance_details.get(binding.name, {})
+        if (
+            source is None or not source.is_trusted or source.target_id != detail.get("resolved_id")
+            or source.tool_execution_id != detail.get("source_tool_execution_id")
+            or binding.units.strip().lower() != detail.get("units")
+            or binding.source_quote != detail.get("source_quote")
+        ):
+            return False
+    return True
 
 
 class ClaimLedger:
@@ -71,12 +95,13 @@ class ClaimLedger:
         *,
         run_id: str,
         agent_id: str,
-        task_id: str,
+        task_id: str | None,
         original_prompt: str,
         dependency_findings_text: str,
         evidence_proposals: list[ProposedEvidence],
         claim_proposals: list[ProposedClaim],
         plan_assumptions: list[str] | None = None,
+        recovery_tasks: dict[str, str] | None = None,
     ) -> tuple[list[Evidence], list[Claim], list[ToolExecutionRecord]]:
         """Validate evidence, run arithmetic requests, and persist initial claim versions."""
         existing_all = await self._db.get_claims_for_run(run_id, latest_only=False)
@@ -98,34 +123,101 @@ class ClaimLedger:
         )
 
         # Execute computation requests attached to claims before validating computation evidence.
-        local_alias_counts = Counter(
-            alias for idx, proposal in enumerate(claim_proposals, start=1)
-            for alias in {f"clm_{idx}", proposal.claim_ref} if alias
-        )
+        aliases_by_position: list[set[str]] = []
+        for position, proposal in enumerate(claim_proposals, start=1):
+            aliases = {f"clm_{position}"}
+            ref = proposal.claim_ref
+            if (
+                ref and ref.strip() == ref and ref != "user_prompt"
+                and ref not in catalog.targets_by_key and ":" not in ref and "@v" not in ref
+                and not ref.startswith(("up_", "doc_", "tlx_", "evd_"))
+            ):
+                aliases.add(ref)
+            aliases_by_position.append(aliases)
+        counts = Counter(ref for aliases in aliases_by_position for ref in aliases)
+        local_aliases = [
+            {ref for ref in aliases if counts[ref] == 1
+             and (not ref.startswith("clm_") or ref == f"clm_{i}")}
+            for i, aliases in enumerate(aliases_by_position, start=1)
+        ]
 
+        # Retain original positions when pruning a recovery response. A referenced local
+        # prerequisite may be untagged, but an unrelated repeated calculation has no work to do.
+        selected_tasks = dict.fromkeys(range(len(claim_proposals)), task_id)
+        if recovery_tasks is not None:
+            selected_tasks = {}
+            needed: dict[str, str] = {}
+            for idx in reversed(range(len(claim_proposals))):
+                proposal = claim_proposals[idx]
+                assigned = next((
+                    recovery_tasks[tag] for tag in proposal.requirement_refs
+                    if tag in recovery_tasks
+                ), None)
+                for alias in sorted(local_aliases[idx]):
+                    if alias in needed:
+                        assigned = assigned or needed[alias]
+                if assigned is None:
+                    continue
+                selected_tasks[idx] = assigned
+                refs = list(proposal.premise_claim_ids)
+                if proposal.computation:
+                    refs.extend(proposal.computation.input_provenance_refs.values())
+                needed.update(dict.fromkeys(refs, assigned))
+
+        existing_refs = {**existing_by_id, **{
+            f"{c.claim_id}@v{c.version}": c for c in existing_claims
+        }}
         premise_available = {
-            claim.claim_id: claim.is_material and claim.status in {
-                ClaimStatus.ASSERTED, ClaimStatus.SUPPORTED,
-            }
-            for claim in existing_claims
+            ref: claim.is_material and claim.status in {ClaimStatus.ASSERTED, ClaimStatus.SUPPORTED}
+            for ref, claim in existing_refs.items()
         }
         claim_tool_records: dict[int, ToolExecutionRecord] = {}
         all_new_tool_records: list[ToolExecutionRecord] = []
+        reviewed_calculations: dict[tuple[str | None, str], list[Claim]] = {}
+        if recovery_tasks:
+            for c in existing_claims:
+                target = catalog.targets_by_key[c.claim_id]
+                if (
+                    c.status == ClaimStatus.SUPPORTED and target.is_trusted
+                    and target.numeric_value is not None
+                ):
+                    reviewed_calculations.setdefault((c.task_id, c.statement), []).append(c)
+        prior_tools = {r.tool_execution_id: r for r in prior_tool_records}
+        reused: dict[int, Claim] = {}
         for idx, prop_claim in enumerate(claim_proposals):
-            aliases = {
-                alias for alias in {f"clm_{idx + 1}", prop_claim.claim_ref}
-                if alias and local_alias_counts[alias] == 1
-            }
+            if idx not in selected_tasks:
+                continue
             ready = (
                 not prop_claim.is_unresolved and prop_claim.category not in _NON_MATERIAL_CATEGORIES
+                and all(premise_available.get(ref) for ref in prop_claim.premise_claim_ids)
             )
+            if (
+                ready and prop_claim.category == ClaimCategory.COMPUTATION
+                and prop_claim.computation and not prop_claim.evidence_indices
+                and not prop_claim.premise_claim_ids
+            ):
+                key = (selected_tasks[idx], prop_claim.statement)
+                candidates = reviewed_calculations.get(key, [])
+                matches = [
+                    c for c in candidates if c.assumptions == prop_claim.assumptions
+                    and set(prop_claim.requirement_refs) <= set(c.requirement_refs)
+                    and len(c.tool_execution_ids) == 1 and _same_source_calculation(
+                        prop_claim.computation, prior_tools[c.tool_execution_ids[0]], catalog,
+                    )
+                ]
+                if len(matches) == 1:
+                    reused[idx] = matches[0]
+                    for alias in local_aliases[idx]:
+                        catalog.targets_by_key[alias] = catalog.targets_by_key[matches[0].claim_id]
+                        premise_available[alias] = True
+                    continue
             if prop_claim.computation is not None:
                 rec = await self._arithmetic.execute(
                     run_id=run_id,
                     actor=agent_id,
                     request=prop_claim.computation,
                     catalog=catalog,
-                    task_id=task_id,
+                    task_id=selected_tasks[idx],
                     invalid_premise_refs=[
                         pid for pid in prop_claim.premise_claim_ids
                         if not premise_available.get(pid)
@@ -135,11 +227,14 @@ class ClaimLedger:
                 all_new_tool_records.append(rec)
                 target = make_tool_target(rec)
                 ready = ready and target.is_trusted
-                if ready and prop_claim.category == ClaimCategory.COMPUTATION:
+                if prop_claim.category == ClaimCategory.COMPUTATION:
+                    # Even a failed intermediate has an identity. Preserve its edge for
+                    # revalidation without ever treating the failed result as an operand.
+                    target.is_trusted = ready
                     catalog.targets_by_key[rec.tool_execution_id] = target
-                    for alias in aliases:
+                    for alias in local_aliases[idx]:
                         catalog.targets_by_key.setdefault(alias, target)
-            for alias in aliases:
+            for alias in local_aliases[idx]:
                 premise_available.setdefault(alias, ready)
 
         combined_tool_records = [
@@ -148,24 +243,11 @@ class ClaimLedger:
         ]
 
         persisted_evidence: list[Evidence] = []
-        retrieved_docs = [e for e in verified_evidence_all if e.source_type == "external_retrieved"]
-        retrieved_sources_by_ref: dict[str, str] = {}
-        chunks_by_ref: dict[str, list[str]] = {}
-        for ev in retrieved_docs:
-            if ev.source_ref:
-                chunks_by_ref.setdefault(ev.source_ref, []).append(ev.excerpt)
-            retrieved_sources_by_ref[ev.evidence_id] = ev.excerpt
-        for ref, chunks in chunks_by_ref.items():
-            retrieved_sources_by_ref[ref] = "\n\n".join(chunks)
-        for doc_idx, ev in enumerate(retrieved_docs, start=1):
-            alias = f"doc_{doc_idx}"
-            if alias not in retrieved_sources_by_ref:
-                retrieved_sources_by_ref[alias] = (
-                    retrieved_sources_by_ref.get(ev.source_ref, ev.excerpt)
-                    if ev.source_ref
-                    else ev.excerpt
-                )
-        retrieved_sources_text = "\n".join(e.excerpt for e in retrieved_docs)
+        retrieved_sources_by_ref = {
+            ref: source.text for ref, source in catalog.targets_by_key.items()
+            if source.is_trusted and source.source_type == "external_retrieved"
+        }
+        retrieved_sources_text = "\n".join(dict.fromkeys(retrieved_sources_by_ref.values()))
         retrieved_refs = set(retrieved_sources_by_ref.keys())
         for proposal in evidence_proposals:
             effective_source_type = proposal.source_type
@@ -204,11 +286,17 @@ class ClaimLedger:
                 if retrieved_check.verified_in_input:
                     effective_source_type = "external_retrieved"
                     check = retrieved_check
+            doc_target = (
+                catalog.targets_by_key.get(proposal.source_ref)
+                if effective_source_type == "external_retrieved" and check.verified_in_input
+                else None
+            )
             evd = Evidence(
                 run_id=run_id,
                 source_type=effective_source_type,
                 source_ref=proposal.source_ref,
                 excerpt=proposal.excerpt,
+                source_location=f"excerpt:{doc_target.target_id}" if doc_target else None,
                 reliability=check.reliability,
                 verified_in_input=check.verified_in_input,
                 retrieval_status=(
@@ -232,6 +320,11 @@ class ClaimLedger:
 
         # Persist all valid proposed claims within existing run/call budgets.
         for idx, prop_claim in enumerate(claim_proposals):
+            if idx not in selected_tasks:
+                continue
+            if idx in reused:
+                local_ref_map.update(dict.fromkeys(local_aliases[idx], reused[idx]))
+                continue
             linked_evidence_ids = [
                 persisted_evidence[e_idx].evidence_id
                 for e_idx in prop_claim.evidence_indices
@@ -245,13 +338,24 @@ class ClaimLedger:
                 _calculation_premises(record, existing_by_id, owners) if record else []
             )
             for raw_pid in [*prop_claim.premise_claim_ids, *calculation_premises]:
-                target = existing_by_id.get(raw_pid) or local_ref_map.get(raw_pid)
+                target = (existing_refs.get(raw_pid) or existing_by_id.get(raw_pid)
+                          or local_ref_map.get(raw_pid))
                 if target is not None and target.claim_id not in dep_claim_ids:
                     premise_refs.append(
                         ClaimVersionRef(claim_id=target.claim_id, claim_version=target.version)
                     )
                     dep_claim_ids.append(target.claim_id)
 
+            if (record is None or prop_claim.category != ClaimCategory.COMPUTATION) and any(
+                ref not in existing_refs and ref not in local_ref_map
+                for ref in prop_claim.premise_claim_ids
+            ):
+                await self._db.append_event(ExecutionEvent(
+                    run_id=run_id, actor=agent_id, event_type="claim_proposal_rejected",
+                    message="Unknown, ambiguous or obsolete premise reference.",
+                    payload={"claim_position": idx + 1, "premises": prop_claim.premise_claim_ids},
+                ))
+                continue
             tool_ids = [record.tool_execution_id] if record else []
 
             # Workers can NEVER promote their own claims to SUPPORTED.
@@ -267,7 +371,7 @@ class ClaimLedger:
                 version=1,
                 parent_claim_id=None,
                 author_agent_id=agent_id,
-                task_id=task_id,
+                task_id=selected_tasks[idx],
                 evidence_ids=linked_evidence_ids,
                 depends_on_claim_ids=dep_claim_ids,
                 premise_refs=premise_refs,
@@ -279,13 +383,18 @@ class ClaimLedger:
             )
             await self._db.insert_claim(claim)
             persisted_claims.append(claim)
-            for alias in {f"clm_{idx + 1}", prop_claim.claim_ref}:
-                if alias and local_alias_counts[alias] == 1:
-                    local_ref_map[alias] = claim
+            for alias in local_aliases[idx]:
+                local_ref_map[alias] = claim
             for tid in tool_ids:
                 owners[tid] = claim
             existing_by_id[claim.claim_id] = claim
 
+        if reused:
+            await self._db.append_event(ExecutionEvent(
+                run_id=run_id, event_type="calculations_reused", actor=agent_id,
+                message="Used current reviewed calculations for repeated recovery proposals.",
+                payload={"versions": [f"{c.claim_id}@v{c.version}" for c in reused.values()]},
+            ))
         if persisted_evidence or persisted_claims:
             await self._db.append_event(
                 ExecutionEvent(
@@ -390,12 +499,15 @@ class ClaimLedger:
             resolved_premises = []
             resolved_dep_ids = []
             for pid in premise_claim_ids:
-                p_claim = latest_by_id.get(pid)
+                cid, sep, version = pid.partition("@v")
+                p_claim = latest_by_id.get(cid)
+                if p_claim and sep and str(p_claim.version) != version:
+                    raise ClaimRevisionError(f"Superseded premise reference '{pid}'.")
                 if p_claim is None:
                     raise CrossRunReferenceError(
                         f"Premise claim '{pid}' does not exist in run '{run_id}'."
                     )
-                if pid == target_claim_id:
+                if cid == target_claim_id:
                     raise ClaimRevisionError(f"Claim '{target_claim_id}' cannot depend on itself.")
                 resolved_premises.append(
                     ClaimVersionRef(claim_id=p_claim.claim_id, claim_version=p_claim.version)

@@ -326,13 +326,21 @@ async def test_arithmetic_lineage_rejects_swaps_fabricated_unrelated_stale_and_l
             author_agent_id=agent_id,
             task_id=task_id,
         )
+        tool = DeterministicArithmeticTool(db)
+        orphan = build_provenance_catalog(original_prompt=prompt, all_claims=[c_v1, c_v2])
+        assert not orphan.targets_by_key["clm_prem@v2"].is_trusted
+        cash_flow = await tool.execute(
+            run_id="run_lin", actor=agent_id,
+            catalog=build_provenance_catalog(original_prompt=prompt),
+            request=ArithmeticRequest(expression="rev - exp", variables={"rev": 10000, "exp": 5000},
+                                      input_provenance_refs={"rev": "up_1", "exp": "up_1"},
+                                      proposed_result=5000, units="USD"),
+        )
+        c_v2.tool_execution_ids = [cash_flow.tool_execution_id]
         await db.insert_claim(c_v1)
         await db.insert_claim(c_v2)
-
-        tool = DeterministicArithmeticTool(db)
         catalog = build_provenance_catalog(
-            original_prompt=prompt,
-            all_claims=[c_v1, c_v2],
+            original_prompt=prompt, all_claims=[c_v1, c_v2], tool_records=[cash_flow],
             assumptions=["12 months per year"],
         )
 

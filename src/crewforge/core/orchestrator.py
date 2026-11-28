@@ -16,24 +16,28 @@ from crewforge.core.ledger import ClaimLedger
 from crewforge.core.messaging import MessageBus
 from crewforge.core.planner import LeadPlanner, PlanValidationError
 from crewforge.core.repair import TargetedRepairEngine
-from crewforge.core.requirements import reviewed_deliverables
+from crewforge.core.requirements import deliverable_lines, reviewed_deliverables
 from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
 from crewforge.core.reviewer import ReviewerPool
 from crewforge.core.scheduler import DAGScheduler
 from crewforge.core.synthesis import LeadSynthesizer
 from crewforge.core.worker import SpecialistWorker
+from crewforge.prompts.worker import build_worker_system_prompt
 from crewforge.providers.base import ModelProvider, ProviderError
 from crewforge.schemas import (
+    AgentSpec,
     Claim,
     ClaimStatus,
     ExecutionEvent,
     ExecutionPlan,
     RunResult,
     RunStatus,
+    SpecialistOutput,
     TaskSpec,
     TaskStatus,
 )
 from crewforge.storage.database import Database
+from crewforge.tools.arithmetic import build_provenance_catalog
 
 
 class ReviewHook(Protocol):
@@ -118,7 +122,7 @@ class NetworkRunner:
         run_id: str,
         original_prompt: str,
         plan: ExecutionPlan,
-        tasks_by_id: dict[str, object],
+        tasks_by_id: dict[str, TaskSpec],
         run_deadline_monotonic: float,
     ) -> tuple[list[str], bool, bool]:
         """Run bounded communication follow-up rounds when mandatory capacity is safe."""
@@ -179,13 +183,12 @@ class NetworkRunner:
                 agent = agents_by_id.get(agent_id)
                 if agent is None:
                     continue
-                prior_findings_parts = [
-                    t.findings
-                    for t in plan.tasks
-                    if t.assigned_agent_id == agent_id
-                    and hasattr(tasks_by_id.get(t.task_id), "findings")
-                    and getattr(tasks_by_id.get(t.task_id), "findings", None)
+                assigned_tasks = [
+                    t for t in tasks_by_id.values() if t.assigned_agent_id == agent_id
                 ]
+                if not assigned_tasks:
+                    continue
+                prior_findings_parts = [t.findings for t in assigned_tasks if t.findings]
                 prior_findings = "\n\n".join(str(p) for p in prior_findings_parts) or (
                     "No prior task findings completed."
                 )
@@ -205,13 +208,12 @@ class NetworkRunner:
                     )
                     if outcome is not None:
                         uncertainties.extend(outcome.uncertainties)
-                        for t in plan.tasks:
-                            if t.assigned_agent_id == agent_id and t.task_id in tasks_by_id:
-                                current_task = tasks_by_id[t.task_id]
-                                if hasattr(current_task, "model_copy"):
-                                    tasks_by_id[t.task_id] = current_task.model_copy(
-                                        update={"findings": outcome.findings}
-                                    )
+                        affected_tasks = {c.task_id for c in outcome.claims}
+                        for task in assigned_tasks:
+                            if len(assigned_tasks) == 1 or task.task_id in affected_tasks:
+                                tasks_by_id[task.task_id] = task.model_copy(
+                                    update={"findings": outcome.findings}
+                                )
                         claims_all = await self._ledger.get_claims(run_id, latest_only=True)
                 except RunDeadlineExceededError:
                     deadline_exceeded = True
@@ -258,40 +260,81 @@ class NetworkRunner:
             message="Identified unfulfilled deliverables before synthesis.",
             payload={"deliverable_statuses": gaps},
         ))
-        agents = {a.agent_id: a for a in plan.agents}
-        completed = {tid: task for tid, task in tasks.items()
-                     if task.status == TaskStatus.COMPLETED}
-        recovered: list[Claim] = []
-        for task in completed.values():
-            assigned = [d for d in missing if d.task_ref == task.task_ref]
-            if not assigned:
+        completed = {t.task_ref: t for t in tasks.values() if t.status == TaskStatus.COMPLETED}
+        assigned = [d for d in missing if d.task_ref in completed]
+        if not assigned:
+            return
+        summary = await self._db.get_budget_summary(run_id)
+        remaining = self._settings.max_model_calls_per_run - int(summary["run_committed_calls"])
+        if remaining < 3 or (
+            run_deadline_monotonic is not None and run_deadline_monotonic - time.monotonic() < 25
+        ):
+            await self._db.append_event(ExecutionEvent(
+                run_id=run_id, actor="orchestrator", event_type="optional_stage_skipped",
+                message="Reserved remaining resources for independent review and synthesis.",
+                payload={"stage": "requirement_recovery"},
+            ))
+            return
+
+        catalog = build_provenance_catalog(
+            original_prompt=original_prompt, verified_evidence=trace.evidence,
+            all_claims=trace.claims, tool_records=trace.tool_executions, run_id=run_id,
+        )
+        objections = {}
+        for v in trace.review_verdicts:
+            objections.setdefault((v.claim_id, v.claim_version), []).append(
+                v.required_correction or v.rationale
+            )
+        target_ids = {d.deliverable_id for d in assigned}
+        defects = []
+        for c in latest:
+            pending = target_ids.intersection(c.requirement_refs)
+            if not pending:
                 continue
-            summary = await self._db.get_budget_summary(run_id)
-            remaining = self._settings.max_model_calls_per_run - int(summary["run_committed_calls"])
-            if remaining < 3 or (
-                run_deadline_monotonic is not None
-                and run_deadline_monotonic - time.monotonic() < 25
-            ):
-                await self._db.append_event(ExecutionEvent(
-                    run_id=run_id, actor="orchestrator", event_type="optional_stage_skipped",
-                    message="Reserved remaining resources for independent review and synthesis.",
-                    payload={"stage": "requirement_recovery"},
-                ))
-                break
-            try:
-                outcome = await self._worker.execute_task(
-                    run_id=run_id, original_prompt=original_prompt, plan=plan, task=task,
-                    agent=agents[task.assigned_agent_id], completed_tasks_by_id=completed,
-                    run_deadline_monotonic=run_deadline_monotonic, missing_deliverables=assigned,
+            reason = " ".join(dict.fromkeys(objections.get((c.claim_id, c.version), [])))
+            label = f"{c.claim_id}@v{c.version} ({', '.join(sorted(pending))})"
+            if c.status == ClaimStatus.SUPPORTED:
+                defects.append(f"- {label}: approved finding, checklist still open. {reason}")
+            else:
+                defects.append(
+                    f"- {label}: {c.status.value}: {c.statement} | "
+                    f"{reason or c.revision_notes or ''}"
                 )
-            except (ProviderError, BudgetError, RunDeadlineExceededError) as exc:
-                await self._db.append_event(ExecutionEvent(
-                    run_id=run_id, actor=task.assigned_agent_id,
-                    event_type="requirement_recovery_stopped",
-                    message=sanitize_error_message(str(exc)),
-                ))
-                break
-            recovered.extend(outcome.claims)
+        lead = AgentSpec(agent_id="lead", role="Lead solution coordinator", instructions=(
+            "Complete the missing parts of the solution from the team's current findings. "
+            "Resolve contradictions against primary evidence. Use exact versioned premise IDs."
+        ))
+        prompt = "\n\n".join([
+            f"Original user request:\n{original_prompt}",
+            "TARGETED REQUIREMENT RECOVERY: Return only new answers to the following items "
+            "and their essential new premises. Reuse existing reviewed results by ID. "
+            "Check each proposed decision against its premises and competing alternatives.",
+            "Assigned atomic deliverables:\n" + deliverable_lines(assigned),
+            "Relevant acceptance criteria:\n" + "\n".join(plan.acceptance_criteria),
+            "Primary sources and reusable findings:\n" + "\n".join(catalog.prompt_summary_lines()),
+            "Remaining defects (these statements are not evidence):\n" + "\n".join(defects),
+            "Specialist solution summaries (check against sources and current claims):\n"
+            + "\n".join(f"- {t.title}: {t.findings}" for t in completed.values() if t.findings),
+        ])
+        try:
+            response = await self._executor.execute_structured(
+                run_id=run_id, actor="lead", operation="requirement_recovery", prompt=prompt,
+                system_prompt=build_worker_system_prompt(lead), response_model=SpecialistOutput,
+                reserve_calls_after=2, run_deadline_monotonic=run_deadline_monotonic,
+            )
+        except (ProviderError, BudgetError, RunDeadlineExceededError) as exc:
+            await self._db.append_event(ExecutionEvent(
+                run_id=run_id, actor="lead", event_type="requirement_recovery_stopped",
+                message=sanitize_error_message(str(exc)),
+            ))
+            return
+        _, recovered, _ = await self._ledger.record_specialist_outputs(
+            run_id=run_id, agent_id="lead", task_id=None, original_prompt=original_prompt,
+            dependency_findings_text="", plan_assumptions=plan.assumptions,
+            evidence_proposals=response.parsed.evidence_proposals,
+            claim_proposals=response.parsed.claims,
+            recovery_tasks={d.deliverable_id: completed[d.task_ref].task_id for d in assigned},
+        )
         if recovered:
             await self._reviewer.review_claims(
                 run_id=run_id, original_prompt=original_prompt, plan=plan,
@@ -394,7 +437,7 @@ class NetworkRunner:
                     run_id=resolved_run_id,
                     original_prompt=cleaned_prompt,
                     plan=plan,
-                    tasks_by_id=sched_outcome.tasks_by_id,  # type: ignore[arg-type]
+                    tasks_by_id=sched_outcome.tasks_by_id,
                     run_deadline_monotonic=run_deadline_monotonic,
                 )
             else:
@@ -436,12 +479,18 @@ class NetworkRunner:
                 )
                 if review_outcome.blocking_claims:
                     if self._settings.enable_targeted_repair:
+                        claimed = {ref for c in all_claims_pre_review for ref in c.requirement_refs}
+                        # Reserve completion and review for entirely missing deliverables.
+                        reserve_gap_calls = 2 if any(
+                            d.deliverable_id not in claimed for d in plan.deliverables
+                        ) else 0
                         await self._repair.resolve_disputes(
                             run_id=resolved_run_id,
                             original_prompt=cleaned_prompt,
                             plan=plan,
                             blocking_claims=review_outcome.blocking_claims,
                             verdicts=review_outcome.verdicts,
+                            reserve_gap_calls=reserve_gap_calls,
                             run_deadline_monotonic=run_deadline_monotonic,
                         )
                     else:

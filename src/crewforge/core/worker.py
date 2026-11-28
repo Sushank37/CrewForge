@@ -22,7 +22,6 @@ from crewforge.schemas import (
     ExecutionEvent,
     ExecutionPlan,
     FollowUpOutput,
-    RequirementDeliverable,
     SpecialistOutput,
     TaskSpec,
     ToolExecutionRecord,
@@ -83,7 +82,6 @@ class SpecialistWorker:
         completed_tasks_by_id: dict[str, TaskSpec],
         run_deadline_monotonic: float | None = None,
         compact_recovery: bool = False,
-        missing_deliverables: list[RequirementDeliverable] | None = None,
     ) -> WorkerExecutionOutcome:
         """Execute a specialist's assigned task with dependency context and inbox delivery."""
         dependency_findings: list[tuple[str, str]] = []
@@ -144,7 +142,7 @@ class SpecialistWorker:
             provenance_lines=prov_catalog.prompt_summary_lines(),
             user_requirements=plan.user_requirements,
             assigned_deliverables=deliverable_lines([
-                d for d in (missing_deliverables or plan.deliverables)
+                d for d in plan.deliverables
                 if d.task_ref == task.task_ref
             ]),
         )
@@ -158,22 +156,12 @@ class SpecialistWorker:
                 "`is_unresolved=true` claim."
             )
 
-        if missing_deliverables:
-            user_prompt += (
-                "\n\nTARGETED REQUIREMENT RECOVERY: Supply only the listed missing deliverables "
-                "and essential supporting premises. Reuse current verified claims and sources. "
-                "Prior claims may be correct but incomplete, so address the full checklist item. "
-                "If it cannot be answered from available evidence, give an uncertainty claim "
-                "stating the specific missing evidence and what it would resolve."
-            )
-
         response = await self._executor.execute_structured(
             run_id=run_id,
             actor=agent.agent_id,
-            operation="requirement_recovery" if missing_deliverables else "worker",
+            operation="worker",
             prompt=user_prompt,
             response_model=SpecialistOutput,
-            reserve_calls_after=2 if missing_deliverables else 0,
             system_prompt=system_prompt,
             run_deadline_monotonic=run_deadline_monotonic,
         )
@@ -205,7 +193,10 @@ class SpecialistWorker:
                 sender_id=agent.agent_id,
                 instructions=output.outgoing_messages,
                 agents=plan.agents,
-                created_claim_ids=[c.claim_id for c in persisted_claims],
+                created_claim_ids=(
+                    [c.claim_id for c in persisted_claims]
+                    if len(persisted_claims) == len(output.claims) else []
+                ),
             )
             if self._executor._settings.enable_peer_messaging
             else []
@@ -261,6 +252,25 @@ class SpecialistWorker:
             peer_directory=peer_directory,
         )
 
+        cited = {cid for m in inbound_messages for cid in m.related_claim_ids}
+        trace = await self._ledger._db.get_run_trace(run_id)
+        if trace is not None:
+            catalog = build_provenance_catalog(
+                original_prompt=original_prompt, verified_evidence=trace.evidence,
+                all_claims=trace.claims, tool_records=trace.tool_executions, run_id=run_id,
+            )
+            latest = {c.claim_id: c for c in sorted(trace.claims, key=lambda c: c.version)}
+            peer_claims = [
+                f"- {c.claim_id}@v{c.version} ({c.status.value}): {c.statement}"
+                for cid in sorted(cited) if (c := latest.get(cid))
+            ]
+            user_prompt += "\n\nCited peer claims (check against primary inputs):\n" + "\n".join(
+                peer_claims
+            )
+            user_prompt += "\n\nPrimary sources and reusable results:\n" + "\n".join(
+                catalog.prompt_summary_lines()
+            )
+
         response = await self._executor.execute_structured(
             run_id=run_id,
             actor=agent.agent_id,
@@ -278,7 +288,9 @@ class SpecialistWorker:
 
         followup = response.parsed
         inbound_blob = "\n".join(m.content for m in inbound_messages)
-        task_id = prior_claims[0].task_id if prior_claims else plan.tasks[0].task_id
+        task_id = prior_claims[0].task_id if prior_claims else next(
+            t.task_id for t in plan.tasks if t.assigned_agent_id == agent.agent_id
+        )
 
         new_evidence, new_claims, tool_records = await self._ledger.record_specialist_outputs(
             run_id=run_id,
@@ -336,7 +348,10 @@ class SpecialistWorker:
                 sender_id=agent.agent_id,
                 instructions=followup.outgoing_messages,
                 agents=plan.agents,
-                created_claim_ids=[c.claim_id for c in updated_claims],
+                created_claim_ids=(
+                    [c.claim_id for c in updated_claims]
+                    if len(new_claims) == len(followup.new_claims) else []
+                ),
             )
 
         return WorkerExecutionOutcome(

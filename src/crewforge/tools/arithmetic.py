@@ -150,6 +150,9 @@ class ProvenanceTarget:
     rejection_reason: str | None = None
     numeric_value: Decimal | None = None
     tool_execution_id: str | None = None
+    counted_noun: str = ""
+    description: str = ""
+    source_type: str = ""
 
 
 @dataclass
@@ -161,13 +164,20 @@ class ProvenanceCatalog:
     prompt_clauses: list[ProvenanceTarget] = field(default_factory=list)
     assumptions: set[str] = field(default_factory=set)
 
+
     def prompt_summary_lines(self) -> list[str]:
         lines: list[str] = []
         for target in self.prompt_clauses:
             lines.append(f"- [{target.alias}] {target.text}")
         for key, target in self.targets_by_key.items():
-            if key == target.alias and target.kind != "prompt_span" and target.is_trusted:
-                lines.append(f"- [{target.alias}] ({target.kind}): {target.text}")
+            if key != target.alias or not target.is_trusted:
+                continue
+            if target.kind == "verified_evidence":
+                if target.source_type == "user_prompt" and target.text in self.original_prompt:
+                    continue
+                lines.append(f"- [{key}] {target.text}")
+            elif target.kind == "supported_claim":
+                lines.append(f"- [{key}] {target.description}")
         return lines
 
 
@@ -204,12 +214,26 @@ def build_provenance_catalog(
             text=clause,
             is_trusted=True,
         )
+        if catalog.prompt_clauses and re.match(r"Of (these|those)\b", clause, re.I):
+            previous = catalog.prompt_clauses[-1].text
+            preceding = list(_SOURCE_NUMBER_RE.finditer(previous))
+            if len(preceding) == 1:
+                noun = re.match(r"\s+([a-z]+s)\b", previous[preceding[0].end():], re.I)
+                if noun:
+                    target.counted_noun = noun[1].lower()
         catalog.prompt_clauses.append(target)
         catalog.targets_by_key[alias] = target
 
     doc_source_texts: dict[str, list[str]] = {}
     doc_source_trusted: dict[str, bool] = {}
     doc_alias_by_source: dict[str, str] = {}
+    explicit_doc_refs = {
+        e.source_ref for e in verified_evidence or []
+        if (run_id is None or e.run_id == run_id) and re.fullmatch(r"doc_[1-9]\d*", e.source_ref)
+        and not str(e.created_by).startswith("agt_")
+        and e.source_type == "external_retrieved"
+        and not (e.source_location or "").startswith("excerpt:")
+    }
     used_doc_aliases: set[str] = set()
     next_doc_idx = 1
 
@@ -224,7 +248,7 @@ def build_provenance_catalog(
             doc_alias_by_source[source_ref] = source_ref
             used_doc_aliases.add(source_ref)
             return source_ref
-        while f"doc_{next_doc_idx}" in used_doc_aliases:
+        while f"doc_{next_doc_idx}" in (used_doc_aliases | explicit_doc_refs):
             next_doc_idx += 1
         candidate = f"doc_{next_doc_idx}"
         next_doc_idx += 1
@@ -250,6 +274,8 @@ def build_provenance_catalog(
             evd.created_by in {"lead", "baseline", "operator", "retriever"}
             and evd.source_type != "user_prompt"
         )
+        if (evd.source_location or "").startswith("excerpt:"):
+            is_primary_doc = False
         if is_primary_doc:
             source_key = evd.source_ref or evd.evidence_id
             alias = _alloc_doc_alias(source_key)
@@ -261,6 +287,7 @@ def build_provenance_catalog(
             alias=alias,
             kind="verified_evidence",
             target_id=evd.evidence_id,
+            source_type=evd.source_type,
             text=evd.excerpt,
             is_trusted=is_ok,
             rejection_reason=reason,
@@ -285,13 +312,16 @@ def build_provenance_catalog(
                 alias=source_ref,
                 kind="verified_evidence",
                 target_id=source_ref,
+                source_type="external_retrieved",
                 text=full_text,
                 is_trusted=is_agg_ok,
                 rejection_reason=None
                 if is_agg_ok
                 else f"Evidence '{source_ref}' contains unverified chunks.",
             )
-            catalog.targets_by_key[source_ref] = agg_target
+            current = catalog.targets_by_key.get(source_ref)
+            if current is None or current.kind == "verified_evidence":
+                catalog.targets_by_key[source_ref] = agg_target
             doc_alias = doc_alias_by_source.get(source_ref)
             if doc_alias:
                 catalog.targets_by_key[doc_alias] = agg_target
@@ -340,8 +370,8 @@ def build_provenance_catalog(
         issue = None
         if not is_latest:
             issue = f"Stale claim reference '{ver_key}'. Cite the current version."
-        elif (
-            claim.category == ClaimCategory.COMPUTATION and claim.tool_execution_ids and not result
+        elif not result and (
+            claim.category == ClaimCategory.COMPUTATION or claim.tool_execution_ids
         ):
             issue = f"Claim '{ver_key}' lacks a unique current, grounded calculation."
         elif not claim.is_material or claim.category == ClaimCategory.ASSUMPTION:
@@ -351,6 +381,25 @@ def build_provenance_catalog(
             and claim.category == ClaimCategory.COMPUTATION and result
         ):
             issue = f"Premise claim '{ver_key}' has status '{claim.status.value}'."
+        if not issue and is_supported:
+            pending = list(claim.premise_refs)
+            seen: set[str] = set()
+            while pending:
+                ref = pending.pop()
+                parent = latest_by_id.get(ref.claim_id)
+                if (
+                    parent is None or parent.version != ref.claim_version
+                    or parent.status != ClaimStatus.SUPPORTED or not parent.is_material
+                    or (parent.category == ClaimCategory.COMPUTATION
+                        and not parent.tool_execution_ids)
+                    or any(tid not in scoped_tools or not catalog.targets_by_key[tid].is_trusted
+                           for tid in parent.tool_execution_ids)
+                ):
+                    issue = f"Claim '{ver_key}' relies on an unverified or superseded premise."
+                    break
+                if parent.claim_id not in seen:
+                    seen.add(parent.claim_id)
+                    pending.extend(parent.premise_refs)
         target = ProvenanceTarget(
             alias=ver_key,
             kind="supported_claim",
@@ -362,6 +411,15 @@ def build_provenance_catalog(
             numeric_value=result.numeric_value if result else None,
             tool_execution_id=result.tool_execution_id if result else None,
         )
+        if is_latest and target.is_trusted:
+            status = "reviewed" if is_supported else "pending semantic review"
+            calculation = (
+                f" | result {result.text} [{result.tool_execution_id}]" if result else ""
+            )
+            target.description = (
+                f"({status}, {', '.join(claim.requirement_refs) or 'premise'}) "
+                f"{claim.statement}{calculation}"
+            )
         catalog.targets_by_key[ver_key] = target
         if is_latest:
             catalog.targets_by_key[claim.claim_id] = target
@@ -1022,6 +1080,17 @@ def _ungrounded_literals(
     for node in ast.walk(tree):
         if not isinstance(node, ast.BinOp):
             continue
+        if (
+            isinstance(node.op, ast.Sub) and isinstance(node.left, ast.Constant)
+            and node.left.value == 1 and isinstance(node.right, ast.Constant)
+            and type(node.right.value) in {int, float}
+        ):
+            ratio = Decimal(str(node.right.value))
+            if legacy_values[ratio] == 1 and any(
+                d.get("grounded") and d.get("source_units") == "%"
+                and Decimal(d["source_value"]) / 100 == ratio for d in details.values()
+            ):
+                allowed_nodes.add(node.left)
         if percent_output and isinstance(node.op, ast.Mult):
             for literal, other in ((node.left, node.right), (node.right, node.left)):
                 if (
@@ -1444,6 +1513,25 @@ class DeterministicArithmeticTool:
         else:
             occurrences = _extract_numeric_occurrences(text)
 
+        # An explicit standalone exclusion can ground its own zero-valued term.
+        # Inspect the whole primary clause so a truncated quotation cannot remove a condition.
+        exclusion = re.fullmatch(
+            r"No (discount|rebate|surcharge|fee|credit|commission)\s*[.!]?", text.strip(), re.I,
+        ) if target.kind == "prompt_span" else None
+        role = _operand_role_words(name)
+        if (
+            exclusion and value == 0 and quote
+            and quote.strip().casefold() == text.strip().casefold()
+            and exclusion[1].lower() in role
+            and role <= {exclusion[1].lower(), "rate", "amount"}
+            and ("rate" not in role or units in {"", "%", "ratio"})
+            and units in {"", "%", "ratio", *_CURRENCY_UNITS.values()}
+        ):
+            occurrences = [_NumericOccurrence(
+                Decimal(0), Decimal(0) if units in {"%", "ratio"} else None,
+                text, text.lower(), 0, len(text), units,
+            )]
+
         candidates = occurrences
         if quote is not None:
             quote = quote.strip()
@@ -1481,9 +1569,11 @@ class DeterministicArithmeticTool:
             found_units = ", ".join(dict.fromkeys(occ.units or "unspecified" for occ in matching))
             return "unit_conflict", f"Operand units '{units}' conflict with {found_units}.", details
 
-        role_parts = _operand_role_words(name)
+        role_parts = role
         if target.kind in {"prompt_span", "verified_evidence"}:
             qualifiers = role_parts - _ROLE_WORDS
+            if units == target.counted_noun:
+                qualifiers.discard(target.counted_noun)
             for qualifier in sorted(qualifiers - set(_WORD_RE.findall(text.lower()))):
                 # Require positive evidence that the label belongs elsewhere. Ordinary
                 # descriptive variable names and unmatched synonyms are left to formula review.
@@ -1494,6 +1584,10 @@ class DeterministicArithmeticTool:
                     and qualifier in _WORD_RE.findall(peer.text.lower())
                     and any(
                         qualifier in _WORD_RE.findall(occ.context)
+                        and not (
+                            target.counted_noun and units == target.counted_noun
+                            and occ.units in {"%", *_CURRENCY_UNITS.values()}
+                        )
                         and all(_var_stem_matches_context(part, occ.context) for part in role_parts)
                         for occ in _extract_numeric_occurrences(peer.text)
                     )
@@ -1624,6 +1718,12 @@ class DeterministicArithmeticTool:
                     )
                 if target is None:
                     code, note = "unknown_reference", f"'{ref}' is absent from the source catalog."
+                    prefix, _, suffix = ref.partition("_")
+                    if prefix in {"tlx", "clm"} and suffix:
+                        alternate = ("clm_" if prefix == "tlx" else "tlx_") + suffix
+                        candidate = active_catalog.targets_by_key.get(alternate)
+                        if candidate and candidate.is_trusted:
+                            note += f" Check the catalog entry '{candidate.alias}'."
                 else:
                     kind, resolved_id = target.kind, target.target_id
                     if target.tool_execution_id:

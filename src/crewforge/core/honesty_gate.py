@@ -218,6 +218,12 @@ class HonestyGate:
                 if key in seen:
                     continue
                 seen.add(key)
+                if current.category != ClaimCategory.COMPUTATION and any(
+                    (tool := tool_by_id.get(tid)) is None or not make_tool_target(tool).is_trusted
+                    or arithmetic_lineage_issue(tool, tool_by_id, latest_by_id, tool_owners)
+                    for tid in current.tool_execution_ids
+                ):
+                    return False
                 pinned = {ref.claim_id: ref.claim_version for ref in current.premise_refs}
                 for premise_id in set(current.depends_on_claim_ids) | pinned.keys():
                     premise = latest_by_id.get(premise_id)
@@ -930,6 +936,13 @@ class HonestyGate:
                 "Only verified findings and explicitly qualified gaps are shown."
             )
 
+        if approved_recommendations:
+            lines = ["**Proposed Actions (Advisory):**"]
+            for seg, claims in approved_recommendations:
+                refs = ", ".join(f"{c.claim_id}@v{c.version}" for c in claims)
+                lines.append(f"- {seg.text} [advisory; {refs}]")
+            sections.append("\n".join(lines))
+
         if approved_accepted:
             seen_norms: set[str] = set()
             clean_points: list[str] = []
@@ -955,16 +968,27 @@ class HonestyGate:
                 lines.append(f"- {seg.text}{assump_suffix} [{refs}]")
             sections.append("\n".join(lines))
 
-        if approved_recommendations:
-            lines = ["**Proposed Actions (Advisory):**"]
-            for seg, claims in approved_recommendations:
-                refs = ", ".join(f"{c.claim_id}@v{c.version}" for c in claims)
-                lines.append(f"- {seg.text} [advisory; {refs}]")
-            sections.append("\n".join(lines))
-
         if plan.deliverables:
             workings = []
-            for cid in used_claim_ids:
+            # Include the calculation behind a released decision even when its premise
+            # is not a separate requested deliverable. Walk only current reviewed ancestry.
+            working_ids = list(used_claim_ids)
+            seen_workings = set(working_ids)
+            for cid in working_ids:
+                for ref in latest_by_id[cid].premise_refs:
+                    premise = latest_by_id.get(ref.claim_id)
+                    if (
+                        premise and premise.version == ref.claim_version
+                        and premise.claim_id not in seen_workings
+                        and premise.status == ClaimStatus.SUPPORTED
+                    ):
+                        _, err = _validate_claim_ref(
+                            premise.claim_id, premise.version, require_supported=True,
+                        )
+                        if err is None:
+                            seen_workings.add(premise.claim_id)
+                            working_ids.append(premise.claim_id)
+            for cid in working_ids:
                 claim = latest_by_id[cid]
                 citations = list(dict.fromkeys(
                     evidence_by_id[eid].source_ref or eid for eid in claim.evidence_ids

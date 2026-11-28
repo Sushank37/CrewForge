@@ -97,6 +97,11 @@ def build_deterministic_fast_path_output(
     """
     if plan.deliverables:
         covered = reviewed_deliverables(plan, claims, verdicts or [])
+        for item in plan.deliverables:
+            if item.kind in {"recommendation", "comparison"} and len({
+                c.statement.casefold().strip() for c in covered.get(item.deliverable_id, [])
+            }) > 1:
+                return None  # Let the lead reconcile distinct reviewed answers to this decision.
         if all(d.deliverable_id in covered for d in plan.deliverables):
             return SynthesisOutput()
         return None
@@ -256,17 +261,31 @@ class LeadSynthesizer:
                 await self._gate.persist_decision(gate_result.gate_record)
                 return gate_result, "deterministic_fast_path"
 
+        # The lead selects current reviewed conclusions. Obsolete arithmetic and unreviewed
+        # specialist prose remain available in the trace, but cannot serve as release copy.
+        endorsed = reviewed_deliverables(plan, latest_claims, verdicts)
+        release_claims = [
+            c for c in latest_claims if c.status in {ClaimStatus.SUPPORTED, ClaimStatus.UNRESOLVED}
+        ] if plan.deliverables else latest_claims
+        selected_tools = {tid for c in release_claims for tid in c.tool_execution_ids}
         system_prompt = build_synthesis_system_prompt()
         user_prompt = build_synthesis_user_prompt(
             original_prompt=original_prompt,
             plan=plan,
             completed_tasks=completed_tasks,
             incomplete_tasks=incomplete_tasks,
-            claims=latest_claims,
-            tool_executions=tool_executions,
+            claims=release_claims,
+            tool_executions=[r for r in tool_executions if r.tool_execution_id in selected_tools],
             lead_inbox=lead_inbox,
         )
 
+        if plan.deliverables:
+            user_prompt += "\n\nReviewed coverage for release selection:\n" + "\n".join(
+                f"- {d.deliverable_id}: " + (", ".join(
+                    f"{c.claim_id}@v{c.version}" for c in endorsed.get(d.deliverable_id, [])
+                ) or "outstanding")
+                for d in plan.deliverables
+            )
         res = await self._executor.execute_structured(
             run_id=run_id,
             actor="lead",

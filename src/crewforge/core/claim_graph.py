@@ -119,9 +119,9 @@ class ClaimDependencyGraph:
             for dep_claim in dependents_map.get(cur_id, []):
                 if dep_claim.claim_id in visited_roots:
                     continue
-                # If superseded_version is given, only invalidate claims pinned to <= that version
-                # (or unpinned depends_on_claim_ids).
-                if superseded_version is not None and dep_claim.premise_refs:
+                # Only the root has this version cutoff. Once an intermediate is stale,
+                # all descendants of that intermediate are stale regardless of its version.
+                if cur_id == root_claim_id and superseded_version is not None:
                     pinned_versions = [
                         p.claim_version for p in dep_claim.premise_refs if p.claim_id == cur_id
                     ]
