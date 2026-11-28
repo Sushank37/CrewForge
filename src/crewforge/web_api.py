@@ -34,6 +34,7 @@ from crewforge.config import (
     ProviderType,
     sanitize_error_message,
 )
+from crewforge.conversation import build_conversation_context, conversation_context
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
 from crewforge.core.budget import BudgetManager, UnifiedBudgetAuthority
 from crewforge.core.orchestrator import NetworkRunner
@@ -165,6 +166,7 @@ class ChatMessageRequest(BaseModel):
 
     prompt: str = Field(min_length=1, max_length=32_000)
     mode: Literal["network", "baseline"] = "network"
+    request_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
     attachments: list[AttachmentInput] = Field(default_factory=list, max_length=5)
 
 
@@ -271,6 +273,23 @@ class JudgeSessionManager:
                     FOREIGN KEY (chat_id) REFERENCES conversations(chat_id)
                 );
                 """
+            )
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(chat_messages)")}
+            for name in ("request_key", "input_snapshot_json", "comparison_for"):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE chat_messages ADD COLUMN {name} TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_message_request "
+                "ON chat_messages(chat_id, request_key) WHERE request_key IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_message_comparison "
+                "ON chat_messages(comparison_for) WHERE comparison_for IS NOT NULL"
+            )
+            conn.execute(
+                "UPDATE chat_messages SET status = 'interrupted', error = ?, updated_at = ? "
+                "WHERE status = 'running'",
+                ("This reply was interrupted by a server restart.", _utc_iso()),
             )
             conn.commit()
         finally:
@@ -494,8 +513,11 @@ class JudgeSessionManager:
                 return None
             msgs = conn.execute(
                 "SELECT message_id, chat_id, role, mode, content, run_id, status, "
-                "attachments_json, error, created_at, updated_at "
-                "FROM chat_messages WHERE chat_id = ? ORDER BY created_at ASC",
+                "attachments_json, error, created_at, updated_at, "
+                "(SELECT run_id FROM chat_messages AS compared "
+                "WHERE compared.comparison_for = messages.run_id) AS comparison_run_id "
+                "FROM chat_messages AS messages WHERE chat_id = ? AND comparison_for IS NULL "
+                "ORDER BY created_at, CASE role WHEN 'user' THEN 0 ELSE 1 END, message_id",
                 (chat_id,),
             ).fetchall()
             out_msgs = []
@@ -553,8 +575,56 @@ class JudgeSessionManager:
         chat = self.get_chat(chat_id)
         if chat is None:
             raise KeyError(f"Chat '{chat_id}' not found.")
-        # Validate runtime settings before creating a running message so invalid config fails fast.
+        if not req.prompt.strip():
+            raise ValueError("Enter a message before sending.")
+        raw_docs = [a.model_dump() for a in req.attachments]
+        conn = self._connect()
+        try:
+            if req.request_id:
+                duplicate = conn.execute(
+                    "SELECT content, mode, run_id, input_snapshot_json FROM chat_messages "
+                    "WHERE chat_id = ? AND request_key = ?", (chat_id, req.request_id),
+                ).fetchone()
+                if duplicate:
+                    submitted = json.loads(duplicate["input_snapshot_json"])
+                    if (duplicate["content"] != req.prompt.strip()
+                            or duplicate["mode"] != req.mode or submitted["submitted"] != raw_docs):
+                        raise ValueError("This message identifier already has different content.")
+                    return {"chat_id": chat_id, "run_id": duplicate["run_id"], "status": "accepted"}
+            if any(m["role"] == "assistant" and m["status"] == "running"
+                   for m in chat["messages"]):
+                raise ValueError("Wait for the current reply or stop it before sending another.")
+            earlier_docs = conn.execute(
+                "SELECT input_snapshot_json FROM chat_messages WHERE chat_id = ? "
+                "AND role = 'user' AND input_snapshot_json IS NOT NULL ORDER BY created_at",
+                (chat_id,),
+            ).fetchall()
+        finally:
+            conn.close()
         self.build_runtime_settings()
+        answers = {
+            m["run_id"]: m["content"] for m in chat["messages"]
+            if m["role"] == "assistant" and m["status"] in {"completed", "partial"}
+        }
+        history = [
+            (m["content"], answers.get(m["run_id"], ""))
+            for m in chat["messages"] if m["role"] == "user"
+        ]
+        context = build_conversation_context(history)
+        docs_by_text = {}
+        for row in earlier_docs:
+            for doc in json.loads(row["input_snapshot_json"])["submitted"]:
+                docs_by_text[(doc["name"], doc["content"])] = doc
+        for doc in raw_docs:
+            docs_by_text[(doc["name"], doc["content"])] = doc
+        docs = [
+            *docs_by_text.values(),
+            *({"name": f"Earlier user message {idx}", "content": request}
+              for idx, (request, _) in enumerate(history, 1)),
+        ]
+        if len(docs) > 25 or sum(len(d["content"]) for d in docs) > 200_000:
+            raise ValueError("Too much reference material. Start a new chat with fewer documents.")
+        snapshot = json.dumps({"submitted": raw_docs, "documents": docs, "context": context})
 
         now = _utc_iso()
         user_msg_id = f"cmsg_{uuid4().hex[:10]}"
@@ -577,8 +647,9 @@ class JudgeSessionManager:
                 )
             conn.execute(
                 "INSERT INTO chat_messages (message_id, chat_id, role, mode, content, run_id, "
-                "status, attachments_json, error, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "status, attachments_json, error, created_at, updated_at, "
+                "request_key, input_snapshot_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     user_msg_id,
                     chat_id,
@@ -591,6 +662,8 @@ class JudgeSessionManager:
                     None,
                     now,
                     now,
+                    req.request_id,
+                    snapshot,
                 ),
             )
             conn.execute(
@@ -618,15 +691,15 @@ class JudgeSessionManager:
         ref_docs = [
             ReferenceDocument(
                 doc_id=f"doc_{idx + 1}",
-                source_ref=a.name,
-                content=a.content,
+                source_ref=d["name"],
+                content=d["content"],
             )
-            for idx, a in enumerate(req.attachments)
+            for idx, d in enumerate(docs)
         ]
 
         task = asyncio.create_task(
             self._execute_run(
-                run_id=run_id,
+                context=context, run_id=run_id,
                 assistant_msg_id=asst_msg_id,
                 prompt=req.prompt.strip(),
                 mode=req.mode,
@@ -641,6 +714,61 @@ class JudgeSessionManager:
             "run_id": run_id,
             "status": "running",
         }
+
+    async def compare_chat_run(self, run_id: str) -> dict[str, str]:
+        """Run a baseline on an immutable snapshot in this authenticated workspace."""
+        conn = self._connect()
+        try:
+            existing = conn.execute(
+                "SELECT run_id FROM chat_messages WHERE comparison_for = ?", (run_id,),
+            ).fetchone()
+            if existing:
+                return {"run_id": existing["run_id"]}
+            row = conn.execute(
+                """SELECT u.chat_id, u.content, u.input_snapshot_json FROM chat_messages u
+                   JOIN chat_messages a ON a.run_id = u.run_id AND a.role = 'assistant'
+                   WHERE u.run_id = ? AND u.role = 'user' AND u.mode = 'network'
+                   AND a.status IN ('completed', 'partial')
+                   AND u.input_snapshot_json IS NOT NULL""",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("A finished team answer with an input snapshot is required.")
+            self.build_runtime_settings()
+            snapshot = json.loads(row["input_snapshot_json"])
+            baseline_id = f"run_{uuid4().hex[:12]}"
+            msg = f"cmsg_{uuid4().hex[:10]}"
+            now = _utc_iso()
+            conn.execute(
+                """INSERT INTO chat_messages (
+                    message_id, chat_id, role, mode, content, run_id, status,
+                    attachments_json, created_at, updated_at, comparison_for
+                ) VALUES (?, ?, 'assistant', 'baseline', '', ?, 'running', '[]', ?, ?, ?)""",
+                (msg, row["chat_id"], baseline_id, now, now, run_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        docs = [
+            ReferenceDocument(doc_id=f"doc_{idx}", source_ref=d["name"], content=d["content"])
+            for idx, d in enumerate(snapshot["documents"], 1)
+        ]
+        self._tasks[baseline_id] = asyncio.create_task(self._execute_run(
+            run_id=baseline_id, assistant_msg_id=msg, prompt=row["content"],
+            mode="baseline", ref_docs=docs, context=snapshot["context"], compare=True,
+        ))
+        return {"run_id": baseline_id}
+
+    def get_chat_comparison(self, run_id: str) -> dict[str, Any] | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT run_id, status, content AS answer, error FROM chat_messages "
+                "WHERE run_id = ? AND comparison_for IS NOT NULL", (run_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
 
     def get_provider_wait_state(self, run_id: str) -> dict[str, Any] | None:
         """Return active provider quota-wait metadata for a running execution, if any."""
@@ -660,6 +788,8 @@ class JudgeSessionManager:
         prompt: str,
         mode: Literal["network", "baseline"],
         ref_docs: list[ReferenceDocument],
+        context: str = "",
+        compare: bool = False,
     ) -> None:
         db = Database(self.db_path)
 
@@ -671,6 +801,7 @@ class JudgeSessionManager:
                 "expires_at": time.monotonic() + wait_s,
             }
 
+        context_token = conversation_context.set(context)
         deadline_token = None
         wait_token = wait_observer_var.set(_on_provider_wait)
         try:
@@ -705,11 +836,12 @@ class JudgeSessionManager:
                 prompt,
                 run_id=run_id,
                 reference_documents=ref_docs or None,
+                **({"compute_matched": True} if mode == "baseline" and compare else {}),
             )
             self._update_message(
                 assistant_msg_id,
                 status=res.status.value,
-                content=res.answer or "",
+                content=res.conversational_answer or res.answer or "",
                 error=sanitize_error_message(res.error) if res.error else None,
             )
         except asyncio.CancelledError:
@@ -731,6 +863,7 @@ class JudgeSessionManager:
             if deadline_token is not None:
                 run_deadline_var.reset(deadline_token)
             wait_observer_var.reset(wait_token)
+            conversation_context.reset(context_token)
             self._provider_wait_state.pop(run_id, None)
             self._tasks.pop(run_id, None)
             with contextlib.suppress(Exception):
@@ -742,6 +875,16 @@ class JudgeSessionManager:
         if task is None or task.done():
             return False
         task.cancel()
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE chat_messages SET status = 'cancelled', updated_at = ? "
+                "WHERE run_id = ? AND role = 'assistant' AND status = 'running'",
+                (_utc_iso(), run_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
         return True
 
     async def get_mcp_status(

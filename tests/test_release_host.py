@@ -49,6 +49,7 @@ def test_release_serves_dashboard_and_anonymous_mcp(monkeypatch, tmp_path):
         assert "paid inference is disabled" in guest_submit.json()["error"]
         assert client.get("/api/chats").status_code == 401
         assert client.get("/api/settings").status_code == 401
+        assert client.post("/api/runs/some-run/compare").status_code == 401
         assert client.post("/mcp/workspace", headers=headers, json={}).status_code == 401
         init = client.post("/mcp", headers=headers, json={
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -243,3 +244,233 @@ async def test_existing_public_jobs_remain_accessible_after_guest_schema_migrati
     )
     assert repeat["task_id"] == "preexisting"
     assert repeat["deduplicated"] is True
+
+
+def test_guest_conversations_restore_and_compare_frozen_followup(monkeypatch, tmp_path):
+    frontend = tmp_path / "dist"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("CrewForge")
+    monkeypatch.setattr("crewforge.dashboard._FRONTEND_DIST_DIR", frontend)
+    monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "crewforge.example")
+    monkeypatch.setenv("CREWFORGE_RELEASE_ENABLE_PAID_INFERENCE", "true")
+    monkeypatch.setenv("CREWFORGE_DASHBOARD_DATA_DIR", str(tmp_path / "dashboard"))
+    job_path = tmp_path / "public.db"
+    monkeypatch.setenv("CREWFORGE_PUBLIC_MCP_DB_PATH", str(job_path))
+    monkeypatch.setenv("CREWFORGE_PUBLIC_MCP_BUDGET_DB_PATH", str(tmp_path / "budget.db"))
+    calls = []
+
+    def corrected_followup(prompt, schema):
+        from crewforge.schemas import PlannerOutput, ReviewerBatchOutput, SpecialistOutput
+        from tests.test_requirement_recovery import approved, one_task_plan
+
+        statement = "The corrected hypothetical ceiling is 300 USD."
+        if schema is PlannerOutput:
+            return one_task_plan(["Apply the latest correction"], [
+                ("req_1", "State the corrected hypothetical ceiling", "explanation"),
+            ])
+        if schema is SpecialistOutput:
+            return {"findings": statement, "claims": [
+                {"statement": statement, "category": "logical_inference",
+                 "requirement_refs": ["deliv_1"]},
+            ]}
+        if schema is ReviewerBatchOutput:
+            return approved(prompt, {
+                statement: (["deliv_1"], "The current request explicitly overrides the old limit."),
+            }, {})
+        return _scripted_handler(prompt, schema)
+
+    def scripted(*, settings):
+        def provider_factory(_settings):
+            provider = ChecklistFixtureProvider(
+                handler=corrected_followup if len(calls) == 1 else _scripted_handler,
+                model_name=settings.model,
+            )
+            calls.append(provider)
+            return provider
+        return create_public_mcp_app(settings=settings, provider_factory=provider_factory)
+
+    monkeypatch.setattr("crewforge.production.create_public_mcp_app", scripted)
+    settings = CrewForgeSettings(
+        _env_file=None, provider="openai", model="test-model", allow_paid_runs=True,
+        max_cost_per_run_usd=0.0, max_cumulative_cost_usd=0.0,
+    )
+    root = "https://crewforge.example"
+    headers = {"Origin": root}
+    client = TestClient(create_release_app(settings=settings), base_url=root)
+
+    def send(c, chat, prompt, number, documents=None):
+        return c.post(f"/api/guest/chats/{chat}/messages", headers=headers, json={
+            "request_id": f"00000000-0000-0000-0000-{number:012d}", "prompt": prompt,
+            "documents": documents or [],
+        })
+
+    def wait(c, task_id):
+        for _ in range(150):
+            data = c.get(f"/api/guest/jobs/{task_id}").json()
+            if data["result"]:
+                return data["result"]
+            time.sleep(0.025)
+        raise AssertionError("Guest message never completed")
+
+    with client:
+        client.get("/api/guest/session")
+        chat = client.post("/api/guest/chats", headers=headers).json()["chat_id"]
+        other_chat = client.post("/api/guest/chats", headers=headers).json()["chat_id"]
+        assert not client.get(f"/api/guest/chats/{other_chat}").json()["turns"]
+
+        stranger = TestClient(client.app, base_url=root)
+        stranger.get("/api/guest/session")
+        assert stranger.get("/api/guest/chats").json()["chats"] == []
+        assert stranger.get(f"/api/guest/chats/{chat}").status_code == 404
+        assert send(stranger, chat, "Cross-session injection", 1).status_code == 404
+        assert client.get("/api/chats").status_code == 401
+
+        docs = [{"title": "Budget", "content": "The budget ceiling is 420 USD."}]
+        first_text = "Verify the reference budget ceiling."
+        first = send(client, chat, first_text, 1, docs)
+        assert first.status_code == 202
+        first_id = first.json()["task_id"]
+        assert "420 USD" in wait(client, first_id)["answer"]
+        follow_text = "Correction: use a 300 USD ceiling for this hypothetical case."
+        follow = send(client, chat, follow_text, 2)
+        assert follow.status_code == 202
+        second_id = follow.json()["task_id"]
+        corrected = wait(client, second_id)["conversational_answer"]
+        assert "300 USD" in corrected and "420 USD" not in corrected
+        again = send(client, chat, follow_text, 2)
+        assert again.json() == {"accepted": True, "task_id": second_id, "deduplicated": True}
+        assert send(client, chat, "Different message", 2).status_code == 400
+        assert "Historical conversation" in calls[1].calls[0]["prompt"]
+        assert first_text in calls[1].calls[0]["prompt"]
+        assert "420 USD" in calls[1].calls[0]["prompt"]
+        assert "latest user correction supersedes" in calls[1].calls[0]["prompt"]
+        assert follow_text in calls[1].calls[0]["prompt"]
+
+        third = send(client, chat, "What if the limit changes again?", 3)
+        assert third.status_code == 202
+        wait(client, third.json()["task_id"])
+        compare = client.post("/api/guest/jobs", headers=headers, json={"compare_to": second_id})
+        single_id = compare.json()["task_id"]
+        result = wait(client, single_id)
+        assert result["verification"]["release_mode"] == "unverified_baseline"
+        with sqlite3.connect(job_path) as conn:
+            args = """SELECT prompt, reference_documents_json, conversation_context
+                      FROM public_jobs WHERE task_id IN (?, ?)"""
+            inputs = conn.execute(args, (second_id, single_id)).fetchall()
+        assert inputs[0] == inputs[1]
+        assert "What if the limit changes again?" not in inputs[0][2]
+        assert '"title": "Budget"' in inputs[0][1]
+        assert all("420 USD" not in doc["content"]
+                   for doc in json.loads(inputs[0][1]) if doc["title"] != "Budget")
+
+    with TestClient(create_release_app(settings=settings), base_url=root) as restored:
+        restored.cookies.set("crewforge_guest", client.cookies["crewforge_guest"],
+                             path="/api/guest")
+        detail = restored.get(f"/api/guest/chats/{chat}").json()
+        assert [t["prompt"] for t in detail["turns"]][:2] == [first_text, follow_text]
+        assert detail["turns"][1]["comparison_id"] == single_id
+        assert not restored.get(f"/api/guest/chats/{other_chat}").json()["turns"]
+
+
+def test_guest_turn_cannot_spend_past_shared_production_cap(monkeypatch, tmp_path):
+    from crewforge.config import ModelPricing
+    from crewforge.core.budget import UnifiedBudgetAuthority
+
+    frontend = tmp_path / "dist"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("CrewForge")
+    monkeypatch.setattr("crewforge.dashboard._FRONTEND_DIST_DIR", frontend)
+    monkeypatch.delenv("RAILWAY_PUBLIC_DOMAIN", raising=False)
+    monkeypatch.setenv("CREWFORGE_RELEASE_ENABLE_PAID_INFERENCE", "true")
+    monkeypatch.setenv("CREWFORGE_DASHBOARD_DATA_DIR", str(tmp_path / "dashboard"))
+    monkeypatch.setenv("CREWFORGE_PUBLIC_MCP_DB_PATH", str(tmp_path / "public.db"))
+    monkeypatch.setenv("CREWFORGE_PUBLIC_MCP_BUDGET_DB_PATH", str(tmp_path / "budget.db"))
+    paid = ChecklistFixtureProvider(
+        handler=_scripted_handler, provider_name="openai", model_name="test-model",
+        is_paid_provider=True,
+    )
+    monkeypatch.setattr(
+        "crewforge.production.create_public_mcp_app",
+        lambda *, settings: create_public_mcp_app(
+            settings=settings, provider_factory=lambda _: paid,
+        ),
+    )
+    settings = CrewForgeSettings(
+        _env_file=None, provider="openai", model="test-model", allow_paid_runs=True,
+        max_cost_per_run_usd=0.05, max_cumulative_cost_usd=0.40,
+        total_budget_ceiling_usd=5.90, protected_reserve_usd=5.50,
+        pricing_json={"test-model": ModelPricing(input_per_1m=10, output_per_1m=20)},
+    )
+    authority = UnifiedBudgetAuthority(
+        settings=settings.model_copy(update={"budget_authority_path": tmp_path / "budget.db"}),
+        migrate_default_dbs=False,
+    )
+    with sqlite3.connect(authority.authority_path) as conn:
+        conn.execute(
+            """INSERT INTO canonical_budget_ledger (
+                reservation_id, run_id, provider, model, status, reserved_cost_usd,
+                actual_cost_usd, created_at, updated_at
+            ) VALUES ('prior', 'prior', 'openai', 'test-model', 'reconciled',
+                      0.399999, 0.399999, '2026-01-01', '2026-01-01')"""
+        )
+    root = "https://testserver"
+    headers = {"Origin": root}
+    with TestClient(create_release_app(settings=settings), base_url=root) as client:
+        assert client.get("/api/guest/session").json()["available"]
+        chat = client.post("/api/guest/chats", headers=headers).json()["chat_id"]
+        job = client.post(f"/api/guest/chats/{chat}/messages", headers=headers, json={
+            "request_id": "00000000-0000-0000-0000-000000000001",
+            "prompt": "Verify a number.", "documents": [],
+        })
+        assert job.status_code == 202
+        task = job.json()["task_id"]
+        for _ in range(150):
+            result = client.get(f"/api/guest/jobs/{task}").json()["result"]
+            if result:
+                break
+            time.sleep(0.025)
+        assert result and result["status"] in {"failed", "partial"}
+        assert not result["verification"]["answer_complete"]
+        assert not paid.calls
+
+
+async def test_private_chat_uses_immutable_context_and_isolates_other_chats(tmp_path):
+    import asyncio
+
+    from crewforge.web_api import ChatMessageRequest, JudgeSessionManager
+
+    calls = []
+
+    def factory(settings):
+        provider = ChecklistFixtureProvider(
+            handler=_scripted_handler, model_name=settings.model,
+        )
+        calls.append(provider)
+        return provider
+
+    manager = JudgeSessionManager(
+        db_path=tmp_path / "private.db", budget_db_path=tmp_path / "budget.db",
+        provider_factory=factory,
+    )
+    chat = manager.create_chat()["chat_id"]
+    isolated = manager.create_chat()["chat_id"]
+    original = ChatMessageRequest(
+        prompt="Check this ceiling.",
+        attachments=[{"name": "Memo", "content": "The budget ceiling is 420 USD."}],
+        request_id="00000000-0000-0000-0000-000000000001",
+    )
+    one = await manager.submit_message(chat, original)
+    await asyncio.wait_for(manager._tasks[one["run_id"]], timeout=5)
+    assert (await manager.submit_message(chat, original))["run_id"] == one["run_id"]
+    next_request = ChatMessageRequest(prompt="Explain why the limit applies.")
+    two = await manager.submit_message(chat, next_request)
+    await asyncio.wait_for(manager._tasks[two["run_id"]], timeout=5)
+    assert "Check this ceiling." in calls[1].calls[0]["prompt"]
+    assert "The budget ceiling is 420 USD." in " ".join(call["prompt"] for call in calls[1].calls)
+    assert not manager.get_chat(isolated)["messages"]
+    comparison = await manager.compare_chat_run(two["run_id"])
+    await asyncio.wait_for(manager._tasks[comparison["run_id"]], timeout=5)
+    assert (await manager.compare_chat_run(two["run_id"])) == comparison
+    assert len(manager.get_chat(chat)["messages"]) == 4
+    assert manager.get_chat(chat)["messages"][-1]["comparison_run_id"] == comparison["run_id"]
+    assert "Check this ceiling." in calls[2].calls[0]["prompt"]

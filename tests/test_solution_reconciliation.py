@@ -337,3 +337,80 @@ async def test_lead_selects_the_more_informative_reviewed_decision(tmp_path, rec
     result, trace = await run_case(tmp_path, f"{source} Recommend a step-free route.", script)
     check_solution(result, trace, [explained], 4, record_property)
     assert terse not in result.answer
+
+
+@pytest.mark.parametrize("include_signature", [True, False])
+async def test_approved_compound_selection_gets_independent_coverage_check(
+    tmp_path, include_signature,
+):
+    """Replay the live approval-without-endorsement shape and a truly missing component."""
+    from crewforge.schemas import CompletenessReviewOutput, RunStatus
+
+    seal = "The current latch is M after its repair."
+    signature = "Only Jules's signature on repaired M counts."
+    blocker = "The release rule requires two signatures, and the repaired latch lacks two."
+    release = "Keep the package on hold."
+    prompt = (
+        "M was repaired, resetting all prior signatures. Jules signed repaired M. "
+        "Two people must sign before release. Identify the current latch, count the valid "
+        "signatures, and say whether the package can be released."
+    )
+    statements = [seal, signature] if include_signature else [seal]
+    compound = " ".join(statements)
+    ids = {}
+
+    def script(message, schema):
+        if schema is PlannerOutput:
+            return one_task_plan(["Identify current state and whether release is possible"], [
+                ("req_1", "Identify the current latch and valid signers", "explanation"),
+                ("req_1", "State the next action for the package", "recommendation"),
+            ])
+        if schema is SpecialistOutput:
+            return {"findings": "Reconstructed the state.",
+                    "claims": [
+                        {"statement": blocker, "category": "logical_inference",
+                         "claim_ref": "blocker", "requirement_refs": ["deliv_2"]},
+                        *({"statement": value, "category": "logical_inference",
+                           "requirement_refs": ["deliv_1"]} for value in statements),
+                        {"statement": release, "category": "recommendation",
+                         "premise_claim_ids": ["blocker"], "requirement_refs": []},
+                    ]}
+        if schema is ReviewerBatchOutput:
+            return approved(message, {
+                seal: ([], "The repair establishes the current latch."),
+                signature: ([], "The signature follows the latest reset."),
+                compound: ([], "Current state is supported by the primary chronology."),
+                blocker: ([], "The rule and timeline leave fewer than two."),
+                release: (["deliv_2"], "The release policy requires an additional signer."),
+            }, ids)
+        if schema is ReconciliationOutput:
+            return {"selections": [{
+                "deliverable_id": "deliv_1",
+                "claim_refs": [f"{ids[value][0]}@v{ids[value][1]}" for value in statements],
+            }]}
+        if schema is CompletenessReviewOutput:
+            candidate = ids[compound]
+            assert f"{candidate[0]}@v{candidate[1]}: {compound}" in message
+            return {"endorsements": [
+                {"claim_ref": f"{candidate[0]}@v{candidate[1]}", "deliverable_id": "deliv_1",
+                 "rationale": "The combination establishes the latch and sole valid signer."},
+            ] if include_signature else [
+                {"claim_ref": "clm_fabricated@v1", "deliverable_id": "deliv_1",
+                 "rationale": "An unrecognized reference must be ignored."},
+            ]}
+        assert schema is SynthesisOutput
+        return {"direct_summary": "", "accepted_segments": []}
+
+    result, trace = await run_case(tmp_path, prompt, script)
+    assert result.status == (RunStatus.COMPLETED if include_signature else RunStatus.PARTIAL), (
+        result.answer, [(v.decision, v.rationale, v.covered_deliverable_refs)
+                        for v in trace.review_verdicts],
+    )
+    assert result.verification and result.verification.answer_complete is include_signature
+    assert result.verification.content_released_safely
+    assert result.conversational_answer and "clm_" not in result.conversational_answer
+    assert "Advisory" not in result.conversational_answer
+    assert release in result.conversational_answer
+    assert seal in result.conversational_answer
+    assert ("I couldn’t fully verify" in result.conversational_answer) is (not include_signature)
+    assert sum(e.event_type == "coverage_review_completed" for e in trace.events) == 1

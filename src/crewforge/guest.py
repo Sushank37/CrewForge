@@ -60,14 +60,7 @@ def create_guest_app(manager: PublicJobManager, *, public_domain: str) -> Starle
             )
         return response
 
-    async def submit(request: Request) -> JSONResponse:
-        if not same_origin(request):
-            return _reply({"error": "Same-origin request required."}, 403)
-        owner = _owner(request)
-        if owner is None:
-            return _reply({"error": "Open the guest office to start a session."}, 401)
-        if not manager.settings.allow_paid_runs:
-            return _reply({"error": _DISABLED}, 503)
+    async def read_payload(request: Request) -> dict[str, Any] | JSONResponse:
         if request.headers.get("content-type", "").split(";")[0].strip() != "application/json":
             return _reply({"error": "Expected JSON."}, 415)
         body = bytearray()
@@ -77,8 +70,24 @@ def create_guest_app(manager: PublicJobManager, *, public_domain: str) -> Starle
             body.extend(chunk)
         try:
             data = json.loads(body)
-            if not isinstance(data, dict):
-                raise ValueError("Expected a JSON object.")
+        except (json.JSONDecodeError, UnicodeError):
+            return _reply({"error": "Invalid JSON."}, 400)
+        if not isinstance(data, dict):
+            return _reply({"error": "Expected a JSON object."}, 400)
+        return data
+
+    async def submit(request: Request) -> JSONResponse:
+        if not same_origin(request):
+            return _reply({"error": "Same-origin request required."}, 403)
+        owner = _owner(request)
+        if owner is None:
+            return _reply({"error": "Open the guest office to start a session."}, 401)
+        if not manager.settings.allow_paid_runs:
+            return _reply({"error": _DISABLED}, 503)
+        data = await read_payload(request)
+        if isinstance(data, JSONResponse):
+            return data
+        try:
             if set(data) == {"compare_to"} and isinstance(data["compare_to"], str):
                 job = await manager.compare_guest_job(data["compare_to"], owner)
                 if job is None:
@@ -89,10 +98,61 @@ def create_guest_app(manager: PublicJobManager, *, public_domain: str) -> Starle
                 )
             else:
                 raise ValueError("Provide a task prompt or an original team run.")
-        except (json.JSONDecodeError, UnicodeError):
-            return _reply({"error": "Invalid JSON."}, 400)
         except ValueError as exc:
             return _reply({"error": str(exc)}, 400)
+        return _reply(job, 202 if job["accepted"] else 429)
+
+    async def chats(request: Request) -> JSONResponse:
+        owner = _owner(request)
+        if owner is None:
+            return _reply({"error": "Open the guest workspace to start a session."}, 401)
+        if request.method == "GET":
+            return _reply({"chats": manager.list_guest_chats(owner)})
+        if not same_origin(request):
+            return _reply({"error": "Same-origin request required."}, 403)
+        return _reply(manager.create_guest_chat(owner), 201)
+
+    async def chat(request: Request) -> JSONResponse:
+        owner = _owner(request)
+        if owner is None:
+            return _reply({"error": "Chat not found."}, 404)
+        chat_id = request.path_params["chat_id"]
+        detail = manager.get_guest_chat(owner, chat_id)
+        return _reply(detail) if detail is not None else _reply({"error": "Chat not found."}, 404)
+
+    async def message(request: Request) -> JSONResponse:
+        if not same_origin(request):
+            return _reply({"error": "Same-origin request required."}, 403)
+        owner = _owner(request)
+        if owner is None:
+            return _reply({"error": "Chat not found."}, 404)
+        if not manager.settings.allow_paid_runs:
+            return _reply({"error": _DISABLED}, 503)
+        data = await read_payload(request)
+        if isinstance(data, JSONResponse):
+            return data
+        prompt, request_id, documents = (data.get(x) for x in ("prompt", "request_id", "documents"))
+        if (
+            not isinstance(prompt, str) or not prompt.strip()
+            or not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9-]{36}", request_id)
+            or not isinstance(documents, list) or len(documents) > 5
+            or any(
+                not isinstance(doc, dict) or set(doc) != {"title", "content"}
+                or not all(isinstance(v, str) for v in doc.values())
+                for doc in documents
+            )
+        ):
+            return _reply({"error": "Provide a message, its identifier and up to five documents."},
+                          400)
+        try:
+            job = await manager.enqueue_guest_message(
+                owner=owner, chat_id=request.path_params["chat_id"], prompt=prompt,
+                request_id=request_id, documents=documents,
+            )
+        except ValueError as exc:
+            return _reply({"error": str(exc)}, 400)
+        if job is None:
+            return _reply({"error": "Chat not found."}, 404)
         return _reply(job, 202 if job["accepted"] else 429)
 
     async def inspect(request: Request) -> JSONResponse:
@@ -122,6 +182,9 @@ def create_guest_app(manager: PublicJobManager, *, public_domain: str) -> Starle
 
     return Starlette(routes=[
         Route("/session", session),
+        Route("/chats", chats, methods=["GET", "POST"]),
+        Route("/chats/{chat_id}", chat),
+        Route("/chats/{chat_id}/messages", message, methods=["POST"]),
         Route("/jobs", submit, methods=["POST"]),
         Route("/jobs/{task_id}", inspect),
         Route("/jobs/{task_id}/cancel", cancel, methods=["POST"]),

@@ -99,6 +99,9 @@ def _build_review_system_prompt(dimension: str) -> str:
         "conditional and require primary evidence for empirical values.\n"
         "- For each approved claim, list the exact deliv_N IDs it independently fulfills in "
         "`covered_deliverable_refs`. Review each obligation against the original request. "
+        "A worker tag is a hint, "
+        "and a claim can answer several items. A verbatim lead selection may answer an item "
+        "jointly through its listed premises. When it answers every part, endorse its item. "
         "An accurate but incomplete calculation, comparison, or proof may be approved as a claim "
         "without covering its obligation. A recommendation needs verified premises and a decision "
         "that answers the requested action. Mark an uncertainty as covering an obligation only "
@@ -818,7 +821,7 @@ class ReviewerPool:
                         ref for ref in dict.fromkeys(item.covered_deliverable_refs)
                         if item.decision == ReviewDecision.APPROVE
                         and ref not in reported_gaps
-                        and ref in target_claim.requirement_refs and ref in items
+                        and ref in items
                         and claim_addresses_kind(target_claim, items[ref], latest_by_id)
                     ],
                     required_correction=item.required_correction,

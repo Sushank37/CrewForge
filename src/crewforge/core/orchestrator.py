@@ -16,7 +16,11 @@ from crewforge.core.ledger import ClaimLedger
 from crewforge.core.messaging import MessageBus
 from crewforge.core.planner import LeadPlanner, PlanValidationError
 from crewforge.core.repair import TargetedRepairEngine
-from crewforge.core.requirements import deliverable_lines, reviewed_deliverables
+from crewforge.core.requirements import (
+    claim_addresses_kind,
+    deliverable_lines,
+    reviewed_deliverables,
+)
 from crewforge.core.retrieval import LocalDocumentRetriever, ReferenceDocument
 from crewforge.core.reviewer import ReviewerPool, repair_feedback
 from crewforge.core.scheduler import DAGScheduler
@@ -28,9 +32,13 @@ from crewforge.schemas import (
     AgentSpec,
     Claim,
     ClaimStatus,
+    CompletenessReviewOutput,
     ExecutionEvent,
     ExecutionPlan,
     ReconciliationOutput,
+    ReviewDecision,
+    ReviewerIdentity,
+    ReviewVerdict,
     RunResult,
     RunStatus,
     TaskSpec,
@@ -380,6 +388,88 @@ class NetworkRunner:
                 target_claims=recovered, run_deadline_monotonic=run_deadline_monotonic,
             )
 
+    async def _review_remaining_coverage(
+        self, *, run_id: str, original_prompt: str, plan: ExecutionPlan,
+        run_deadline_monotonic: float | None,
+    ) -> None:
+        """One independent coverage check on current approved claims, with synthesis reserved."""
+        trace = await self._db.get_run_trace(run_id)
+        assert trace is not None
+        covered = reviewed_deliverables(plan, trace.claims, trace.review_verdicts)
+        items = {d.deliverable_id: d for d in plan.deliverables if d.deliverable_id not in covered}
+        if not items:
+            return
+        summary = await self._db.get_budget_summary(run_id)
+        if self._settings.max_model_calls_per_run - int(summary["run_committed_calls"]) < 2:
+            return
+        if run_deadline_monotonic is not None and run_deadline_monotonic - time.monotonic() < 15:
+            return
+
+        latest = {c.claim_id: c for c in sorted(trace.claims, key=lambda c: c.version)}
+        decisions: dict[tuple[str, int], list[ReviewVerdict]] = {}
+        for verdict in trace.review_verdicts:
+            decisions.setdefault((verdict.claim_id, verdict.claim_version), []).append(verdict)
+        eligible = {
+            f"{c.claim_id}@v{c.version}": c for c in latest.values()
+            if c.status == ClaimStatus.SUPPORTED
+            and (prior := decisions.get((c.claim_id, c.version)))
+            and all(
+                v.decision == ReviewDecision.APPROVE and v.blocking_severity != "blocking"
+                and v.reviewer_id != c.author_agent_id for v in prior
+            )
+            and any(claim_addresses_kind(c, item, latest) for item in items.values())
+        }
+        if not eligible:
+            return
+        prompt = (
+            f"Original user request:\n{original_prompt}\n\n"
+            f"Open deliverables:\n{deliverable_lines(list(items.values()))}\n\n"
+            "Current independently reviewed findings:\n"
+            + "\n".join(f"- {ref}: {c.statement} | assumptions={c.assumptions}"
+                        for ref, c in eligible.items())
+        )
+        try:
+            response = await self._executor.execute_structured(
+                run_id=run_id, actor="reviewer_coverage", operation="coverage_review",
+                prompt=prompt, response_model=CompletenessReviewOutput, reserve_calls_after=1,
+                max_output_tokens=1800, run_deadline_monotonic=run_deadline_monotonic,
+                system_prompt=(
+                    "Independently check whether any listed finding, including a verbatim "
+                    "combination of earlier findings, fully answers each open deliverable. "
+                    "Check every component, scope, scenario, condition and requested action. "
+                    "Use meaning rather than matching wording or worker tags. A correct piece "
+                    "of a compound answer is insufficient. Never invent a claim or infer "
+                    "coverage from approval alone. Return exact versioned references only. "
+                    "Leave an item unendorsed if any part is absent or unsupported."
+                ),
+            )
+        except (BudgetError, ProviderError, RunDeadlineExceededError):
+            return
+        await self._db.register_reviewer(ReviewerIdentity(
+            run_id=run_id, reviewer_id="reviewer_coverage",
+            role="Deliverable Coverage Reviewer", dimensions=["deliverable_coverage"],
+        ))
+        accepted: dict[str, list[str]] = {}
+        for endorsement in response.parsed.endorsements:
+            claim = eligible.get(endorsement.claim_ref)
+            item = items.get(endorsement.deliverable_id)
+            if claim is None or item is None or not claim_addresses_kind(claim, item, latest):
+                continue
+            await self._db.insert_review_verdict(ReviewVerdict(
+                run_id=run_id, claim_id=claim.claim_id, claim_version=claim.version,
+                reviewer_id="reviewer_coverage", review_dimension="deliverable_coverage",
+                decision=ReviewDecision.APPROVE, rationale=endorsement.rationale,
+                covered_deliverable_refs=[item.deliverable_id],
+            ))
+            accepted.setdefault(item.deliverable_id, []).append(endorsement.claim_ref)
+        await self._db.append_event(ExecutionEvent(
+            run_id=run_id, actor="reviewer_coverage", event_type="coverage_review_completed",
+            message="Checked outstanding deliverables against current reviewed findings.",
+            payload={
+                "endorsed": accepted, "remaining": [key for key in items if key not in accepted],
+            },
+        ))
+
     async def run(
         self,
         prompt: str,
@@ -560,6 +650,10 @@ class NetworkRunner:
                 await self._recover_missing_deliverables(
                     run_id=resolved_run_id, original_prompt=cleaned_prompt, plan=plan,
                     tasks=sched_outcome.tasks_by_id, run_deadline_monotonic=run_deadline_monotonic,
+                )
+                await self._review_remaining_coverage(
+                    run_id=resolved_run_id, original_prompt=cleaned_prompt, plan=plan,
+                    run_deadline_monotonic=run_deadline_monotonic,
                 )
 
             trace_snapshot = await self._db.get_run_trace(resolved_run_id)
@@ -779,6 +873,7 @@ class NetworkRunner:
                 model=self._provider.model_name,
                 returned_model=str(returned_models[-1]) if returned_models else None,
                 answer=gate_result.rendered_answer,
+                conversational_answer=gate_result.conversational_answer,
                 missing_information=gate_result.missing_information,
                 assumptions=gate_result.assumptions,
                 confidence_notes=gate_result.confidence_notes,

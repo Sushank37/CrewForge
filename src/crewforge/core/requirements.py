@@ -66,6 +66,7 @@ def reviewed_deliverables(
         if (
             verdict.reviewer_id == claim.author_agent_id
             or verdict.decision != ReviewDecision.APPROVE
+            or verdict.blocking_severity == "blocking"
         ):
             blocked.add(key)
             continue
@@ -91,8 +92,7 @@ def reviewed_deliverables(
         for item_id in approved.get(key, set()):
             item = items.get(item_id)
             if (
-                item and item_id in claim.requirement_refs
-                and claim_addresses_kind(claim, item, latest)
+                item and claim_addresses_kind(claim, item, latest)
             ):
                 covered.setdefault(item_id, []).append(claim)
     return covered

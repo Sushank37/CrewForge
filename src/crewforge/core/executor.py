@@ -9,6 +9,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from crewforge.config import CrewForgeSettings, sanitize_error_message
+from crewforge.conversation import with_conversation_context
 from crewforge.core.budget import BudgetExceededError, BudgetManager, BudgetReservation
 from crewforge.providers.base import (
     ModelProvider,
@@ -83,6 +84,7 @@ class ModelExecutor:
         run_deadline_monotonic: float | None = None,
     ) -> StructuredGenerationResult[T]:
         """Run a structured generation call with per-attempt reservation and bounded retries."""
+        prompt = with_conversation_context(prompt)
         requested_out = max_output_tokens or self._settings.output_limit_for_operation(operation)
         bounded_out = min(requested_out, self._settings.max_output_tokens)
         max_retries = self._settings.max_retries

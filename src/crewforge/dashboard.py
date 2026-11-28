@@ -492,6 +492,23 @@ def create_dashboard_app(
         except Exception as exc:
             return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
 
+    async def compare_run(request: Request) -> JSONResponse:
+        try:
+            result = await registry.get_current_session().compare_chat_run(
+                request.path_params["run_id"],
+            )
+            return JSONResponse(result, status_code=202)
+        except KeyError:
+            return JSONResponse({"error": "No comparable team answer found."}, status_code=404)
+        except Exception as exc:
+            return JSONResponse({"error": sanitize_error_message(str(exc))}, status_code=400)
+
+    async def get_comparison(request: Request) -> JSONResponse:
+        result = registry.get_current_session().get_chat_comparison(request.path_params["run_id"])
+        if result is None:
+            return JSONResponse({"error": "Comparison not found."}, status_code=404)
+        return JSONResponse(result)
+
     async def cancel_run(request: Request) -> JSONResponse:
         run_id = request.path_params["run_id"]
         cancelled = registry.get_current_session().cancel_run(run_id)
@@ -857,6 +874,8 @@ def create_dashboard_app(
         Route("/api/chats/{chat_id}", delete_chat, methods=["DELETE"]),
         Route("/api/chats/{chat_id}/messages", post_chat_message, methods=["POST"]),
         Route("/api/runs/{run_id}/cancel", cancel_run, methods=["POST"]),
+        Route("/api/runs/{run_id}/compare", compare_run, methods=["POST"]),
+        Route("/api/runs/{run_id}/comparison", get_comparison, methods=["GET"]),
         Route("/api/mcp/status", mcp_status, methods=["GET"]),
         *mcp_http_app.routes,
     ]

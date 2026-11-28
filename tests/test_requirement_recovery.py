@@ -8,6 +8,7 @@ from crewforge.config import CrewForgeSettings
 from crewforge.core.budget import BudgetManager
 from crewforge.core.orchestrator import NetworkRunner
 from crewforge.schemas import (
+    CompletenessReviewOutput,
     PlannerOutput,
     ReconciliationOutput,
     ReviewerBatchOutput,
@@ -234,6 +235,9 @@ async def test_feasible_claim_does_not_count_as_optimality_proof(tmp_path):
             )
             reply["missing_requirement_coverage"] = ["deliv_2"]
             return reply
+        if schema is CompletenessReviewOutput:
+            assert "Open deliverables" in prompt
+            return {"endorsements": []}
         assert schema is SynthesisOutput
         return {}
 

@@ -39,6 +39,7 @@ interface Source {
 
 interface GuestResult {
   answer: string;
+  conversational_answer?: string;
   returned_model?: string | null;
   sources: Source[];
   evidence: TraceEvidence[];
@@ -117,7 +118,7 @@ export async function guestRequest<T>(
   );
 }
 
-export function guestPost<T>(path: string, data: Record<string, string>): Promise<T> {
+export function guestPost<T>(path: string, data: Record<string, unknown>): Promise<T> {
   return guestRequest<T>(path, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
   });

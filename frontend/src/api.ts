@@ -69,7 +69,7 @@ export const api = {
     reqJson<{ deleted: boolean }>(`/api/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" }),
   sendMessage: (
     chatId: string,
-    payload: { prompt: string; mode: RunModeType; attachments: Array<{ name: string; content: string }> }
+    payload: { prompt: string; mode: RunModeType; request_id?: string; attachments: Array<{ name: string; content: string }> }
   ) =>
     reqJson<{ chat_id: string; run_id: string; status: string }>(
       `/api/chats/${encodeURIComponent(chatId)}/messages`,
@@ -78,6 +78,12 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       }
+    ),
+  compareRun: (runId: string) =>
+    reqJson<{ run_id: string }>(`/api/runs/${encodeURIComponent(runId)}/compare`, { method: "POST" }),
+  getComparison: (runId: string) =>
+    reqJson<{ status: string; answer: string; error?: string | null }>(
+      `/api/runs/${encodeURIComponent(runId)}/comparison`,
     ),
   cancelRun: (runId: string) =>
     reqJson<{ run_id: string; cancelled: boolean }>(`/api/runs/${encodeURIComponent(runId)}/cancel`, {

@@ -402,6 +402,7 @@ class RunResult(BaseModel):
     model: str = Field(min_length=1)
     returned_model: str | None = None
     answer: str = ""
+    conversational_answer: str | None = None
     missing_information: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     confidence_notes: str | None = None
@@ -683,6 +684,18 @@ class ReviewerBatchOutput(BaseModel):
     solution_challenge: str | None = Field(default=None, max_length=360)
     challenge_calculation: ArithmeticRequest | None = None
     missing_requirement_coverage: list[str] = Field(default_factory=list)
+
+
+class CoverageEndorsement(BaseModel):
+    deliverable_id: str
+    claim_ref: str
+    rationale: str = Field(min_length=1, max_length=250)
+
+
+class CompletenessReviewOutput(BaseModel):
+    """Endorse exact, already-reviewed findings only when they answer entire obligations."""
+
+    endorsements: list[CoverageEndorsement] = Field(default_factory=list, max_length=48)
 
 
 class ReleaseSegment(BaseModel):

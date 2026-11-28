@@ -35,6 +35,7 @@ from crewforge.config import (
     configure_logging,
     sanitize_error_message,
 )
+from crewforge.conversation import build_conversation_context, conversation_context
 from crewforge.core.baseline import BaselineRunner, build_provider_from_settings
 from crewforge.core.budget import BudgetManager, UnifiedBudgetAuthority
 from crewforge.core.orchestrator import NetworkRunner
@@ -295,6 +296,24 @@ class PublicJobManager:
                 """
             )
             conn.execute("DROP INDEX IF EXISTS idx_public_jobs_idempotency")
+            for name in ("guest_chat_id", "guest_request_json", "conversation_context"):
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE public_jobs ADD COLUMN {name} TEXT")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS guest_chats (
+                    chat_id TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                INSERT OR IGNORE INTO guest_chats (chat_id, owner, created_at)
+                SELECT task_id, guest_owner, created_at FROM public_jobs
+                WHERE guest_owner IS NOT NULL AND mode = 'network' AND guest_chat_id IS NULL
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_public_jobs_guest_chat
+                ON public_jobs (guest_owner, guest_chat_id, created_at)
+                WHERE guest_chat_id IS NOT NULL
+            """)
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_public_jobs_guest_idempotency
@@ -351,19 +370,142 @@ class PublicJobManager:
         row = self._get_job_row(task_id)
         return row if row is not None and row["guest_owner"] == guest_owner else None
 
+    def create_guest_chat(self, owner: str) -> dict[str, str]:
+        chat_id = f"chat_{secrets.token_hex(16)}"
+        now = _utc_iso()
+        conn = self._connect()
+        try:
+            conn.execute("INSERT INTO guest_chats VALUES (?, ?, ?)", (chat_id, owner, now))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"chat_id": chat_id, "title": "New chat"}
+
+    def _guest_chat_rows(self, owner: str, chat_id: str) -> list[dict[str, Any]] | None:
+        conn = self._connect()
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM guest_chats WHERE chat_id = ? AND owner = ?", (chat_id, owner)
+            ).fetchone():
+                return None
+            return [
+                dict(row) for row in conn.execute(
+                    """SELECT * FROM public_jobs WHERE guest_owner = ?
+                       AND (guest_chat_id = ? OR (guest_chat_id IS NULL AND task_id = ?))
+                       AND mode = 'network' ORDER BY created_at, task_id""",
+                    (owner, chat_id, chat_id),
+                )
+            ]
+        finally:
+            conn.close()
+
+    def list_guest_chats(self, owner: str) -> list[dict[str, str]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT chat_id,
+                   (SELECT prompt FROM public_jobs WHERE guest_owner = owner
+                    AND (guest_chat_id = chat_id OR (guest_chat_id IS NULL AND task_id = chat_id))
+                    AND mode = 'network'
+                    ORDER BY created_at, task_id LIMIT 1) AS prompt
+                   FROM guest_chats WHERE owner = ? ORDER BY created_at DESC LIMIT 100""",
+                (owner,),
+            )
+            return [
+                {"chat_id": row["chat_id"], "title": self._chat_title(row["prompt"])}
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _chat_title(prompt: str | None) -> str:
+        return prompt.splitlines()[0][:64] if prompt else "New chat"
+
+    def get_guest_chat(self, owner: str, chat_id: str) -> dict[str, Any] | None:
+        rows = self._guest_chat_rows(owner, chat_id)
+        if rows is None:
+            return None
+        conn = self._connect()
+        try:
+            comparisons = dict(conn.execute(
+                "SELECT idempotency_key, task_id FROM public_jobs WHERE guest_owner = ? "
+                "AND mode = 'baseline' AND idempotency_key LIKE 'guest-comparison:%'",
+                (owner,),
+            ).fetchall())
+        finally:
+            conn.close()
+        turns = []
+        for row in rows:
+            payload = json.loads(row["result_json"] or "{}")
+            submitted = json.loads(row["guest_request_json"] or row["reference_documents_json"])
+            turns.append({
+                "message_id": (row["idempotency_key"] or row["task_id"]).rsplit(":", 1)[-1],
+                "task_id": row["task_id"], "prompt": row["prompt"], "status": row["status"],
+                "answer": payload.get("conversational_answer") or payload.get("answer", ""),
+                "error": row["error"],
+                "attachment_names": [d["title"] for d in submitted],
+                "comparison_id": comparisons.get(f"guest-comparison:{row['task_id']}"),
+            })
+        return {"chat_id": chat_id, "title": self._chat_title(rows[0]["prompt"] if rows else None),
+                "turns": turns}
+
+    async def enqueue_guest_message(
+        self, *, owner: str, chat_id: str, prompt: str, request_id: str,
+        documents: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        rows = self._guest_chat_rows(owner, chat_id)
+        if rows is None:
+            return None
+        normalized = _normalize_reference_documents(documents)
+        supplied = json.dumps(
+            [{"title": d.title, "content": d.content} for d in normalized], ensure_ascii=False,
+        )
+        key = f"guest-message:{chat_id}:{request_id}"
+        for row in rows:
+            if row["idempotency_key"] == key:
+                if row["prompt"] != prompt.strip() or row["guest_request_json"] != supplied:
+                    raise ValueError("This message identifier already has different content.")
+                return {"accepted": True, "task_id": row["task_id"], "deduplicated": True}
+        if any(row["status"] in {"queued", "running"} for row in rows):
+            raise ValueError("Wait for the current reply or stop it before sending another.")
+        history = []
+        attachments = {}
+        for row in rows:
+            response = json.loads(row["result_json"] or "{}")
+            answer = response.get("conversational_answer") or response.get("answer", "")
+            history.append((row["prompt"], answer))
+            for d in json.loads(row["guest_request_json"] or row["reference_documents_json"]):
+                attachments[(d["title"], d["content"])] = d
+        for doc in json.loads(supplied):
+            attachments[(doc["title"], doc["content"])] = doc
+        ctx = build_conversation_context(history)
+        # Original requests can be cited in follow-ups. Previous assistant text only appears
+        # in dialogue context and cannot become a source. Later corrections take precedence.
+        previous_requests = [
+            {"title": f"Earlier user message {idx}", "content": request}
+            for idx, (request, _) in enumerate(history, 1)
+        ]
+        return await self.enqueue_task(
+            prompt=prompt, reference_documents=[*attachments.values(), *previous_requests],
+            mode="network", idempotency_key=key, guest_owner=owner, guest_chat_id=chat_id,
+            guest_request_json=supplied, context=ctx,
+        )
+
     async def compare_guest_job(self, task_id: str, guest_owner: str) -> dict[str, Any] | None:
         """Reuse the original inputs without exposing them or accepting replacements."""
         row = self._visible_job(task_id, guest_owner)
         if row is None:
             return None
-        if row["mode"] != "network":
-            raise ValueError("Select a team run to compare.")
+        if row["mode"] != "network" or row["status"] not in {"completed", "partial"}:
+            raise ValueError("Select a finished team answer to compare.")
         return await self.enqueue_task(
             prompt=row["prompt"],
-            reference_documents=json.loads(row["reference_documents_json"]),
             mode="baseline",
             idempotency_key=f"guest-comparison:{task_id}",
-            guest_owner=guest_owner,
+            guest_owner=guest_owner, context=row["conversation_context"] or "",
+            snapshot_documents=[ReferenceDocument.model_validate(d)
+                                for d in json.loads(row["reference_documents_json"])],
         )
 
     def _update_job(self, task_id: str, **fields: Any) -> None:
@@ -413,6 +555,10 @@ class PublicJobManager:
         mode: Literal["network", "baseline"],
         idempotency_key: str | None = None,
         guest_owner: str | None = None,
+        guest_chat_id: str | None = None,
+        guest_request_json: str | None = None,
+        context: str = "",
+        snapshot_documents: list[ReferenceDocument] | None = None,
     ) -> dict[str, Any]:
         """Validate inputs, persist a queued job, launch background execution, and return ID."""
         cleaned_prompt = (prompt or "").strip()
@@ -425,7 +571,8 @@ class PublicJobManager:
             cleaned_idem = idempotency_key.strip()
             if len(cleaned_idem) > 128:
                 raise ValueError("idempotency_key exceeds 128 character limit.")
-        docs = _normalize_reference_documents(reference_documents)
+        docs = (snapshot_documents if snapshot_documents is not None
+                else _normalize_reference_documents(reference_documents))
         docs_json = json.dumps([d.model_dump(mode="json") for d in docs])
         req_hash = _compute_stable_request_hash(mode, cleaned_prompt, docs)
         task_id = f"tsk_pub_{secrets.token_hex(16)}"
@@ -490,10 +637,12 @@ class PublicJobManager:
                     INSERT INTO public_jobs (
                         task_id, mode, status, prompt, reference_documents_json,
                         idempotency_key, request_hash, guest_owner,
+                        guest_chat_id, guest_request_json, conversation_context,
                         current_stage, progress, provider, model,
                         result_json, error, created_at, updated_at, completed_at
                     ) VALUES (
-                        ?, ?, 'queued', ?, ?, ?, ?, ?, 'queued', 0.0, ?, ?, NULL, NULL, ?, ?, NULL
+                        ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, 'queued',
+                        0.0, ?, ?, NULL, NULL, ?, ?, NULL
                     )
                     """,
                     (
@@ -504,6 +653,9 @@ class PublicJobManager:
                         cleaned_idem,
                         req_hash,
                         guest_owner,
+                        guest_chat_id,
+                        guest_request_json,
+                        context,
                         provider_name,
                         model_name,
                         now,
@@ -551,11 +703,13 @@ class PublicJobManager:
         db: Database | None = None
         provider: ModelProvider | None = None
         start_perf = time.perf_counter()
+        context_token = conversation_context.set("")
         try:
             async with sem:
                 row = self._get_job_row(task_id)
                 if row is None or row["status"] == "cancelled":
                     return
+                conversation_context.set(row["conversation_context"] or "")
                 logger.info(
                     "Starting public task %s (mode=%s, provider=%s, model=%s)",
                     task_id,
@@ -610,6 +764,8 @@ class PublicJobManager:
                     return
 
                 payload = await self._format_result_payload(db, task_id, run_res, docs)
+                if row["guest_owner"] and run_res.conversational_answer:
+                    payload["conversational_answer"] = run_res.conversational_answer
                 final_status = self._map_run_status(run_res.status)
                 safe_err = sanitize_error_message(run_res.error) if run_res.error else None
                 self._update_job(
@@ -655,6 +811,7 @@ class PublicJobManager:
                 completed_at=_utc_iso(),
             )
         finally:
+            conversation_context.reset(context_token)
             if provider is not None and hasattr(provider, "aclose"):
                 with contextlib.suppress(Exception):
                     await provider.aclose()  # type: ignore[attr-defined]

@@ -5,6 +5,7 @@ import re
 import pytest
 
 from crewforge.schemas import (
+    CompletenessReviewOutput,
     PlannerOutput,
     ReconciliationOutput,
     ReviewerBatchOutput,
@@ -141,6 +142,9 @@ async def test_numerical_challenge_never_forwards_unverified_direction(tmp_path,
         if model is ReconciliationOutput:
             seen.append(text)
             return {}
+        if model is CompletenessReviewOutput:
+            assert "Open deliverables" in text
+            return {"endorsements": []}
         assert model is SynthesisOutput
         return {}
 

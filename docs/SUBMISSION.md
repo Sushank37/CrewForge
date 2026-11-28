@@ -3,13 +3,15 @@
 **Team:** Git Commit  
 **Challenge:** Chain of Command — Multi-Agent Systems (SEED Hackathon 2026)  
 **Repository:** https://github.com/Sushank37/CrewForge  
-**Frozen Core Engine Commit:** `612f64e4c4b55e8ea0b1121ef92e548e1a330d4e`
+**Deployed release:** See [live health](https://crewforge-production-1e4fcb21.up.railway.app/health).
 
 ---
 
 ## 1. Project Summary
 
-CrewForge is a model-agnostic, self-assembling multi-agent intelligence network exposed through the **Model Context Protocol (MCP)** (`solve`, `baseline`, `trace`) and paired with **CrewForge Mission Control**, a read-only localhost observability dashboard for inspecting agent topology, claim/evidence lineage, deterministic arithmetic, independent review, and Honesty Gate release decisions.
+CrewForge is a conversational multi-agent assistant. The [hosted guest chat](https://crewforge-production-1e4fcb21.up.railway.app/) works without an account or a provider key. Each message recruits and runs a team. Follow-ups retain the conversation and reference documents within explicit context limits. The gamified agent office and verification details are available alongside the conversation.
+
+Judges can connect directly to the [anonymous Streamable HTTP MCP endpoint](https://crewforge-production-1e4fcb21.up.railway.app/mcp). Its six tools cover execution, status, results, traces, cancellation and the mandatory single-agent comparison. The website offers the same comparison on demand using a frozen input snapshot. Authenticated workspaces retain separate chat storage and private settings.
 
 ## 2. Problem Addressed
 

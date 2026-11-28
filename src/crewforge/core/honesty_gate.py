@@ -122,6 +122,7 @@ class HonestyGateResult:
     """Validated release content, verification summary, and persisted gate record."""
 
     rendered_answer: str
+    conversational_answer: str = ""
     referenced_claim_ids: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     missing_information: list[str] = field(default_factory=list)
@@ -999,12 +1000,12 @@ class HonestyGate:
                 lines.append(f"- {seg.text} [advisory; {refs}]")
             sections.append("\n".join(lines))
 
+        clean_points: list[str] = []
         if approved_accepted:
             seen_norms = {
                 _canonical_norm(member.statement)
                 for _, members in approved_conditional for member in members
             }
-            clean_points: list[str] = []
             for _, members in approved_accepted:
                 for member in members:
                     parts = [latest_by_id[p.claim_id].statement for p in member.premise_refs]
@@ -1099,6 +1100,34 @@ class HonestyGate:
             sections.append("\n".join(lines))
 
         rendered_answer = "\n\n".join(sections)
+
+        # The web conversation uses the same audited text without internal trace annotations.
+        conversational: dict[str, str] = {}
+        for text in clean_points:
+            conversational.setdefault(_canonical_norm(text), text)
+        for segment, claims in approved_conditional:
+            conditions = list(dict.fromkeys(a for c in claims for a in c.assumptions if a))
+            text = segment.text + (f" (assuming {', '.join(conditions)})" if conditions else "")
+            conversational.setdefault(_canonical_norm(segment.text), text)
+        for segment, _ in approved_recommendations:
+            conversational.setdefault(_canonical_norm(segment.text), segment.text)
+        user_answer = list(conversational.values())
+        if not user_answer:
+            user_answer.append("I couldn’t verify an answer from the information available.")
+        gaps = [
+            d.text for item in req_items if item.status != "answered"
+            for d in plan.deliverables
+            if d.requirement_ref == item.requirement_id
+            and d.deliverable_id not in item.verified_deliverable_refs
+        ]
+        if gaps:
+            user_answer.append("I couldn’t fully verify the following:\n"
+                               + "\n".join(f"- {text}" for text in gaps))
+        if incomplete_tasks or is_partial_run:
+            user_answer.append("I couldn’t finish every check in this run.")
+        if (laundering_detected or rejected_segments or rejected_claim_refs) and not gaps:
+            user_answer.append("I’ve left out conclusions I couldn’t verify.")
+
 
         has_usable_output = bool(
             approved_accepted or approved_conditional or approved_recommendations
@@ -1198,6 +1227,7 @@ class HonestyGate:
 
         return HonestyGateResult(
             rendered_answer=rendered_answer,
+            conversational_answer="\n\n".join(user_answer),
             referenced_claim_ids=used_claim_ids,
             assumptions=clean_assumptions,
             missing_information=clean_missing,

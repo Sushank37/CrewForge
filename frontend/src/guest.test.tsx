@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { officeTrace, type GuestJob } from "./guest";
+import { historicalAnswer } from "./conversation";
 
 const anonymous = {
   authenticated: false, auth_required: true, google_enabled: false,
@@ -70,6 +71,7 @@ describe("public guest experience", () => {
   it("opens the office without logging in and clearly reports paused execution", async () => {
     const fetchMock = vi.fn(async (path: string) => {
       if (path === "/api/auth/me") return json(anonymous);
+      if (path === "/api/guest/chats") return json({ chats: [] });
       if (path === "/api/guest/session") return json({
         available: false, message: "Guest execution is paused while paid inference is disabled.",
       });
@@ -81,12 +83,12 @@ describe("public guest experience", () => {
     await click("Light mode");
     expect(document.documentElement.dataset.theme).toBe("light");
     await click("Continue as Guest");
-    expect(container.querySelector("h1")?.textContent).toBe("Guest office");
+    expect(container.querySelector("h1")?.textContent).toBe("What can we help you with?");
     expect(container.textContent).toContain("paid inference is disabled");
-    expect(findButton("Run with agent team").disabled).toBe(true);
-    expect(container.textContent).toContain("Office standing by.");
+    expect(findButton("Send").disabled).toBe(true);
+    expect(container.textContent).toContain("New Chat");
     expect(container.querySelector('a[href$="/mcp"]')).not.toBeNull();
-    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual(["/api/auth/me", "/api/guest/session"]);
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual(["/api/auth/me", "/api/guest/session", "/api/guest/chats"]);
 
     await click("Private workspace");
     expect(container.querySelector('input[type="email"]')).not.toBeNull();
@@ -95,7 +97,7 @@ describe("public guest experience", () => {
   });
 
   it("follows the owned team run, requests the exact-input comparison and renders measured differences", async () => {
-    sessionStorage.setItem("crewforge.guest.network", "team");
+    sessionStorage.setItem("crewforge.guest.chat", "previous");
     const baseline = {
       ...teamJob,
       status: { ...teamJob.status, task_id: "single", mode: "baseline", completed_at: "2026-01-01T10:00:01Z" },
@@ -110,6 +112,14 @@ describe("public guest experience", () => {
     const fetchMock = vi.fn(async (path: string, options?: RequestInit) => {
       if (path === "/api/auth/me") return json(anonymous);
       if (path === "/api/guest/session") return json({ available: true, message: null });
+      if (path === "/api/guest/chats") return json({
+        chats: [{ chat_id: "newer", title: "Another chat" }, { chat_id: "previous", title: "My task" }],
+      });
+      if (path === "/api/guest/chats/previous") return json({
+        chat_id: "previous", title: "My task",
+        turns: [{ message_id: "message", task_id: "team", prompt: "What is the total?",
+          status: "completed", answer: teamJob.result!.answer, attachment_names: [], comparison_id: null }],
+      });
       if (path === "/api/guest/jobs/team") return json(teamJob);
       if (path === "/api/guest/jobs/single") return json(baseline);
       if (path === "/api/guest/jobs") {
@@ -122,14 +132,27 @@ describe("public guest experience", () => {
     await act(async () => root.render(<App />));
     await click("Continue as Guest");
     expect(container.textContent).toContain("The verified team total is 42.");
+    expect(container.textContent).not.toContain("7*6 = 42");
+    expect(container.querySelector("table")).toBeNull();
+    await click("Sources & details");
     expect(container.textContent).toContain("7*6 = 42");
     expect(container.textContent).toContain("7 orders at 6 each");
     expect(container.textContent).toContain("Total is ready.");
-    await click("Run same task with single agent");
+    await click("Compare with single agent");
     expect(container.textContent).toContain("Single-agent answer.");
     expect(container.textContent).toContain("Not performed");
     const cells = Array.from(container.querySelectorAll("tbody td")).map((cell) => cell.textContent);
     expect(cells).toEqual(["2.00 s", "1.00 s", "7", "2", "123", "—", "$0.0020000", "—"]);
+  });
+
+  it("retains scenario boundaries and uncertainty while hiding legacy trace formatting", () => {
+    const view = historicalAnswer("**Conditional / Qualified Statements:**\n"
+      + "- If approved, proceed. [clm_old@v1 (supported)]\n\n"
+      + "**Calculations and Sources**\n- clm_old@v1 sources: doc_1.\n\n"
+      + "**Unresolved / Withheld Items:**\n- The inspection date is unknown.");
+    expect(view).toContain("If approved, proceed.");
+    expect(view).toContain("The inspection date is unknown.");
+    expect(view).not.toContain("clm_old");
   });
 
   it("maps the persisted events, assignments and messages without inferring a roster", () => {

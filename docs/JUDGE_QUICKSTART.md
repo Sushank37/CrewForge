@@ -1,8 +1,14 @@
 # CrewForge — Judge Quickstart (SEED Hackathon 2026)
 
-CrewForge exposes a **dedicated public, unauthenticated Streamable HTTP MCP endpoint** (`/mcp`) for official SEED Hackathon 2026 judging — judges need **only the public HTTPS URL** (`https://<cloud-host>/mcp`), with **no login, password, API key, token, VPN, tunnel, or IP/country restrictions**.
+CrewForge exposes a **dedicated public, unauthenticated Streamable HTTP MCP endpoint** (`/mcp`) for official SEED Hackathon 2026 judging — judges need **only the public HTTPS URL** ([public Railway endpoint](https://crewforge-production-1e4fcb21.up.railway.app/mcp)), with **no login, password, API key, token, VPN, tunnel, or IP/country restrictions**.
 
-> **Note:** Previous tunnel/token instructions are superseded for official judging. The separate browser workspace (`crewforge-dashboard`) remains authenticated and isolated from the public evaluation service.
+> The [hosted website](https://crewforge-production-1e4fcb21.up.railway.app/) has an anonymous guest chat and a separate authenticated private workspace.
+
+## Try the hosted conversation
+
+Choose **Continue as Guest** and send a message. Each message uses the agent team. Follow up in the same chat or choose **New Chat** for a fresh conversation. You can attach text reference documents in the composer. Open **Agent activity** to watch the team and **Sources & details** to inspect a response.
+
+For the required same-task comparison, open **More → Compare with single agent** on a finished answer. The comparison uses the original message, context and documents. It runs only when requested.
 
 ---
 
@@ -14,7 +20,7 @@ Configure any MCP-compatible client (Claude Desktop, Cursor, ChatGPT MCP connect
 {
   "mcpServers": {
     "crewforge-public": {
-      "url": "https://<cloud-host>/mcp"
+      "url": "https://crewforge-production-1e4fcb21.up.railway.app/mcp"
     }
   }
 }

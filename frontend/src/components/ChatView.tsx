@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { ChatDetail, RunModeType, TracePayload } from "../types";
+import type { ChatDetail, ChatMessage, TracePayload } from "../types";
+import { acknowledgeSubmission, historicalAnswer, submissionKey } from "../conversation";
+import { ConversationComposer, type ChatAttachment } from "./ConversationComposer";
 import { AiOfficeWorkspace } from "./AiOfficeWorkspace";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
@@ -18,12 +20,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [chat, setChat] = useState<ChatDetail | null>(null);
   const [activeTrace, setActiveTrace] = useState<TracePayload | null>(null);
   const [prompt, setPrompt] = useState("");
-  const [mode, setMode] = useState<RunModeType>("network");
-  const [attachments, setAttachments] = useState<Array<{ name: string; content: string }>>([]);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sendingLock = useRef(false);
+  const [showActivity, setShowActivity] = useState(false);
+  const [comparison, setComparison] = useState<{ original: ChatMessage; runId: string } | null>(null);
+  const timelineEnd = useRef<HTMLDivElement>(null);
 
   const activeRunMsg = chat?.messages.find((m) => m.role === "assistant" && m.status === "running") || null;
   const latestAssistantRunId =
@@ -36,6 +40,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
       return;
     }
     setError(null);
+    setComparison(null);
+    setShowActivity(false);
+    setPrompt("");
+    setAttachments([]);
     api
       .getChat(chatId)
       .then(setChat)
@@ -43,7 +51,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   }, [chatId]);
 
   useEffect(() => {
-    if (!latestAssistantRunId) {
+    if (!latestAssistantRunId || !showActivity) {
       setActiveTrace(null);
       return;
     }
@@ -59,7 +67,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [latestAssistantRunId]);
+  }, [latestAssistantRunId, showActivity]);
 
   useEffect(() => {
     if (!chatId || !activeRunMsg) return;
@@ -74,7 +82,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
         if (cancelled) return;
         setChat(updated);
         const runId = activeRunMsg.run_id;
-        if (runId) {
+        if (runId && showActivity) {
           const delta = await api.getLiveRun(runId, lastSeq).catch(() => null);
           if (cancelled) return;
           if (delta) {
@@ -126,26 +134,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
       cancelled = true;
       if (timerId !== undefined) window.clearTimeout(timerId);
     };
-  }, [chatId, activeRunMsg?.message_id, activeRunMsg?.run_id, onChatUpdated]);
+  }, [chatId, activeRunMsg?.message_id, activeRunMsg?.run_id, onChatUpdated, showActivity]);
 
-  const handleAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
-    const next: Array<{ name: string; content: string }> = [];
-    for (const f of Array.from(files).slice(0, 5)) {
-      const content = await f.text();
-      next.push({ name: f.name, content });
-    }
-    setAttachments((prev) => [...prev, ...next].slice(0, 5));
-    e.target.value = "";
-  };
+  useEffect(() => {
+    timelineEnd.current?.scrollIntoView?.({ block: "nearest" });
+  }, [chat?.messages.length, activeRunMsg?.status]);
 
   const handleSend = async () => {
-    if (!chatId || !prompt.trim() || sending || activeRunMsg) return;
+    if (!chatId || !prompt.trim() || sendingLock.current || activeRunMsg) return;
+    sendingLock.current = true;
     setSending(true);
     setError(null);
     try {
-      await api.sendMessage(chatId, { prompt: prompt.trim(), mode, attachments });
+      const payload = { prompt: prompt.trim(), mode: "network" as const, attachments };
+      const request_id = await submissionKey(`private.${chatId}`, payload);
+      await api.sendMessage(chatId, { ...payload, request_id });
+      acknowledgeSubmission(`private.${chatId}`);
       setPrompt("");
       setAttachments([]);
       const updated = await api.getChat(chatId);
@@ -154,6 +158,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      sendingLock.current = false;
       setSending(false);
     }
   };
@@ -174,154 +179,137 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setTimeout(() => setCopiedId(null), 1500);
   };
 
-  return (
-    <div className="chat-layout">
-      <AiOfficeWorkspace
-        trace={activeTrace}
-        isRunning={Boolean(activeRunMsg)}
-        mode={activeRunMsg?.mode || mode}
-      />
+  async function compare(message: ChatMessage) {
+    if (!message.run_id || sendingLock.current) return;
+    sendingLock.current = true;
+    try {
+      const runId = message.comparison_run_id ?? (await api.compareRun(message.run_id)).run_id;
+      setComparison({ original: message, runId });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally { sendingLock.current = false; }
+  }
 
-      {error && <div className="alert-error">{error}</div>}
-
-      <div className="chat-messages">
-        {(!chat || chat.messages.length === 0) && (
-          <div className="chat-empty">
-            <h2>Ask CrewForge anything</h2>
-            <p className="muted">
-              Submit a question or attach a reference document. Your Lead Orchestrator will assemble
-              specialists, verify claims, and return a grounded answer.
-            </p>
-          </div>
-        )}
-
-        {chat?.messages.map((m) => (
-          <div key={m.message_id} className={`msg-row msg-${m.role}`}>
-            <div className={`msg-bubble msg-bubble-${m.role}`}>
-              <div className="msg-meta">
-                <strong>{m.role === "user" ? "You" : "CrewForge"}</strong>
-                <span className="muted">
-                  {m.mode === "baseline" ? "Baseline" : "Agent Network"} · {m.status}
-                </span>
-              </div>
-
-              {m.attachments.length > 0 && (
-                <div className="att-row">
-                  {m.attachments.map((a) => (
-                    <span key={a.name} className="att-chip">
-                      📎 {a.name}
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              {m.status === "running" && (
-                <div className="muted">Team is working... watch the AI Office above.</div>
-              )}
-
-              {m.error && <div className="alert-error">{m.error}</div>}
-
-              {m.content && <MarkdownRenderer content={m.content} />}
-
-              {m.role === "assistant" && m.status !== "running" && (
-                <div className="msg-actions">
-                  {m.content && (
-                    <button
-                      type="button"
-                      className="btn-ghost btn-xs"
-                      onClick={() => copyMsg(m.message_id, m.content)}
-                    >
-                      {copiedId === m.message_id ? "Copied!" : "Copy"}
-                    </button>
-                  )}
-                  {m.run_id && (
-                    <button
-                      type="button"
-                      className="btn-ghost btn-xs"
-                      onClick={() => onInspectRun(m.run_id!)}
-                    >
-                      Inspect in Mission Control →
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="composer-wrap">
-        {attachments.length > 0 && (
-          <div className="att-row" style={{ marginBottom: 6 }}>
-            {attachments.map((a, idx) => (
-              <span key={`${a.name}-${idx}`} className="att-chip">
-                📎 {a.name}{" "}
-                <button
-                  type="button"
-                  className="att-rm"
-                  onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
-                >
-                  ×
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-
-        <div className="composer-box">
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept=".md,.txt,.csv,.json"
-            className="hidden"
-            onChange={handleAttach}
-          />
-          <button
-            type="button"
-            className="btn-icon"
-            title="Attach reference document"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            📎
-          </button>
-          <textarea
-            rows={2}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            placeholder="Ask CrewForge anything..."
-          />
-          <select
-            aria-label="Execution mode"
-            value={mode}
-            onChange={(e) => setMode(e.target.value as RunModeType)}
-            className="select-compact"
-          >
-            <option value="network">Network</option>
-            <option value="baseline">Baseline</option>
-          </select>
-          {activeRunMsg ? (
-            <button type="button" className="btn-danger btn-sm" onClick={handleCancel}>
-              Stop
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn-primary btn-sm"
-              disabled={sending || !prompt.trim()}
-              onClick={handleSend}
-            >
-              Send
-            </button>
-          )}
-        </div>
-      </div>
+  return <div className="chat-layout private-conversation">
+    <div className="conversation-bar">
+      <span>{chat?.title ?? "CrewForge"}</span>
+      {latestAssistantRunId && <button type="button" className="public-secondary"
+        onClick={() => setShowActivity(!showActivity)} aria-expanded={showActivity}>Agent activity</button>}
     </div>
-  );
+    {error && <div className="alert-error" role="alert">{error}</div>}
+    {comparison ? <PrivateComparison runId={comparison.runId} original={comparison.original}
+      onBack={() => setComparison(null)} /> : <>
+      <div className="chat-messages conversation-timeline" aria-label="Conversation">
+        {(!chat || chat.messages.length === 0) && <div className="conversation-welcome">
+          <span aria-hidden="true" className="brand-badge">CF</span>
+          <h1>What can we help you with?</h1>
+          <p>Ask a question or bring a document. CrewForge assembles a team for each message.</p>
+        </div>}
+        {chat?.messages.map((message) => <article key={message.message_id}
+          className={message.role === "user" ? "conversation-user" : "conversation-answer"}>
+          <strong>{message.role === "user" ? "You" : "CrewForge"}</strong>
+          {!!message.attachments.length && <div className="att-row">{message.attachments.map((a, i) =>
+            <span key={`${a.name}-${i}`} className="att-chip">{a.name}</span>
+          )}</div>}
+          {message.status === "running" && <p role="status">The team is working…</p>}
+          {message.status === "cancelled" && !message.content && <p>Generation stopped.</p>}
+          {message.error && <p role="alert">{message.error}</p>}
+          {message.content && (message.role === "user" ? <p>{message.content}</p>
+            : <MarkdownRenderer content={historicalAnswer(message.content)} />)}
+          {message.role === "assistant" && message.content && message.status !== "running" &&
+            <div className="guest-actions">
+              <button type="button" className="public-secondary"
+                onClick={() => copyMsg(message.message_id, historicalAnswer(message.content))}>
+                {copiedId === message.message_id ? "Copied" : "Copy"}
+              </button>
+              {message.run_id && <button type="button" className="public-secondary"
+                onClick={() => onInspectRun(message.run_id!)}>Sources & details</button>}
+              {message.mode === "network" && ["completed", "partial"].includes(message.status) &&
+                <details className="conversation-more"><summary>More</summary>
+                  <button type="button" className="public-secondary" onClick={() => void compare(message)}>
+                    Compare with single agent
+                  </button>
+                </details>}
+            </div>}
+        </article>)}
+        <div ref={timelineEnd} />
+      </div>
+      <ConversationComposer prompt={prompt} setPrompt={setPrompt} attachments={attachments}
+        setAttachments={setAttachments} onError={setError} onSend={() => void handleSend()}
+        onStop={activeRunMsg ? () => void handleCancel() : undefined}
+        disabled={!chatId || chat?.chat_id !== chatId || sending || Boolean(activeRunMsg)} />
+    </>}
+    {showActivity && <aside className="conversation-activity" aria-label="Agent activity">
+      <button type="button" className="public-secondary" onClick={() => setShowActivity(false)}>Close activity</button>
+      <AiOfficeWorkspace trace={activeTrace} isRunning={Boolean(activeRunMsg)} mode="network" />
+    </aside>}
+  </div>;
 };
+
+function PrivateComparison({ runId, original, onBack }: {
+  runId: string; original: ChatMessage; onBack: () => void;
+}) {
+  const [single, setSingle] = useState<TracePayload | null>(null);
+  const [singleAnswer, setSingleAnswer] = useState<{ status: string; answer: string } | null>(null);
+  const [team, setTeam] = useState<TracePayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let open = true;
+    let timer: number | undefined;
+    async function load() {
+      try {
+        const reply = await api.getComparison(runId);
+        if (!open) return;
+        setSingleAnswer(reply);
+        if (reply.error) setError(reply.error);
+        if (reply.status !== "running") {
+          const run = await api.getLiveRun(runId).catch(() => null);
+          if (open) setSingle(run);
+          return;
+        }
+      } catch (err) {
+        if (open) setError((err as Error).message);
+      }
+      if (open) timer = window.setTimeout(load, 1200);
+    }
+    if (original.run_id) void api.getLiveRun(original.run_id).then((run) => {
+      if (open) setTeam(run);
+    }).catch(() => {});
+    void load();
+    return () => { open = false; window.clearTimeout(timer); };
+  }, [runId, original.run_id]);
+
+  function measurements(run: TracePayload | null) {
+    const usage = run?.usage;
+    return [
+      run?.latency_ms == null ? "—" : `${(run.latency_ms / 1000).toFixed(2)} s`,
+      usage?.model_calls ?? "—",
+      usage?.usage_reported ? (usage.total_tokens ?? ((usage.input_tokens ?? 0) + (usage.output_tokens ?? 0))) : "—",
+      usage?.usage_reported && usage.actual_cost_usd != null ? `$${usage.actual_cost_usd.toFixed(7)}` : "—",
+    ];
+  }
+
+  return <section className="public-card guest-comparison">
+    <button type="button" className="public-secondary" onClick={onBack}>Back to chat</button>
+    <h1>Compare answers</h1>
+    <div className="guest-results">
+      <article><h2>Agent team</h2><MarkdownRenderer content={historicalAnswer(original.content)} /></article>
+      <article><h2>Single agent</h2>
+        {error && <p role="alert">{error}</p>}
+        {singleAnswer?.answer ? <MarkdownRenderer content={singleAnswer.answer} />
+          : !singleAnswer || singleAnswer.status === "running"
+            ? <p role="status">The single agent is working…
+              <button type="button" className="public-secondary" onClick={() => {
+                void api.cancelRun(runId).catch((err) => setError(err.message));
+              }}>Stop</button>
+            </p> : <p>{singleAnswer.status === "cancelled" ? "Generation stopped." : "No answer was returned."}</p>}
+      </article>
+    </div>
+    <table><thead><tr><th scope="col">Metric</th><th scope="col">Agent team</th>
+      <th scope="col">Single agent</th></tr></thead>
+      <tbody>{["Elapsed time", "Model calls", "Total tokens", "Actual cost"].map((label, idx) =>
+        <tr key={label}><th scope="row">{label}</th><td>{measurements(team)[idx]}</td>
+          <td>{measurements(single)[idx]}</td></tr>)}</tbody>
+    </table>
+  </section>;
+}

@@ -40,7 +40,9 @@ export const App: React.FC = () => {
         setActiveChatId(created.chat_id);
       } else {
         setActiveChatId((prev) =>
-          prev && res.chats.some((c) => c.chat_id === prev) ? prev : res.chats[0].chat_id
+          prev && res.chats.some((c) => c.chat_id === prev) ? prev
+            : res.chats.find((c) => c.chat_id === sessionStorage.getItem("crewforge.private.chat"))?.chat_id
+              ?? res.chats[0].chat_id
         );
       }
     } catch {
@@ -77,6 +79,10 @@ export const App: React.FC = () => {
   useEffect(() => {
     document.documentElement.classList.toggle("reduced-motion", reducedMotion);
   }, [reducedMotion]);
+
+  useEffect(() => {
+    if (activeChatId) sessionStorage.setItem("crewforge.private.chat", activeChatId);
+  }, [activeChatId]);
 
   const handleNewChat = async () => {
     const created = await api.createChat("New Chat");

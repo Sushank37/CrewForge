@@ -43,6 +43,7 @@ export interface ChatMessage {
   mode: RunModeType;
   content: string;
   run_id: string | null;
+  comparison_run_id?: string | null;
   status: string;
   attachments: AttachmentMeta[];
   error: string | null;
@@ -205,6 +206,7 @@ export interface TracePayload {
   completed_at?: string | null;
   latency_ms?: number | null;
   usage?: {
+    total_tokens?: number;
     input_tokens?: number;
     output_tokens?: number;
     reasoning_tokens?: number;
