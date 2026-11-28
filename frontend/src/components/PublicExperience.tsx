@@ -351,7 +351,8 @@ export function GuestExperience(props: PublicProps) {
   }, [chatId, busy]);
 
   useEffect(() => {
-    end.current?.scrollIntoView?.({ block: "nearest" });
+    const timeline = end.current?.parentElement;
+    if (last && timeline) timeline.scrollTo?.({ top: timeline.scrollHeight });
   }, [last?.task_id, last?.status, comparison]);
 
   async function perform(work: () => Promise<void>) {

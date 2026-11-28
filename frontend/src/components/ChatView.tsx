@@ -137,7 +137,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   }, [chatId, activeRunMsg?.message_id, activeRunMsg?.run_id, onChatUpdated, showActivity]);
 
   useEffect(() => {
-    timelineEnd.current?.scrollIntoView?.({ block: "nearest" });
+    const timeline = timelineEnd.current?.parentElement;
+    if (chat?.messages.length && timeline) timeline.scrollTo?.({ top: timeline.scrollHeight });
   }, [chat?.messages.length, activeRunMsg?.status]);
 
   const handleSend = async () => {
